@@ -235,3 +235,6 @@ node_modules/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+
+# Great Docs build output (great-docs.yml is committed)
+great-docs/

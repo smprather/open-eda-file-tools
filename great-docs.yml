@@ -1,0 +1,93 @@
+# Great Docs configuration for the Liberty tool.
+# Build: PYTHONPATH=$PWD uvx --from great-docs==0.17.0 --with uvicorn great-docs build
+# Preview: PYTHONPATH=$PWD uvx --from great-docs==0.17.0 --with uvicorn great-docs preview
+
+module: liberty_tools
+display_name: Liberty Tools
+repo: https://github.com/smprather/open-eda-file-tools
+site_url: https://smprather.github.io/open-eda-file-tools/
+
+# The PyPI name belongs to an unrelated project; do not link to it.
+pypi: false
+
+# Use griffe's static analysis. API pages then build without the Rust
+# extension, which keeps the docs CI job independent of the package build.
+dynamic: false
+
+# Keep each class on one page. Split classes get `members: []`, which hides
+# properties such as LibertyDocument.library_name entirely.
+inline_methods: true
+
+# The codebase uses reST roles in prose; parameter sections are written in
+# Google style where they exist.
+parser: google
+
+source:
+  branch: main
+
+# Great Docs extracts one Click command tree; liberty-view is the first
+# [project.scripts] entry and the richer command. The user guide covers both
+# liberty-view and liberty-format.
+cli:
+  enabled: true
+  module: viewer.__main__
+  name: main
+
+user_guide:
+  - section: Guides
+    contents:
+      - installation.qmd
+      - ai-api.qmd
+      - cli.qmd
+      - lef.qmd
+      - def.qmd
+      - tools.qmd
+
+reference:
+  - title: Documents and parsing
+    desc: Parse a library, read its header, and emit it again.
+    contents:
+      - parse_file
+      - LibertyDocument
+      - LibraryIndex
+
+  - title: Cells and pins
+    desc: Navigate the cell hierarchy.
+    contents:
+      - Cell
+      - Pin
+      - Bus
+      - Bundle
+      - BusType
+
+  - title: Timing and power
+    desc: Timing arcs, lookup tables, internal power, and CCS/CCSN data.
+    contents:
+      - TimingArc
+      - TimingTable
+      - InternalPower
+      - CcsnStage
+      - DynamicCurrent
+      - SwitchingGroup
+      - PgCurrent
+      - PgPin
+      - LeakagePower
+      - Ff
+      - Latch
+
+  - title: Boolean logic
+    desc: Parse and reason about Liberty boolean expressions.
+    contents:
+      - BooleanExpression
+
+  - title: Comparison
+    desc: Compare two libraries with arc matching and grid alignment.
+    contents:
+      - compare
+      - Comparison
+      - CompareEntry
+      - ArcKey
+      - UnitMismatch
+      - AxisRoleMismatch
+      - MalformedTable
+      - MinPulseWidth

@@ -6,8 +6,12 @@ Synopsys Liberty `.lib` timing models: it streams Liberty files through a Rust
 backend and exposes a Python API for cells, pins, timing arcs, timing tables,
 and Polars dataframe extraction.
 
-More EDA data-file tools (a VCD toggle-count profiler, a DEF reader, and
-others) will join it in this repository.
+More EDA data-file tools join it in this repository: `lef-tools` parses cell
+LEF libraries and `def-tools` parses and queries DEF designs, both Rust-backed.
+A VCD toggle-count profiler and others are still planned.
+
+The rendered documentation is at
+<https://smprather.github.io/open-eda-file-tools/>.
 
 The Liberty implementation focuses on standard-cell timing, power, and CCS data:
 
@@ -29,16 +33,73 @@ The Liberty implementation focuses on standard-cell timing, power, and CCS data:
 - browser viewer for navigating cells, source text, timing/power tables,
   CCS/CCSN waves, and combinational logic symbols
 
-For LLM/agent-oriented API usage, see [docs/AI_API.md](docs/AI_API.md).
-For the command line tools, see [docs/CLI.md](docs/CLI.md).
+For LLM/agent-oriented API usage, see the
+[AI API guide](https://smprather.github.io/open-eda-file-tools/user-guide/ai-api.html).
+For the command line tools, see the
+[CLI reference](https://smprather.github.io/open-eda-file-tools/user-guide/cli.html).
 The package also ships `py.typed` and `.pyi` stubs for coding tools.
+
+## LEF Tools
+
+The `lef-tools` distribution parses cell LEF libraries into typed macros, pins,
+ports and rectangles. It is the project in `lef_tools/`, keeps its own
+virtualenv, and installs one command. All geometry stays in LEF microns.
+
+```bash
+cd lef_tools
+uv sync --dev
+uv run lef-tools macros --lef sky130_fd_sc_hd.lef
+```
+
+```python
+from lef_tools import parse_lef
+
+library = parse_lef(["cells.lef"], macros=["sky130_fd_sc_hd__buf_1"])
+macro = library.macro("sky130_fd_sc_hd__buf_1")
+print(macro.width_microns, macro.height_microns)
+
+for pin in macro.pins():
+    print(pin.name, pin.direction, pin.use)
+```
+
+## DEF Tools
+
+The `def-tools` distribution parses and queries DEF designs. It is the project
+in `def_tools/` and installs one command:
+
+| Command | What it does |
+|---|---|
+| `instances` | Emit placed instance bounding boxes as CSV. |
+| `net-shapes` | Emit routed shape bboxes for one net and layer, from a DEF or a cache. |
+| `cache create` | Convert a DEF into an indexed binary cache directory. |
+| `clock-instances` | Walk DEF connectivity from SDC clock roots. |
+| `configure-io` | Benchmark storage targets and write an IO policy config. |
+
+```bash
+cd def_tools
+uv sync --dev
+uv run def-tools instances --lef design.lef --def design.def.gz -o instances.csv
+```
+
+```python
+from def_tools import instance_bboxes
+
+for bbox in instance_bboxes(["sky130.lef"], "design.def.gz"):
+    print(bbox.instance, bbox.llx, bbox.lly, bbox.urx, bbox.ury)
+```
+
+DEF coordinates stay in database units; plain and gzipped inputs are both
+read. The [LEF guide](https://smprather.github.io/open-eda-file-tools/user-guide/lef.html)
+and [DEF guide](https://smprather.github.io/open-eda-file-tools/user-guide/def.html)
+cover the APIs, CLIs, binary DEF cache and storage configurator.
 
 ## Project Status
 
 The parser is already useful for large timing libraries. Releases follow
-SemVer (see [VERSIONING_PLAN.md](VERSIONING_PLAN.md)): backward-compatible
-additions land in a minor release, and an incompatible API, output or CLI
-change gets a major bump.
+SemVer (see
+[VERSIONING_PLAN.md](https://github.com/smprather/open-eda-file-tools/blob/main/VERSIONING_PLAN.md)):
+backward-compatible additions land in a minor release, and an incompatible
+API, output or CLI change gets a major bump.
 
 On the local 96.8 MB reference Liberty file, the release extension parses the
 whole library into an in-memory document in about 1.5 seconds (~150 MB peak
@@ -48,12 +109,17 @@ RSS). The lazy `LibraryIndex` used by the viewer opens the same file in about
 ## Repository Layout
 
 The Liberty tool is the package at the repository root (`liberty_tools`, with
-its Rust backend in `src/` and its tests in `tests/`). Each additional tool
-gets its own package directory and its own distribution, with its own tests
-and command-line entry points; [docs/TOOLS.md](docs/TOOLS.md) lists the tools
-and the steps for adding one. Shared build, test and release conventions are in
-[BUILD.md](BUILD.md), [VERSIONING_PLAN.md](VERSIONING_PLAN.md) and
-[CLAUDE.md](CLAUDE.md).
+its Rust backend in `src/` and its tests in `tests/`). The LEF and DEF tools
+are self-contained projects in `lef_tools/` and `def_tools/`, each with its own
+`pyproject.toml`, distribution, Rust crate, tests and CLI. Each additional tool
+gets its own directory and its own distribution; the
+[Tools guide](https://smprather.github.io/open-eda-file-tools/user-guide/tools.html)
+lists the tools and the steps for adding one. Shared build, test and release
+conventions are in
+[BUILD.md](https://github.com/smprather/open-eda-file-tools/blob/main/BUILD.md),
+[VERSIONING_PLAN.md](https://github.com/smprather/open-eda-file-tools/blob/main/VERSIONING_PLAN.md)
+and
+[CLAUDE.md](https://github.com/smprather/open-eda-file-tools/blob/main/CLAUDE.md).
 
 ## Install From GitHub
 
@@ -67,6 +133,13 @@ For projects managed by `uv`:
 
 ```bash
 uv add "liberty-tools @ git+https://github.com/smprather/open-eda-file-tools.git"
+```
+
+The LEF and DEF distributions are subdirectories of the same repository:
+
+```bash
+uv add "lef-tools @ git+https://github.com/smprather/open-eda-file-tools.git#subdirectory=lef_tools"
+uv add "def-tools @ git+https://github.com/smprather/open-eda-file-tools.git#subdirectory=def_tools"
 ```
 
 This package contains a Rust extension, so source installs need:
@@ -90,8 +163,22 @@ Run tests:
 
 ```bash
 uv run pytest -q
-cargo fmt --check
-cargo check
+cargo fmt --all --check
+cargo check --workspace
+```
+
+LEF and DEF each keep their own virtualenv:
+
+```bash
+cd lef_tools
+uv sync --dev
+uv run maturin develop --release
+uv run pytest -q
+
+cd ../def_tools
+uv sync --dev
+uv run maturin develop --release
+uv run pytest -q
 ```
 
 The repository does not include large Liberty reference files. If you have a
@@ -105,7 +192,8 @@ uv run liberty-view dev.lib
 ```
 
 The viewer serves all frontend assets locally, including Plotly. See
-[docs/CLI.md](docs/CLI.md) for the full command line reference of
+[CLI reference](https://smprather.github.io/open-eda-file-tools/user-guide/cli.html)
+for the full command line reference of
 `liberty-view` and `liberty-format`. It renders:
 
 - scalar tables as compact tables

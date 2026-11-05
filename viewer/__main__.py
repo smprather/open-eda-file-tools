@@ -16,12 +16,8 @@ import urllib.error
 import urllib.request
 import webbrowser
 
-import rich_click as click
+import click
 import uvicorn
-
-click.rich_click.TEXT_MARKUP = "rich"
-click.rich_click.SHOW_ARGUMENTS = True
-click.rich_click.STYLE_OPTION_DEFAULT = "dim cyan"
 
 
 def _package_version() -> str:
@@ -99,8 +95,8 @@ def _open_when_ready(url: str, timeout: float = 30.0) -> None:
 @click.option(
     "--dev",
     is_flag=True,
-    help="Add a [b]Dump Debug[/] button that writes the page state to "
-    "[cyan]/tmp/liberty_view_debug.json[/] for inspection.",
+    help="Add a Dump Debug button that writes the page state to "
+    "/tmp/liberty_view_debug.json for inspection.",
 )
 @click.option(
     "--access-log/--no-access-log",
@@ -127,12 +123,12 @@ def main(
     exit_on_close: bool,
     access_log: bool,
 ) -> None:
-    """Browse a **Liberty** (`.lib` / `.lib.gz`) library in the browser.
+    """Browse a Liberty (.lib or .lib.gz) library in the browser.
 
-    Sidebar tree of cells → pins → timing/power arcs → tables; scalars render as
-    tables, 1-D as line plots, 2-D as heatmap + surface, 3-D/CCS as a clickable
-    grid that opens a wave plot. The server is cell/leaf-scoped, so the browser
-    never loads the whole file at once.
+    Sidebar tree of cells → pins → timing/power arcs → tables; scalars render
+    as tables, 1-D as line plots, 2-D as heatmap + surface, 3-D/CCS as a
+    clickable grid that opens a wave plot. The server is cell/leaf-scoped, so
+    the browser never loads the whole file at once.
     """
     os.environ["LIBERTY_FILE"] = liberty_file
     if dev:

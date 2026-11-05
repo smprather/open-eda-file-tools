@@ -11,13 +11,9 @@ from importlib.metadata import PackageNotFoundError, version
 import sys
 from pathlib import Path
 
-import rich_click as click
+import click
 
 from liberty_format import TransparencyError, format_text
-
-click.rich_click.TEXT_MARKUP = "rich"
-click.rich_click.SHOW_ARGUMENTS = True
-click.rich_click.STYLE_OPTION_DEFAULT = "dim cyan"
 
 
 def _package_version() -> str:
@@ -66,11 +62,11 @@ def _read(path: Path) -> str:
 def main(
     file: Path, output: Path | None, in_place: bool, check: bool, indent: int
 ) -> None:
-    """Reindent a **Liberty** (`.lib` / `.lib.gz`) file by brace depth.
+    """Reindent a Liberty (.lib or .lib.gz) file by brace depth.
 
-    Strictly applies one indent level per `{ }` nesting, trims trailing
-    whitespace, and collapses blank-line runs. The result is **guaranteed
-    functionally transparent**: it is accepted only if it lexes to the exact
+    Strictly applies one indent level per brace nesting, trims trailing
+    whitespace, and collapses blank-line runs. The result is guaranteed
+    functionally transparent: it is accepted only if it lexes to the exact
     same token stream as the input (otherwise the file is left untouched).
     """
     text = _read(file)

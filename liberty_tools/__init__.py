@@ -42,23 +42,35 @@ class MinPulseWidth:
 
 
 class LibertyDocument:
+    """A fully parsed Liberty library.
+
+    Returned by :func:`parse_file`. Use :meth:`cell` to fetch a cell,
+    :meth:`timing_tables` / :meth:`to_polars` to extract table data, and
+    :meth:`write` / :meth:`to_string` to emit the source with any attribute
+    edits applied.
+    """
+
     def __init__(self, native: _native.Document):
         self._native = native
 
     @property
     def library_name(self) -> str:
+        """Name of the ``library`` group."""
         return self._native.library_name
 
     @property
     def voltage_unit(self) -> str | None:
+        """The library's ``voltage_unit`` string, or ``None`` when undeclared."""
         return self._native.voltage_unit
 
     @property
     def current_unit(self) -> str | None:
+        """The library's ``current_unit`` string, or ``None`` when undeclared."""
         return self._native.current_unit
 
     @property
     def time_unit(self) -> str | None:
+        """The library's ``time_unit`` string, or ``None`` when undeclared."""
         return self._native.time_unit
 
     @property
@@ -161,18 +173,27 @@ class LibertyDocument:
         return self._native.energy_unit_joules()
 
     def cells(self) -> list[str]:
+        """Names of all cells in the library, in file order."""
         return self._native.cells()
 
     def cell(self, name: str) -> Cell:
+        """The :class:`Cell` named ``name``. Raises ``KeyError`` if absent."""
         return Cell(self._native.cell(name))
 
     def bus_types(self) -> list[str]:
+        """Names of all ``type`` bus definitions, in file order."""
         return self._native.bus_types()
 
     def bus_type(self, name: str) -> BusType:
+        """The :class:`BusType` named ``name``. Raises ``KeyError`` if absent."""
         return BusType(self._native.bus_type(name))
 
     def timing_tables(self, **filters: Any) -> list[dict[str, Any]]:
+        """Flattened timing-table rows (one dict per table point).
+
+        Accepts the same keyword filters as :meth:`to_polars`: ``cell``,
+        ``pin``, ``related_pin``, ``timing_type``, ``when`` and ``table``.
+        """
         return self._native.timing_tables(**filters)
 
     def internal_power_tables(self, **filters: Any) -> list[dict[str, Any]]:
@@ -186,6 +207,12 @@ class LibertyDocument:
         return self._native.internal_power_tables(**filters)
 
     def to_polars(self, kind: str = "timing", **filters: Any):
+        """Timing or internal-power table rows as a Polars ``DataFrame``.
+
+        ``kind="timing"`` (the default) calls :meth:`timing_tables`;
+        ``kind="power"`` calls :meth:`internal_power_tables`. Both accept the
+        keyword filters described there.
+        """
         if kind == "timing":
             rows = self.timing_tables(**filters)
         elif kind == "power":
@@ -295,33 +322,47 @@ def _constraint_limit(arc: TimingArc, table_name: str) -> float | None:
 
 
 class Cell:
+    """A cell in a Liberty library.
+
+    Fetched by name from :meth:`LibertyDocument.cell`. Exposes the cell's
+    pins, buses, bundles, power/ground pins, and sequential groups.
+    """
+
     def __init__(self, native: _native.Cell):
         self._native = native
 
     @property
     def name(self) -> str:
+        """Cell name."""
         return self._native.name
 
     @property
     def area(self) -> float | None:
+        """Cell ``area`` in library area units, or ``None`` when undeclared."""
         return self._native.area
 
     def pins(self) -> list[str]:
+        """Names of the cell's top-level pins, in file order."""
         return self._native.pins()
 
     def pin(self, name: str) -> Pin:
+        """The :class:`Pin` named ``name``. Raises ``KeyError`` if absent."""
         return Pin(self._native.pin(name))
 
     def buses(self) -> list[str]:
+        """Names of the cell's buses, in file order."""
         return self._native.buses()
 
     def bus(self, name: str) -> Bus:
+        """The :class:`Bus` named ``name``. Raises ``KeyError`` if absent."""
         return Bus(self._native.bus(name))
 
     def bundles(self) -> list[str]:
+        """Names of the cell's bundles, in file order."""
         return self._native.bundles()
 
     def bundle(self, name: str) -> Bundle:
+        """The :class:`Bundle` named ``name``. Raises ``KeyError`` if absent."""
         return Bundle(self._native.bundle(name))
 
     def attributes(self) -> list[tuple[str, str]]:
@@ -408,27 +449,39 @@ class Cell:
 
 
 class Pin:
+    """A pin (or bus/bundle member) of a :class:`Cell`.
+
+    Directions and boolean attributes are returned as written in the file;
+    the ``*_expr`` accessors return them parsed as
+    :class:`BooleanExpression`.
+    """
+
     def __init__(self, native: _native.Pin):
         self._native = native
 
     @property
     def name(self) -> str:
+        """Pin name."""
         return self._native.name
 
     @property
     def direction(self) -> str | None:
+        """``direction`` as written (``"input"``, ``"output"``, …), if declared."""
         return self._native.direction
 
     @property
     def function(self) -> str | None:
+        """``function`` expression text, if declared."""
         return self._native.function
 
     @property
     def three_state(self) -> str | None:
+        """``three_state`` expression text, if declared."""
         return self._native.three_state
 
     @property
     def power_down_function(self) -> str | None:
+        """``power_down_function`` expression text, if declared."""
         return self._native.power_down_function
 
     def function_expr(self) -> BooleanExpression | None:
@@ -450,6 +503,12 @@ class Pin:
         timing_type: str | None = None,
         when: str | None = None,
     ) -> list[TimingArc]:
+        """Timing arcs that start or end at this pin.
+
+        Optional keyword filters: ``related_pin``, ``timing_type`` and
+        ``when``. ``when`` uses implication matching, so ``when="A"`` also
+        matches an arc whose condition is ``"A & B"``.
+        """
         return [
             TimingArc(arc)
             for arc in self._native.timing_arcs(
@@ -466,6 +525,11 @@ class Pin:
         related_pg_pin: str | None = None,
         when: str | None = None,
     ) -> list[InternalPower]:
+        """``internal_power`` groups for this pin.
+
+        Optional keyword filters: ``related_pin``, ``related_pg_pin`` and
+        ``when``.
+        """
         return [
             InternalPower(group)
             for group in self._native.internal_power(
@@ -598,6 +662,8 @@ class Pin:
 
 
 class Bus:
+    """A bus defined on a :class:`Cell` (a ``bus`` group)."""
+
     def __init__(self, native: _native.Bus):
         self._native = native
 
@@ -645,6 +711,8 @@ class Bus:
 
 
 class Bundle:
+    """A bundle of pins on a :class:`Cell` (a ``bundle`` group)."""
+
     def __init__(self, native: _native.Bundle):
         self._native = native
 
@@ -692,6 +760,8 @@ class Bundle:
 
 
 class BusType:
+    """A Liberty ``type`` bus definition."""
+
     def __init__(self, native: _native.BusType):
         self._native = native
 
@@ -707,6 +777,13 @@ class BusType:
 
 
 class TimingArc:
+    """A timing arc between two pins.
+
+    Exposes the arc's scalar attributes plus its timing tables
+    (``cell_rise``, ``cell_fall``, constraints, …). CCS noise stages are
+    available through :meth:`ccsn_stages`.
+    """
+
     def __init__(self, native: _native.TimingArc):
         self._native = native
 
@@ -749,6 +826,8 @@ class TimingArc:
 
 
 class CcsnStage:
+    """One CCS-noise stage (``ccsn_first_stage`` / ``ccsn_last_stage``)."""
+
     def __init__(self, native: _native.CcsnStage):
         self._native = native
 
@@ -855,6 +934,8 @@ class DynamicCurrent:
 
 
 class SwitchingGroup:
+    """A CCS switching group inside ``dynamic_current``."""
+
     def __init__(self, native: _native.SwitchingGroup):
         self._native = native
 
@@ -1057,22 +1138,31 @@ class TimingTable:
 
     @property
     def name(self) -> str:
+        """Table name, e.g. ``"cell_rise"`` or ``"rise_constraint"``."""
         return self._native.name
 
     @property
     def index_1(self) -> list[float]:
+        """Values of the ``index_1`` axis, in file order."""
         return self._native.index_1
 
     @property
     def index_2(self) -> list[float]:
+        """Values of the ``index_2`` axis; empty when the table has no such axis."""
         return self._native.index_2
 
     @property
     def index_3(self) -> list[float]:
+        """Values of the ``index_3`` axis; empty when the table has no such axis."""
         return self._native.index_3
 
     @property
     def values(self) -> list[float]:
+        """Flat table values, row-major with ``index_1`` slowest.
+
+        Use :meth:`lookup` or :meth:`value_at` instead of indexing this list
+        directly.
+        """
         return self._native.values
 
     @property
@@ -1166,6 +1256,7 @@ class TimingTable:
         return [TimingTable(v) for v in self._native.vectors()]
 
     def to_polars(self):
+        """The table as a Polars ``DataFrame`` (one row per table point)."""
         import polars as pl
 
         return pl.DataFrame(self._native.rows())
@@ -1236,6 +1327,16 @@ class LibraryIndex:
 
 
 def parse_file(path: str | Path, **filters: Any) -> LibertyDocument:
+    """Parse a Liberty file into a :class:`LibertyDocument`.
+
+    Args:
+        path: ``.lib`` or ``.lib.gz`` path.
+        **filters: Parse-time filters. ``cells=[...]`` parses only the named
+            cells and skips the rest of the file.
+
+    Examples:
+        >>> doc = parse_file("library.lib", cells=["target_cell"])
+    """
     return LibertyDocument(_native.parse_file(str(path), **filters))
 
 

@@ -1,0 +1,26 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  linux:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test std
+        run: cargo test
+
+      - name: Test no-std
+        run: cargo test --no-default-features
+
+      # Check that benchmarks compile without running them
+      - name: Check bench
+        run: cargo check --bench benches

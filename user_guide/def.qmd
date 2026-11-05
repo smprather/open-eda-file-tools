@@ -1,0 +1,149 @@
+---
+title: DEF Tools
+---
+
+`def-tools` parses and queries DEF (Design Exchange Format) designs through a
+Rust backend. DEF coordinates come out in database units (DBU) as they appear
+in the file. Plain `.def` and gzipped `.def.gz` inputs are both read. Cell LEF
+parsing lives in `lef-tools`; the DEF backend links it for macro sizes, so the
+Python packages stay independent.
+
+## Install
+
+```bash
+cd def_tools
+uv sync --dev
+uv run def-tools --help
+```
+
+Or install it from the repository:
+
+```bash
+uv tool install "def-tools @ git+https://github.com/smprather/open-eda-file-tools.git#subdirectory=def_tools"
+```
+
+The test suite stores no design files. To try the commands, generate a small
+synthetic design in a checkout:
+
+```bash
+cd def_tools
+uv run python -m tests.gen.design_gen -o /tmp/design -n 500
+```
+
+That writes `design.lef`, `design.def.gz`, `design.sdc` and a `manifest.json`
+of ground truth.
+
+## Commands
+
+### `def-tools instances`
+
+Write placed instance bounding boxes as CSV. `--lef` may be repeated;
+duplicate macro names resolve to the last definition and a warning lists them.
+`--threads` bounds the rayon pool for component parsing.
+
+```bash
+uv run def-tools instances \
+  --lef /tmp/design/design.lef --def /tmp/design/design.def.gz \
+  --output instances.csv
+```
+
+Columns: `instance,macro,status,orient,llx,lly,urx,ury`.
+
+### `def-tools net-shapes`
+
+Write routed shape bounding boxes for one net and layer. Supply either a DEF
+(`--def`) or a cache directory (`--cache-dir`). Path segments are emitted as
+rectangular DBU bounding boxes using the DEF route width.
+
+```bash
+uv run def-tools net-shapes --def design.def.gz \
+  --net VDD --layer met1 --output vdd_met1.csv
+```
+
+Columns:
+`net,section,route_status,shape_type,layer,width,x1,y1,x2,y2,llx,lly,urx,ury`.
+
+### `def-tools cache create`
+
+Convert a DEF once into an indexed binary cache directory for repeated queries
+on huge gzipped files:
+
+```bash
+uv run def-tools cache create --def design.def.gz --output design.ldefcache
+```
+
+The cache stores components, raw net records, a fixed-offset net record index,
+a net-name index and parsed connectivity in separate files. A single-net query
+therefore reads only the matching records, and clock queries skip DEF
+tokenization.
+
+### `def-tools clock-instances`
+
+Extract clock roots from SDC `create_clock` / `create_generated_clock`
+commands and walk DEF connectivity through clock cells. `--clock-cell-pattern`
+is a substring matched against macro names and defaults to `clk`; repeat it to
+add patterns.
+
+```bash
+uv run def-tools clock-instances --sdc design.sdc \
+  --cache-dir design.ldefcache --output clocks.csv
+```
+
+Columns:
+`clock,root_type,root_name,instance,macro,net,is_clock_cell`.
+
+### `def-tools configure-io`
+
+Benchmark storage targets and write a TOML config with filesystem type, free
+space, ranked scratch directories, RAM directories and cache defaults. It uses
+Flexible I/O Tester (`fio`) when available and valid, otherwise a built-in
+sequential benchmark.
+
+```bash
+uv run def-tools configure-io \
+  --target /scratch/$USER \
+  --target /dev/shm \
+  --output def-tools-io-config.toml
+```
+
+`--probe-mib` caps the benchmark file size per target and `--engine` selects
+`auto`, `internal` or `fio`.
+
+## Python API
+
+```python
+from def_tools import instance_bboxes
+
+for bbox in instance_bboxes(["sky130.lib.lef"], "design.def.gz"):
+    print(bbox.instance, bbox.llx, bbox.lly, bbox.urx, bbox.ury)
+```
+
+`instance_bboxes` multiplies each LEF macro's `SIZE` by the DEF's database
+units per micron. A LEF that does not define a placed macro raises an error
+naming the missing macro.
+
+### Aligned table
+
+`write_instance_table` writes the same rows as an aligned text table and
+returns the row count. The native writer sizes the columns with a
+components-only pass and then streams the rows:
+
+```python
+from def_tools import write_instance_table
+
+write_instance_table(["sky130.lib.lef"], "design.def.gz", "instances.table")
+```
+
+`write_instance_bbox_csv` writes the same rows as CSV and returns the row
+count; both writers stream without loading the design into memory.
+
+`write_instance_parquet` writes zstd-compressed Parquet in row groups of
+`batch_size` rows and returns `(rows, row_groups)`:
+
+```python
+from def_tools import write_instance_parquet
+
+rows, groups = write_instance_parquet(
+    ["sky130.lib.lef"], "design.def.gz", "instances.parquet", 131_072
+)
+```
