@@ -1,14 +1,14 @@
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions, create_dir_all};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, StringArray};
+use arrow::array::{ArrayRef, Float64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -16,6 +16,89 @@ use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
 use lef_tools_native::{Lexer, open_input};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ColumnKind {
+    Instance,
+    BaseCell,
+    Llx,
+    Lly,
+    Urx,
+    Ury,
+}
+
+struct ColumnSpec {
+    kind: ColumnKind,
+    name: String,
+}
+
+fn default_columns() -> Vec<ColumnSpec> {
+    vec![
+        ColumnSpec {
+            kind: ColumnKind::Instance,
+            name: "instance".to_string(),
+        },
+        ColumnSpec {
+            kind: ColumnKind::BaseCell,
+            name: "base_cell".to_string(),
+        },
+        ColumnSpec {
+            kind: ColumnKind::Llx,
+            name: "llx".to_string(),
+        },
+        ColumnSpec {
+            kind: ColumnKind::Lly,
+            name: "lly".to_string(),
+        },
+        ColumnSpec {
+            kind: ColumnKind::Urx,
+            name: "urx".to_string(),
+        },
+        ColumnSpec {
+            kind: ColumnKind::Ury,
+            name: "ury".to_string(),
+        },
+    ]
+}
+
+/// Turn ``(source, output_name)`` pairs from Python into columns.
+///
+/// ``None`` selects the canonical six columns in their canonical order. The
+/// source names are the project's column names; the output names are what the
+/// file gets, so a rename is just a different second half of the pair.
+fn parse_columns(columns: Option<Vec<(String, String)>>) -> Result<Vec<ColumnSpec>, String> {
+    let Some(pairs) = columns else {
+        return Ok(default_columns());
+    };
+    if pairs.is_empty() {
+        return Err("no columns selected".to_string());
+    }
+    let mut seen = HashSet::new();
+    let mut parsed = Vec::with_capacity(pairs.len());
+    for (source, name) in pairs {
+        let kind = match source.as_str() {
+            "instance" => ColumnKind::Instance,
+            "base_cell" => ColumnKind::BaseCell,
+            "llx" => ColumnKind::Llx,
+            "lly" => ColumnKind::Lly,
+            "urx" => ColumnKind::Urx,
+            "ury" => ColumnKind::Ury,
+            other => {
+                return Err(format!(
+                    "unknown column '{other}' (choose instance, base_cell, llx, lly, urx, ury)"
+                ));
+            }
+        };
+        if name.is_empty() {
+            return Err(format!("empty output name for column '{source}'"));
+        }
+        if !seen.insert(name.clone()) {
+            return Err(format!("duplicate output column '{name}'"));
+        }
+        parsed.push(ColumnSpec { kind, name });
+    }
+    Ok(parsed)
+}
 
 const BATCH_SIZE: usize = 65_536;
 const CACHE_VERSION: u32 = 1;
@@ -289,37 +372,50 @@ fn write_instance_csv(
 }
 
 #[pyfunction]
+#[pyo3(signature = (lefs, def_path, output, columns = None))]
 fn write_instance_table(
     py: Python<'_>,
     lefs: Vec<PathBuf>,
     def_path: PathBuf,
     output: Option<PathBuf>,
+    columns: Option<Vec<(String, String)>>,
 ) -> PyResult<usize> {
-    py.detach(|| write_instance_table_impl(&lefs, &def_path, output.as_deref()).map_err(to_py_err))
+    let columns = parse_columns(columns).map_err(PyRuntimeError::new_err)?;
+    py.detach(|| {
+        write_instance_table_impl(&lefs, &def_path, output.as_deref(), &columns).map_err(to_py_err)
+    })
 }
 
 #[pyfunction]
+#[pyo3(signature = (lefs, def_path, output, columns = None))]
 fn write_instance_bbox_csv(
     py: Python<'_>,
     lefs: Vec<PathBuf>,
     def_path: PathBuf,
     output: Option<PathBuf>,
+    columns: Option<Vec<(String, String)>>,
 ) -> PyResult<usize> {
+    let columns = parse_columns(columns).map_err(PyRuntimeError::new_err)?;
     py.detach(|| {
-        write_instance_bbox_csv_impl(&lefs, &def_path, output.as_deref()).map_err(to_py_err)
+        write_instance_bbox_csv_impl(&lefs, &def_path, output.as_deref(), &columns)
+            .map_err(to_py_err)
     })
 }
 
 #[pyfunction]
+#[pyo3(signature = (lefs, def_path, output, batch_size, columns = None))]
 fn write_instance_parquet(
     py: Python<'_>,
     lefs: Vec<PathBuf>,
     def_path: PathBuf,
     output: PathBuf,
     batch_size: usize,
+    columns: Option<Vec<(String, String)>>,
 ) -> PyResult<(usize, usize)> {
+    let columns = parse_columns(columns).map_err(PyRuntimeError::new_err)?;
     py.detach(|| {
-        write_instance_parquet_impl(&lefs, &def_path, &output, batch_size).map_err(to_py_err)
+        write_instance_parquet_impl(&lefs, &def_path, &output, batch_size, &columns)
+            .map_err(to_py_err)
     })
 }
 
@@ -435,16 +531,27 @@ fn write_instance_csv_impl(
     }
 }
 
-/// Count the placed components and the widest instance/macro names.
+/// Widths for the selected name columns, plus the placed-row count.
 ///
-/// This pass only tokenizes the component records; it needs neither the LEF
-/// macros nor the bounding boxes, which keeps it much cheaper than a second
-/// full `instance_bboxes` pass.
-fn instance_table_widths(def_path: &Path) -> Result<(usize, usize, usize), String> {
+/// Only columns that are actually selected are measured. This pass tokenizes
+/// component records; it needs neither the LEF macros nor the bounding boxes.
+fn instance_table_widths(
+    def_path: &Path,
+    columns: &[ColumnSpec],
+) -> Result<(Option<usize>, Option<usize>), String> {
+    let mut instance_width = columns
+        .iter()
+        .find(|column| column.kind == ColumnKind::Instance)
+        .map(|column| column.name.len());
+    let mut macro_width = columns
+        .iter()
+        .find(|column| column.kind == ColumnKind::BaseCell)
+        .map(|column| column.name.len());
+    if instance_width.is_none() && macro_width.is_none() {
+        return Ok((None, None));
+    }
+
     let mut scanner = DefScanner::from_path(def_path).map_err(|e| e.to_string())?;
-    let mut instance_width = "instance".len();
-    let mut macro_width = "base_cell".len();
-    let mut count = 0usize;
     loop {
         let batch = scanner.next_batch(BATCH_SIZE).map_err(|e| e.to_string())?;
         if batch.is_empty() {
@@ -452,13 +559,16 @@ fn instance_table_widths(def_path: &Path) -> Result<(usize, usize, usize), Strin
         }
         for record in &batch {
             if let Some((instance_len, macro_len)) = component_name_lengths(record)? {
-                instance_width = instance_width.max(instance_len);
-                macro_width = macro_width.max(macro_len);
-                count += 1;
+                if let Some(width) = instance_width.as_mut() {
+                    *width = (*width).max(instance_len);
+                }
+                if let Some(width) = macro_width.as_mut() {
+                    *width = (*width).max(macro_len);
+                }
             }
         }
     }
-    Ok((instance_width, macro_width, count))
+    Ok((instance_width, macro_width))
 }
 
 /// Lengths of a placed component's instance and macro names.
@@ -497,27 +607,37 @@ fn component_name_lengths(record: &RawRecord) -> Result<Option<(usize, usize)>, 
 fn write_instance_table_stream<W: Write>(
     scanner: &mut DefScanner,
     macros: &MacroMap,
-    instance_width: usize,
-    macro_width: usize,
+    columns: &[ColumnSpec],
+    instance_width: Option<usize>,
+    macro_width: Option<usize>,
     mut out: W,
 ) -> Result<usize, String> {
-    let dbu = scanner.dbu_per_micron as f64;
-    writeln!(
-        out,
-        "{:<iw$}  {:<mw$}  {:>12}  {:>12}  {:>12}  {:>12}",
-        "instance",
-        "base_cell",
-        "llx",
-        "lly",
-        "urx",
-        "ury",
-        iw = instance_width,
-        mw = macro_width,
-    )
-    .map_err(|e| e.to_string())?;
-    let line_width = instance_width + macro_width + 58;
+    let widths: Vec<usize> = columns
+        .iter()
+        .map(|column| match column.kind {
+            ColumnKind::Instance => instance_width.unwrap_or(column.name.len()),
+            ColumnKind::BaseCell => macro_width.unwrap_or(column.name.len()),
+            _ => column.name.len().max(12),
+        })
+        .collect();
+    let line_width = widths.iter().sum::<usize>() + 2 * columns.len().saturating_sub(1);
+
+    for (index, column) in columns.iter().enumerate() {
+        if index > 0 {
+            write!(out, "  ").map_err(|e| e.to_string())?;
+        }
+        match column.kind {
+            ColumnKind::Instance | ColumnKind::BaseCell => {
+                write!(out, "{:<width$}", column.name, width = widths[index])
+            }
+            _ => write!(out, "{:>width$}", column.name, width = widths[index]),
+        }
+        .map_err(|e| e.to_string())?;
+    }
+    writeln!(out).map_err(|e| e.to_string())?;
     writeln!(out, "{}", "-".repeat(line_width)).map_err(|e| e.to_string())?;
 
+    let dbu = scanner.dbu_per_micron as f64;
     let mut count = 0usize;
     loop {
         let batch = scanner.next_batch(BATCH_SIZE).map_err(|e| e.to_string())?;
@@ -527,19 +647,55 @@ fn write_instance_table_stream<W: Write>(
         let bboxes = process_record_batch(&batch, macros)?;
         let mut buffer = String::with_capacity(bboxes.len() * (line_width + 1));
         for bbox in bboxes {
-            write!(
-                &mut buffer,
-                "{:<iw$}  {:<mw$}  {:>12.3}  {:>12.3}  {:>12.3}  {:>12.3}\n",
-                bbox.instance,
-                bbox.macro_name,
-                bbox.llx as f64 / dbu,
-                bbox.lly as f64 / dbu,
-                bbox.urx as f64 / dbu,
-                bbox.ury as f64 / dbu,
-                iw = instance_width,
-                mw = macro_width,
-            )
-            .map_err(|e| e.to_string())?;
+            for (index, column) in columns.iter().enumerate() {
+                if index > 0 {
+                    buffer.push_str("  ");
+                }
+                match column.kind {
+                    ColumnKind::Instance => {
+                        write!(
+                            &mut buffer,
+                            "{:<width$}",
+                            bbox.instance,
+                            width = widths[index]
+                        )
+                    }
+                    ColumnKind::BaseCell => {
+                        write!(
+                            &mut buffer,
+                            "{:<width$}",
+                            bbox.macro_name,
+                            width = widths[index]
+                        )
+                    }
+                    ColumnKind::Llx => write!(
+                        &mut buffer,
+                        "{:>width$.3}",
+                        bbox.llx as f64 / dbu,
+                        width = widths[index]
+                    ),
+                    ColumnKind::Lly => write!(
+                        &mut buffer,
+                        "{:>width$.3}",
+                        bbox.lly as f64 / dbu,
+                        width = widths[index]
+                    ),
+                    ColumnKind::Urx => write!(
+                        &mut buffer,
+                        "{:>width$.3}",
+                        bbox.urx as f64 / dbu,
+                        width = widths[index]
+                    ),
+                    ColumnKind::Ury => write!(
+                        &mut buffer,
+                        "{:>width$.3}",
+                        bbox.ury as f64 / dbu,
+                        width = widths[index]
+                    ),
+                }
+                .map_err(|e| e.to_string())?;
+            }
+            buffer.push('\n');
             count += 1;
         }
         out.write_all(buffer.as_bytes())
@@ -553,8 +709,9 @@ fn write_instance_table_impl(
     lefs: &[PathBuf],
     def_path: &Path,
     output: Option<&Path>,
+    columns: &[ColumnSpec],
 ) -> Result<usize, String> {
-    let (instance_width, macro_width, expected) = instance_table_widths(def_path)?;
+    let (instance_width, macro_width) = instance_table_widths(def_path, columns)?;
     let mut scanner = DefScanner::from_path(def_path).map_err(|e| e.to_string())?;
     let (macros, duplicates) = parse_lef_files(lefs, scanner.dbu_per_micron)?;
     if !duplicates.is_empty() {
@@ -564,16 +721,17 @@ fn write_instance_table_impl(
         );
     }
 
-    let written = match output {
+    match output {
         Some(path) => {
             let file = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
             write_instance_table_stream(
                 &mut scanner,
                 &macros,
+                columns,
                 instance_width,
                 macro_width,
                 BufWriter::new(file),
-            )?
+            )
         }
         None => {
             let stdout = io::stdout();
@@ -581,26 +739,32 @@ fn write_instance_table_impl(
             write_instance_table_stream(
                 &mut scanner,
                 &macros,
+                columns,
                 instance_width,
                 macro_width,
                 BufWriter::new(lock),
-            )?
+            )
         }
-    };
-    if written != expected {
-        return Err(format!(
-            "parsed {written} instances but the component scan found {expected}"
-        ));
     }
-    Ok(written)
 }
 
 fn write_instance_bbox_csv_stream<W: Write>(
     scanner: &mut DefScanner,
     macros: &MacroMap,
+    columns: &[ColumnSpec],
     mut out: W,
 ) -> Result<usize, String> {
-    writeln!(out, "instance,base_cell,llx,lly,urx,ury").map_err(|e| e.to_string())?;
+    let mut header = String::new();
+    for (index, column) in columns.iter().enumerate() {
+        if index > 0 {
+            header.push(',');
+        }
+        append_csv_field(&mut header, &column.name);
+    }
+    header.push('\n');
+    out.write_all(header.as_bytes())
+        .map_err(|e| e.to_string())?;
+
     let dbu = scanner.dbu_per_micron as f64;
     let mut count = 0usize;
     loop {
@@ -611,17 +775,19 @@ fn write_instance_bbox_csv_stream<W: Write>(
         let bboxes = process_record_batch(&batch, macros)?;
         let mut buffer = String::with_capacity(bboxes.len() * 64);
         for bbox in bboxes {
-            append_csv_field(&mut buffer, &bbox.instance);
-            buffer.push(',');
-            append_csv_field(&mut buffer, &bbox.macro_name);
-            buffer.push(',');
-            append_csv_micron(&mut buffer, bbox.llx as f64 / dbu);
-            buffer.push(',');
-            append_csv_micron(&mut buffer, bbox.lly as f64 / dbu);
-            buffer.push(',');
-            append_csv_micron(&mut buffer, bbox.urx as f64 / dbu);
-            buffer.push(',');
-            append_csv_micron(&mut buffer, bbox.ury as f64 / dbu);
+            for (index, column) in columns.iter().enumerate() {
+                if index > 0 {
+                    buffer.push(',');
+                }
+                match column.kind {
+                    ColumnKind::Instance => append_csv_field(&mut buffer, &bbox.instance),
+                    ColumnKind::BaseCell => append_csv_field(&mut buffer, &bbox.macro_name),
+                    ColumnKind::Llx => append_csv_micron(&mut buffer, bbox.llx as f64 / dbu),
+                    ColumnKind::Lly => append_csv_micron(&mut buffer, bbox.lly as f64 / dbu),
+                    ColumnKind::Urx => append_csv_micron(&mut buffer, bbox.urx as f64 / dbu),
+                    ColumnKind::Ury => append_csv_micron(&mut buffer, bbox.ury as f64 / dbu),
+                }
+            }
             buffer.push('\n');
             count += 1;
         }
@@ -636,6 +802,7 @@ fn write_instance_bbox_csv_impl(
     lefs: &[PathBuf],
     def_path: &Path,
     output: Option<&Path>,
+    columns: &[ColumnSpec],
 ) -> Result<usize, String> {
     let mut scanner = DefScanner::from_path(def_path).map_err(|e| e.to_string())?;
     let (macros, duplicates) = parse_lef_files(lefs, scanner.dbu_per_micron)?;
@@ -649,12 +816,12 @@ fn write_instance_bbox_csv_impl(
     match output {
         Some(path) => {
             let file = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            write_instance_bbox_csv_stream(&mut scanner, &macros, BufWriter::new(file))
+            write_instance_bbox_csv_stream(&mut scanner, &macros, columns, BufWriter::new(file))
         }
         None => {
             let stdout = io::stdout();
             let lock = stdout.lock();
-            write_instance_bbox_csv_stream(&mut scanner, &macros, BufWriter::new(lock))
+            write_instance_bbox_csv_stream(&mut scanner, &macros, columns, BufWriter::new(lock))
         }
     }
 }
@@ -664,6 +831,7 @@ fn write_instance_parquet_impl(
     def_path: &Path,
     output: &Path,
     batch_size: usize,
+    columns: &[ColumnSpec],
 ) -> Result<(usize, usize), String> {
     let mut scanner = DefScanner::from_path(def_path).map_err(|e| e.to_string())?;
     let (macros, duplicates) = parse_lef_files(lefs, scanner.dbu_per_micron)?;
@@ -674,14 +842,17 @@ fn write_instance_parquet_impl(
         );
     }
     let dbu = scanner.dbu_per_micron as f64;
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("instance", DataType::Utf8, false),
-        Field::new("base_cell", DataType::Utf8, false),
-        Field::new("llx", DataType::Float64, false),
-        Field::new("lly", DataType::Float64, false),
-        Field::new("urx", DataType::Float64, false),
-        Field::new("ury", DataType::Float64, false),
-    ]));
+    let fields: Vec<Field> = columns
+        .iter()
+        .map(|column| {
+            let data_type = match column.kind {
+                ColumnKind::Instance | ColumnKind::BaseCell => DataType::Utf8,
+                _ => DataType::Float64,
+            };
+            Field::new(&column.name, data_type, false)
+        })
+        .collect();
+    let schema = Arc::new(Schema::new(fields));
     let file = File::create(output).map_err(|e| format!("{}: {e}", output.display()))?;
     let chunk = batch_size.max(1);
     let properties = WriterProperties::builder()
@@ -701,24 +872,56 @@ fn write_instance_parquet_impl(
         if bboxes.is_empty() {
             continue;
         }
-        let instances: Vec<&str> = bboxes.iter().map(|item| item.instance.as_str()).collect();
-        let cells: Vec<&str> = bboxes.iter().map(|item| item.macro_name.as_str()).collect();
-        let llx: Vec<f64> = bboxes.iter().map(|item| item.llx as f64 / dbu).collect();
-        let lly: Vec<f64> = bboxes.iter().map(|item| item.lly as f64 / dbu).collect();
-        let urx: Vec<f64> = bboxes.iter().map(|item| item.urx as f64 / dbu).collect();
-        let ury: Vec<f64> = bboxes.iter().map(|item| item.ury as f64 / dbu).collect();
-        let record = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![
-                Arc::new(StringArray::from(instances)),
-                Arc::new(StringArray::from(cells)),
-                Arc::new(Float64Array::from(llx)),
-                Arc::new(Float64Array::from(lly)),
-                Arc::new(Float64Array::from(urx)),
-                Arc::new(Float64Array::from(ury)),
-            ],
-        )
-        .map_err(|e| e.to_string())?;
+        let mut cache: HashMap<ColumnKind, ArrayRef> = HashMap::new();
+        let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
+        for column in columns {
+            if let Some(array) = cache.get(&column.kind) {
+                arrays.push(Arc::clone(array));
+                continue;
+            }
+            let array: ArrayRef = match column.kind {
+                ColumnKind::Instance => Arc::new(StringArray::from(
+                    bboxes
+                        .iter()
+                        .map(|item| item.instance.as_str())
+                        .collect::<Vec<_>>(),
+                )),
+                ColumnKind::BaseCell => Arc::new(StringArray::from(
+                    bboxes
+                        .iter()
+                        .map(|item| item.macro_name.as_str())
+                        .collect::<Vec<_>>(),
+                )),
+                ColumnKind::Llx => Arc::new(Float64Array::from(
+                    bboxes
+                        .iter()
+                        .map(|item| item.llx as f64 / dbu)
+                        .collect::<Vec<_>>(),
+                )),
+                ColumnKind::Lly => Arc::new(Float64Array::from(
+                    bboxes
+                        .iter()
+                        .map(|item| item.lly as f64 / dbu)
+                        .collect::<Vec<_>>(),
+                )),
+                ColumnKind::Urx => Arc::new(Float64Array::from(
+                    bboxes
+                        .iter()
+                        .map(|item| item.urx as f64 / dbu)
+                        .collect::<Vec<_>>(),
+                )),
+                ColumnKind::Ury => Arc::new(Float64Array::from(
+                    bboxes
+                        .iter()
+                        .map(|item| item.ury as f64 / dbu)
+                        .collect::<Vec<_>>(),
+                )),
+            };
+            cache.insert(column.kind, Arc::clone(&array));
+            arrays.push(array);
+        }
+        let record =
+            RecordBatch::try_new(Arc::clone(&schema), arrays).map_err(|e| e.to_string())?;
         writer.write(&record).map_err(|e| e.to_string())?;
         count += bboxes.len();
     }

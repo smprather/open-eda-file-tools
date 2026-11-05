@@ -15,11 +15,15 @@ are binary: ``1GB`` means ``1 GiB``.
     uv run python examples/dump_instances.py \
         --lef merged.min.lef --def 17-fill.def.gz
 
-    uv run python scripts/dump_instances.py --format csv \
+    uv run python examples/dump_instances.py --format csv \
         --lef merged.min.lef --def 17-fill.def.gz --output instances.csv
 
-    uv run python scripts/dump_instances.py --format table \
+    uv run python examples/dump_instances.py --format table \
         --lef merged.min.lef --def 17-fill.def.gz --output instances.table
+
+    uv run python examples/dump_instances.py --format csv \
+        --lef merged.min.lef --def 17-fill.def.gz \
+        --columns instance=instance_name,base_cell=cell,llx=llx_um,urx=urx_um
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from def_tools import (
 )
 
 FORMATS = ("parquet", "csv", "table")
+CANONICAL_COLUMNS = ("instance", "base_cell", "llx", "lly", "urx", "ury")
 
 # Conservative sizing for --max-memory. The native Parquet batch costs much
 # less than this per row; 4 KiB/row leaves ample room for the Arrow arrays.
@@ -74,6 +79,29 @@ def parse_size(text: str) -> int:
         raise argparse.ArgumentTypeError(f"invalid size: {text!r}")
     value, unit = match.groups()
     return int(float(value) * _SIZE_UNITS[unit.lower()])
+
+
+def parse_column_spec(text: str) -> list[tuple[str, str]]:
+    """Parse ``source[,source=output...]`` into ordered column pairs."""
+    pairs: list[tuple[str, str]] = []
+    for item in text.split(","):
+        item = item.strip()
+        if not item:
+            raise argparse.ArgumentTypeError("empty column entry")
+        source, separator, output = item.partition("=")
+        source = source.strip()
+        output = output.strip() if separator else source
+        if source not in CANONICAL_COLUMNS:
+            raise argparse.ArgumentTypeError(
+                f"unknown column {source!r}; choose from {', '.join(CANONICAL_COLUMNS)}"
+            )
+        if not output:
+            raise argparse.ArgumentTypeError(f"empty output name for {source!r}")
+        pairs.append((source, output))
+    outputs = [output for _, output in pairs]
+    if len(set(outputs)) != len(outputs):
+        raise argparse.ArgumentTypeError("duplicate output column name")
+    return pairs
 
 
 def rss_bytes() -> int:
@@ -153,6 +181,17 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="Output path (default: instances.<format>).",
     )
     parser.add_argument(
+        "--columns",
+        type=parse_column_spec,
+        default=None,
+        metavar="SPEC",
+        help=(
+            "Comma-separated columns in output order; rename with source=output, "
+            "for example instance=instance_name,base_cell,llx=llx_um. "
+            f"Defaults to {','.join(CANONICAL_COLUMNS)}."
+        ),
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=131_072,
@@ -188,6 +227,8 @@ def report(
     print(f"instances: {written:,}")
     print(f"dbu/micron: {dbu_per_micron:,}")
     print(f"format: {args.format}")
+    selected = args.columns or [(name, name) for name in CANONICAL_COLUMNS]
+    print("columns: " + ", ".join(output for _, output in selected))
     print(f"wall: {elapsed:.2f} s ({written / elapsed / 1e6:.2f} M instances/s)")
     print(f"memory limit: {args.max_memory / 1024**3:.2f} GiB (soft)")
     print(f"peak RSS: {peak_kib / 1024:.1f} MiB")
@@ -219,13 +260,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parquet_info: tuple[int, int] | None = None
     try:
         if args.format == "table":
-            written = write_instance_table(lefs, args.design, args.output)
+            written = write_instance_table(
+                lefs, args.design, args.output, columns=args.columns
+            )
         elif args.format == "csv":
-            written = write_instance_bbox_csv(lefs, args.design, args.output)
+            written = write_instance_bbox_csv(
+                lefs, args.design, args.output, columns=args.columns
+            )
         else:
             batch_size = effective_batch_size(args.max_memory, args.batch_size)
             written, row_groups = write_instance_parquet(
-                lefs, args.design, args.output, batch_size
+                lefs, args.design, args.output, batch_size, columns=args.columns
             )
             parquet_info = (batch_size, row_groups)
     except (OSError, ValueError, RuntimeError) as exc:

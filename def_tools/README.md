@@ -58,6 +58,16 @@ and returns the row count.
 `write_instance_parquet(lefs, def_path, output, batch_size)` writes
 zstd-compressed Parquet and returns `(rows, row_groups)`.
 
+All three take an optional `columns` list of `(source, output_name)` pairs in
+output order; the default is the six canonical columns. Source names are
+`instance`, `base_cell`, `llx`, `lly`, `urx`, `ury`; renaming is just the second
+half of the pair:
+
+```python
+columns = [("instance", "instance_name"), ("base_cell", "cell"), ("llx", "llx_um")]
+write_instance_table(["sky130.lib.lef"], "design.def.gz", "instances.table", columns=columns)
+```
+
 ## Example
 
 `examples/dump_instances.py` dumps a DEF's placed instances as Parquet

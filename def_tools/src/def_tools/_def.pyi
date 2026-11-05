@@ -70,7 +70,10 @@ class NetShapeIter:
 def instance_bboxes(lefs: Sequence[_StrPath], def_path: _StrPath) -> InstanceBBoxIter: ...
 def net_shapes(def_path: _StrPath, net: str, layer: str) -> NetShapeIter: ...
 def write_instance_bbox_csv(
-    lefs: Sequence[_StrPath], def_path: _StrPath, output: _StrPath | None
+    lefs: Sequence[_StrPath],
+    def_path: _StrPath,
+    output: _StrPath | None,
+    columns: Sequence[tuple[str, str]] | None = None,
 ) -> int: ...
 def write_instance_csv(
     lefs: Sequence[_StrPath], def_path: _StrPath, output: _StrPath | None
@@ -80,9 +83,13 @@ def write_instance_parquet(
     def_path: _StrPath,
     output: _StrPath,
     batch_size: int,
+    columns: Sequence[tuple[str, str]] | None = None,
 ) -> tuple[int, int]: ...
 def write_instance_table(
-    lefs: Sequence[_StrPath], def_path: _StrPath, output: _StrPath | None
+    lefs: Sequence[_StrPath],
+    def_path: _StrPath,
+    output: _StrPath | None,
+    columns: Sequence[tuple[str, str]] | None = None,
 ) -> int: ...
 def write_net_shapes_csv(
     def_path: _StrPath, net: str, layer: str, output: _StrPath | None

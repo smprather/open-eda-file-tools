@@ -147,3 +147,13 @@ rows, groups = write_instance_parquet(
     ["sky130.lib.lef"], "design.def.gz", "instances.parquet", 131_072
 )
 ```
+
+All three writers accept an optional `columns` list of `(source, output_name)`
+pairs, in output order. The source names are the project's column names
+(`instance`, `base_cell`, `llx`, `lly`, `urx`, `ury`); the output name renames
+the column in the file:
+
+```python
+columns = [("instance", "instance_name"), ("llx", "llx_um"), ("urx", "urx_um")]
+write_instance_table(["sky130.lib.lef"], "design.def.gz", "instances.table", columns=columns)
+```
