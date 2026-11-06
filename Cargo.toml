@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "liberty_tools_native"
-version = "2.0.3"
+version = "2.0.4-dev"
 edition = "2021"
 
 [lib]
