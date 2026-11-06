@@ -30,6 +30,7 @@ dependencies = [
 
 [project.scripts]
 def-tools = "def_tools.cli:main"
+def-dump-instances = "def_tools.dump_instances:main"
 
 [project.urls]
 Repository = "https://github.com/smprather/open-eda-file-tools"

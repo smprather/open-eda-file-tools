@@ -40,6 +40,64 @@ python3 scripts/check_vendored_crates.py
 missing-file error. The `Vendored crates` workflow runs the same check and then
 builds `def_tools` offline; keep it green when touching `Cargo.toml`.
 
+## Read-only and air-gapped builds
+
+`cargo` only needs `vendor/` and `Cargo.lock`, so the Rust side builds with no
+network. Two constraints remain:
+
+- `uv run` installs the project editable and maturin copies the extension back
+  into the source tree, which fails on a read-only checkout. `uv run
+  --no-editable` is the minimal fix when the uv cache is warm.
+- With no warm uv cache, build with cargo directly and keep every writable path
+  under the working directory.
+
+`def_tools/scripts/run_example_offline.sh` does that end to end:
+
+```bash
+mkdir -p /tmp/run && cd /tmp/run
+/path/to/open-eda-file-tools/def_tools/scripts/run_example_offline.sh \
+  dump_instances.py --lef design.lef --def design.def.gz
+```
+
+It sets `CARGO_HOME` and `CARGO_TARGET_DIR` under `$PWD`, builds with
+`--offline --locked`, assembles an importable `py/def_tools` package, disables
+bytecode writes, and runs the example with that package on `PYTHONPATH`.
+Nothing outside `$PWD` is written.
+
+Interpreter selection is pinned, never a bare `python3` from `PATH`. The helper
+reads `def_tools/.python-version` (`3.14`), prefers the loadout `def-tools`
+venv interpreter, then `python3.14` / `python3.15`, then `python3`, checking
+each candidate's version. It exports `PYO3_PYTHON` so cargo builds the
+non-abi3 extension for exactly the interpreter that imports it. An explicit
+`PYTHON=/path/to/python3.14` is a contract: an interpreter older than
+`.python-version` is an error, not a fallback.
+
+The same pinning is available once the package is installed: the
+`def-dump-instances` console script is generated with an absolute-interpreter
+shebang, so `uv tool install` / a loadout install runs it with the owning
+interpreter no matter what `python3` resolves to.
+
+Wheels are not published (PyPI or release assets), so an air-gapped machine
+needs the vendored checkout and a Rust toolchain; the helper removes the uv and
+editable-install requirements but not the compiler.
+
+### zstd-sys OUT_DIR trap
+
+`zstd-sys` copies the vendored zstd headers into its build-script `OUT_DIR`
+with `fs::copy`, which preserves the read-only source mode (`444`). If a later
+build unit reuses the same `CARGO_TARGET_DIR`, the build script cannot
+overwrite those copies and panics:
+
+```text
+thread 'main' panicked at vendor/cargo/zstd-sys/build.rs:435:58:
+called `Result::unwrap()` on an `Err` value: Os { code: 13, kind: PermissionDenied, ... }
+```
+
+Use a fresh target directory, `chmod -R u+w
+.cargo-target/release/build/zstd-sys-*/out`, or let `run_example_offline.sh` do
+it — the helper repairs the OUT_DIR before and after each build, leaving it
+writable for the next build unit.
+
 ## Frontend
 
 The viewer loads `viewer/static/plotly.min.js` locally (not from a CDN), so it

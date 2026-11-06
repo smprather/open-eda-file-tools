@@ -18,6 +18,36 @@ uv sync
 uv run maturin develop --release
 ```
 
+## Offline / read-only runs
+
+`uv run` is the development route: it writes `.venv`, the uv cache and the
+cargo target directory, and installs the package editable. For a read-only,
+air-gapped checkout, build once with cargo and assemble the package in the
+directory you run from:
+
+```bash
+mkdir -p /tmp/run && cd /tmp/run
+/path/to/open-eda-file-tools/def_tools/scripts/run_example_offline.sh \
+  dump_instances.py --lef design.lef --def design.def.gz --output instances.parquet
+```
+
+The helper keeps `CARGO_HOME`, `CARGO_TARGET_DIR` and the assembled `py/`
+package under `$PWD`, builds with `--offline --locked`, and disables bytecode
+writes. It also repairs the `zstd-sys` build-script `OUT_DIR`, whose read-only
+header copies break a second build that reuses the target directory (see
+`BUILD.md`). Interpreter selection is pinned: the helper reads
+`.python-version`, prefers the loadout `def-tools` venv interpreter, then
+`python3.14`/`python3.15`, then `python3`, and exports `PYO3_PYTHON` so the
+extension is built for the interpreter that runs it. `PYTHON=/path/to/python3.14`
+overrides the search, and a too-old interpreter is an error rather than a
+fallback. Once the package is installed, `def-dump-instances` is the
+PATH-proof equivalent: its console-script shebang hard-references the owning
+interpreter.
+
+`uv run --no-editable` is the minimal fix when the tree is read-only but the uv
+cache is warm. Wheels are not published, so air-gapped machines still need the
+vendored checkout and a Rust toolchain.
+
 ## Instance Bounding Boxes
 
 Write placed instance bounding boxes as CSV:
@@ -29,6 +59,22 @@ uv run def-tools instances --lef sky130.lib.lef --def design.def.gz --output ins
 Plain `.def` and gzipped `.def.gz` inputs are supported. CSV columns are
 `instance,macro,status,orient,llx,lly,urx,ury`. Coordinates are DEF database
 units.
+
+For Parquet (default), an aligned table, or renamed columns, use the
+`def-dump-instances` console script. It is installed with the package and its
+shebang hard-references the owning interpreter, so the `python3` on `PATH` is
+irrelevant:
+
+```bash
+def-dump-instances --lef sky130.lib.lef --def design.def.gz --output instances.parquet
+def-dump-instances --format table --lef sky130.lib.lef --def design.def.gz --output instances.table
+def-dump-instances --format csv --columns instance=instance_name,llx=llx_um \
+    --lef sky130.lib.lef --def design.def.gz --output instances.csv
+```
+
+`python -m def_tools.dump_instances` and `examples/dump_instances.py` expose the
+same options; the example refuses to run under an interpreter older than 3.14 or
+one without the package, instead of failing with an import traceback.
 
 Python API:
 
