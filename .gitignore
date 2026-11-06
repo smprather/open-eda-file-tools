@@ -238,3 +238,8 @@ node_modules/
 
 # Great Docs build output (great-docs.yml is committed)
 great-docs/
+
+# Vendored crate trees are committed build inputs. Re-include everything under
+# vendor/ so the Python-template rules above (build/, lib/, target/, …) cannot
+# silently drop files that `cargo vendor` produced.
+!vendor/cargo/**

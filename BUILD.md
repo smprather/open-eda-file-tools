@@ -25,6 +25,21 @@ cargo vendor vendor/cargo
 mv /tmp/cargo-config.toml .cargo/config.toml
 ```
 
+Refresh the vendor tree with the source replacement moved aside, never through
+`git add` filters: the Python-flavoured `.gitignore` rules (`build/`, `lib/`,
+`target/`) match nested directories inside `vendor/cargo/*`, so the negations
+at the end of `.gitignore` keep the tree fully trackable. After a refresh,
+check that every file cargo expects is present and unchanged:
+
+```bash
+python3 scripts/check_vendored_crates.py
+```
+
+`cargo` rejects a vendored crate whose files do not match its
+`.cargo-checksum.json`, so a partial `git add` breaks every build with a
+missing-file error. The `Vendored crates` workflow runs the same check and then
+builds `def_tools` offline; keep it green when touching `Cargo.toml`.
+
 ## Frontend
 
 The viewer loads `viewer/static/plotly.min.js` locally (not from a CDN), so it

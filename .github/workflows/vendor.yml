@@ -1,0 +1,34 @@
+name: Vendored crates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vendor-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      # The three extensions must build from vendor/cargo alone. Any crate
+      # cargo tries to fetch fails loudly instead of falling back to crates.io.
+      CARGO_NET_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify vendor/cargo matches its checksum manifests
+        run: python3 scripts/check_vendored_crates.py
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.14"
+
+      - name: Build def-tools offline
+        run: uv build --wheel def_tools
