@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "def-tools"
-version = "2026.11.3"
+version = "2026.11.4.dev0"
 description = "Fast DEF parsing and query tools"
 readme = "README.md"
 requires-python = ">=3.14"
