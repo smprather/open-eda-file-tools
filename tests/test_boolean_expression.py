@@ -241,8 +241,10 @@ def test_dev_lib_accessors():
     idx = lt.LibraryIndex.open("dev.lib")
 
     y = idx.cell("BUFx2_ASAP7_6t_R").pin("Y")
-    assert str(y.function_expr()) == "A"
-    assert y.function_expr().variables == ["A"]
+    function_expr = y.function_expr()
+    assert function_expr is not None
+    assert str(function_expr) == "A"
+    assert function_expr.variables == ["A"]
 
     dff = idx.cell("DFFHQNx1_ASAP7_6t_R")
     ff = dff.ff()

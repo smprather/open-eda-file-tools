@@ -49,4 +49,4 @@ testpaths = ["tests"]
 [tool.ty.src]
 # lef_tools and def_tools are separate projects with their own venvs and
 # `ty check` runs.
-exclude = ["lef_tools", "def_tools"]
+exclude = ["lef_tools", "def_tools", "vendor"]

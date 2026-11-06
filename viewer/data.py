@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, overload
 
 import liberty_tools as lt
 
@@ -85,6 +85,14 @@ _BOOL_ATTRS = frozenset(
         "data_in",
     }
 )
+
+
+@overload
+def _fmt_bool(raw: str) -> str: ...
+
+
+@overload
+def _fmt_bool(raw: None) -> None: ...
 
 
 def _fmt_bool(raw: str | None) -> str | None:
@@ -475,7 +483,9 @@ class LibertyData:
             "clr": self._lit(g.clear),
             "scan": {"si": "SI", "se": "SE"} if ("SE" in ins and "SI" in ins) else None,
         }
-        spec["clock" if ff else "enable"] = self._lit(ff.clocked_on if ff else la.enable)
+        spec["clock" if ff else "enable"] = self._lit(
+            ff.clocked_on if ff else (la.enable if la else None)
+        )
         return spec
 
     def _pg_pin_table(self, cell: lt.Cell) -> dict[str, Any] | None:
@@ -516,7 +526,7 @@ class LibertyData:
             if key not in rows:
                 rows[key] = {}
                 order.append(key)
-            rows[key][lp.related_pg_pin if has_pg else "value"] = lp.value
+            rows[key][(lp.related_pg_pin or "value") if has_pg else "value"] = lp.value
         return {
             "id": f"cell:{cell_name}|leakage",
             "label": "leakage_power",
