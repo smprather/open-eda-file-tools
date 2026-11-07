@@ -1,0 +1,34 @@
+# Docker build context: keep generated state and local design collateral out,
+# but never filter vendor/cargo (which contains checksummed .pdf/.parquet files).
+# Do not use unanchored `target/`: vendored crates have nested target/ dirs.
+/.git/
+/.venv/
+/target/
+/def_tools/target/
+/lef_tools/target/
+/great-docs/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+/asap5/
+/dev.lib
+/generic80_ss_125c_1p116v_0p84v.lib
+/asap7sc7p5t_SEQ_LVT_TT_ccs_220123.lib
+/Liberty_User_Guides_and_Reference_Manual_Suite_Version_2017.06.pdf
+/liberty_spec.txt
+/liberty_spec_toc.txt
+/def_tools/17-fill.def.gz
+/def_tools/merged.min.lef
+/def_tools/sky130_ef_sc_hd.lef
+/def_tools/sky130_fd_sc_hd.lef
+/def_tools/sky130_sram_2kbyte_1rw1r_32x512_8.lef
+/def_tools/base.sdc
+/def_tools/*.pdf
+/def_tools/instances.parquet
+/def_tools/instances.table
+/def_tools/examples/instances.parquet
+/def_tools/examples/instances.table
+/def_tools/examples/instances.csv
+liberty_tools/_native*.so
+def_tools/src/def_tools/_def*.so

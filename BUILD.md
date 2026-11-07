@@ -98,6 +98,28 @@ Use a fresh target directory, `chmod -R u+w
 it — the helper repairs the OUT_DIR before and after each build, leaving it
 writable for the next build unit.
 
+### AlmaLinux 8 offline image
+
+`def_tools/docker/almalinux8.Dockerfile` proves the offline build on glibc
+2.28. `rustc`/`cargo` are assumed to be present on the offline system; the
+image installs the AlmaLinux Rust module and gcc for that baseline, plus a
+checksummed python-build-standalone CPython 3.15, then copies the checkout
+read-only. The compile and example run need no network and use only
+`vendor/cargo`:
+
+```bash
+docker build -f def_tools/docker/almalinux8.Dockerfile -t def-tools-almalinux8 .
+docker run --rm --network none def-tools-almalinux8
+```
+
+The container checks the vendored crate tree, generates a synthetic design,
+builds the extension offline, and runs `dump_instances.py`; success ends with
+`ok: /run/work/instances.parquet (...)`. The image is a test harness, not a
+distribution: it pins CPython 3.15 for the non-abi3 extension. `.dockerignore`
+must never filter `vendor/cargo` — the crates contain checksummed `.pdf` and
+`.parquet` files, and the entry point's checksum check fails the build if any
+are missing.
+
 ## Frontend
 
 The viewer loads `viewer/static/plotly.min.js` locally (not from a CDN), so it
