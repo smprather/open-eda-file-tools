@@ -26,6 +26,9 @@ jobs:
       - name: Verify vendor/cargo matches its checksum manifests
         run: python3 scripts/check_vendored_crates.py
 
+      - name: Build the whole workspace offline
+        run: cargo build --workspace --offline --locked
+
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: "3.14"

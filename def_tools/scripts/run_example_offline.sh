@@ -133,6 +133,14 @@ for tool in cargo "$PYTHON"; do
     fi
 done
 
+PACKAGE_DIR=$RUN/py/def_tools
+MARKER=$RUN/py/.def-tools-run
+if [ -e "$RUN/py" ] && [ ! -e "$MARKER" ]; then
+    echo "error: $RUN/py exists and was not created by run_example_offline.sh" >&2
+    echo "       remove it or run from a different directory" >&2
+    exit 1
+fi
+
 export CARGO_HOME=$RUN/.cargo-home
 export CARGO_TARGET_DIR=$RUN/.cargo-target
 export CARGO_NET_OFFLINE=true
@@ -176,8 +184,9 @@ if [ -z "$SUFFIX" ]; then
     exit 1
 fi
 
-PACKAGE_DIR=$RUN/py/def_tools
-rm -rf "$RUN/py"
+mkdir -p "$RUN/py"
+: > "$MARKER"
+rm -rf "$PACKAGE_DIR"
 mkdir -p "$PACKAGE_DIR"
 cp "$PKG_DIR"/src/def_tools/*.py "$PACKAGE_DIR"/
 for extra in _def.pyi py.typed; do

@@ -1,0 +1,48 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [".", "lef_tools", "def_tools"]
+    defaults:
+      run:
+        working-directory: ${{ matrix.project }}
+    env:
+      # Crate sources come from vendor/cargo; Python test deps may use PyPI.
+      CARGO_NET_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.14"
+
+      - name: Sync dependencies and build the extension
+        run: |
+          uv sync --dev
+          uv run maturin develop --release
+
+      - name: Test
+        run: uv run pytest -q
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run ty check

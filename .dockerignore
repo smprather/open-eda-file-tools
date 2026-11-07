@@ -2,7 +2,7 @@
 # but never filter vendor/cargo (which contains checksummed .pdf/.parquet files).
 # Do not use unanchored `target/`: vendored crates have nested target/ dirs.
 /.git/
-/.venv/
+**/.venv/
 /target/
 /def_tools/target/
 /lef_tools/target/

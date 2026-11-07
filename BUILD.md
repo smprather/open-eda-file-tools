@@ -96,9 +96,8 @@ Run cargo from `def_tools/` (or another directory inside the repository) so it
 discovers `.cargo/config.toml`; a build started outside the repository with
 `--manifest-path` misses the vendored source replacement.
 
-The output is `target/release/libdef_tools_native.so`, a non-abi3 extension.
-The extension and the interpreter that loads it must match; the helper exports
-`PYO3_PYTHON` for exactly that reason.
+The build output lands at the workspace root `target/release/`
+(`def_tools/target/` is not created), so verify from the repository root.
 
 ### Run the example
 
@@ -116,7 +115,7 @@ Expected tail:
 ```text
 instances: <N>
 format: parquet
-output: /tmp/run/instances.parquet (… bytes)
+output: /tmp/run/instances.parquet (… MB)
 ```
 
 The helper sets `CARGO_HOME`/`CARGO_TARGET_DIR` under `$PWD`, builds with
@@ -149,12 +148,19 @@ checkout.
 ### Verify the result (self-evidence)
 
 ```bash
+cd /path/to/open-eda-file-tools
 file target/release/libdef_tools_native.so
 # ELF 64-bit ... shared object, x86-64
 ldd target/release/libdef_tools_native.so
 # linux-vdso, libgcc_s, libm, libc, ld-linux -- no libpython or Loadout paths
-PYTHONPATH=/tmp/run/py python3.15 -c 'import def_tools; print(def_tools.__version__)'
+PYTHONPATH=/tmp/run/py python3.15 -c 'import def_tools; print(def_tools.__file__)'
+# /tmp/run/py/def_tools/__init__.py -- the assembled package, not site-packages
 ```
+
+The assembled `py/` layout has no distribution metadata, so `__version__`
+falls back to a placeholder there; the import path is what this step proves.
+The non-abi3 extension must be built for the interpreter that loads it; the
+helper exports `PYO3_PYTHON` for exactly that reason.
 
 The Docker run below exits 0 only when the vendored tree is complete, the
 extension builds with no network, and the example writes its Parquet output.

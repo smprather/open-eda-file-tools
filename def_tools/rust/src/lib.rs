@@ -2684,6 +2684,43 @@ mod tests {
         assert_eq!(bbox.macro_name, "INV");
     }
 
+    #[test]
+    fn parquet_writer_renames_columns_in_order() {
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+
+        let lef = tempfile_path("def_tools_columns.lef");
+        std::fs::write(&lef, "MACRO INV\n  SIZE 1.0 BY 1.0 ;\nEND INV\n").unwrap();
+        let def = tempfile_path("def_tools_columns.def");
+        std::fs::write(
+            &def,
+            "VERSION 5.8 ;\nUNITS DISTANCE MICRONS 1000 ;\nCOMPONENTS 1 ;\n  - u1 INV + PLACED ( 10 20 ) N ;\nEND COMPONENTS\n",
+        )
+        .unwrap();
+        let output = tempfile_path("def_tools_columns.parquet");
+
+        let columns = parse_columns(Some(vec![
+            ("instance".to_string(), "name".to_string()),
+            ("base_cell".to_string(), "cell".to_string()),
+        ]))
+        .unwrap();
+        let (rows, row_groups) =
+            write_instance_parquet_impl(&[lef.clone()], &def, &output, 1024, &columns).unwrap();
+        assert_eq!((rows, row_groups), (1, 1));
+
+        let reader = SerializedFileReader::new(File::open(&output).unwrap()).unwrap();
+        let schema = reader.metadata().file_metadata().schema_descr();
+        let names: Vec<&str> = schema
+            .columns()
+            .iter()
+            .map(|column| column.name())
+            .collect();
+        assert_eq!(names, ["name", "cell"]);
+
+        std::fs::remove_file(lef).ok();
+        std::fs::remove_file(def).ok();
+        std::fs::remove_file(output).ok();
+    }
+
     fn tempfile_path(name: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);

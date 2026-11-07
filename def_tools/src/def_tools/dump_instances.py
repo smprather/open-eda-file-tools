@@ -248,6 +248,7 @@ def report(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    output_existed = args.output.exists()
     dbu_per_micron, expected = read_header(args.design)
     lefs = [str(path) for path in args.lef]
 
@@ -279,7 +280,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             parquet_info = (batch_size, row_groups)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
-        args.output.unlink(missing_ok=True)
+        # The writers validate the LEF/DEF before creating the output, so a
+        # failure may leave a pre-existing file at this path untouched.
+        if not output_existed:
+            args.output.unlink(missing_ok=True)
         return 1
 
     elapsed = time.perf_counter() - started

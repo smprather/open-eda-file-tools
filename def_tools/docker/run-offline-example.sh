@@ -26,10 +26,23 @@ echo "cc:     $(cc --version | head -1)"
 "$PYTHON" /src/def_tools/tests/gen/design_gen.py \
     -o "$PWD/gen" -n "${INSTANCES:-20000}" >/dev/null
 
-/src/def_tools/scripts/run_example_offline.sh dump_instances.py \
-    --lef "$PWD/gen/design.lef" \
-    --def "$PWD/gen/design.def.gz" \
-    --output "$PWD/instances.parquet"
+example_report=$(
+    /src/def_tools/scripts/run_example_offline.sh dump_instances.py \
+        --lef "$PWD/gen/design.lef" \
+        --def "$PWD/gen/design.def.gz" \
+        --output "$PWD/instances.parquet"
+)
+printf '%s\n' "$example_report"
+
+reported=$(printf '%s\n' "$example_report" | sed -n 's/^instances: //p' | tr -d ,)
+expected=$(
+    "$PYTHON" -c 'import json, sys; print(json.load(open(sys.argv[1]))["counts"]["components"])' \
+        "$PWD/gen/manifest.json"
+)
+if [ "$reported" != "$expected" ]; then
+    echo "error: example reported '$reported' instances, manifest says '$expected'" >&2
+    exit 1
+fi
 
 test -s "$PWD/instances.parquet"
 echo "ok: $PWD/instances.parquet ($(stat -c %s "$PWD/instances.parquet") bytes)"
