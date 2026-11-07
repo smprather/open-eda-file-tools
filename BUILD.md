@@ -92,8 +92,8 @@ CARGO_NET_OFFLINE=true cargo build --release --locked --offline --lib
 # Finished `release` profile [optimized] target(s) in ...
 ```
 
-Run cargo from `def_tools/` (or any descendant of the repository root) so it
-discovers `.cargo/config.toml`; a build started elsewhere with
+Run cargo from `def_tools/` (or another directory inside the repository) so it
+discovers `.cargo/config.toml`; a build started outside the repository with
 `--manifest-path` misses the vendored source replacement.
 
 The output is `target/release/libdef_tools_native.so`, a non-abi3 extension.
@@ -149,9 +149,9 @@ checkout.
 ### Verify the result (self-evidence)
 
 ```bash
-file def_tools/target/release/libdef_tools_native.so
+file target/release/libdef_tools_native.so
 # ELF 64-bit ... shared object, x86-64
-ldd def_tools/target/release/libdef_tools_native.so
+ldd target/release/libdef_tools_native.so
 # linux-vdso, libgcc_s, libm, libc, ld-linux -- no libpython or Loadout paths
 PYTHONPATH=/tmp/run/py python3.15 -c 'import def_tools; print(def_tools.__version__)'
 ```
@@ -191,7 +191,7 @@ docker run --rm --network none \
 
 The entry point verifies the vendored tree, generates a synthetic design,
 builds offline, and runs `dump_instances.py`; success ends with
-`ok: /run/work/instances.parquet (...)`. `INSTANCES=2585205` exercises the
+`ok: /run/work/instances.parquet (...)`. Pass `-e INSTANCES=2585205` to run the
 full-size design (2.58M instances). `.dockerignore` must never filter
 `vendor/cargo` — the crates contain checksummed `.pdf` and `.parquet` files,
 and the entry point's checksum check fails the build if any are missing.
