@@ -48,6 +48,11 @@ interpreter.
 cache is warm. Wheels are not published, so air-gapped machines still need the
 vendored checkout and a Rust toolchain.
 
+For the complete offline runbook — Engineering Loadout's `rust`/`portable-python`
+supply the toolchain, and the rebuild/verify checklist plus the AlmaLinux 8
+Docker proof are in `BUILD.md` — see
+[Offline builds](../BUILD.md#offline-builds).
+
 ## Instance Bounding Boxes
 
 Write placed instance bounding boxes as CSV:

@@ -40,46 +40,124 @@ python3 scripts/check_vendored_crates.py
 missing-file error. The `Vendored crates` workflow runs the same check and then
 builds `def_tools` offline; keep it green when touching `Cargo.toml`.
 
-## Read-only and air-gapped builds
+## Offline builds
 
-`cargo` only needs `vendor/` and `Cargo.lock`, so the Rust side builds with no
-network. Two constraints remain:
+### What is vendored and what the environment supplies
 
-- `uv run` installs the project editable and maturin copies the extension back
-  into the source tree, which fails on a read-only checkout. `uv run
-  --no-editable` is the minimal fix when the uv cache is warm.
-- With no warm uv cache, build with cargo directly and keep every writable path
-  under the working directory.
+`vendor/cargo/` plus `Cargo.lock` contain every Rust **package dependency**.
+No compiler or interpreter is vendored: an offline workstation provides those
+(Engineering Loadout does; see below).
 
-`def_tools/scripts/run_example_offline.sh` does that end to end:
+| Needed | Supplied by | Verify |
+| --- | --- | --- |
+| Crate dependencies | `vendor/cargo/` + `Cargo.lock` | `python3 scripts/check_vendored_crates.py` |
+| `rustc`, `cargo` | offline system; Loadout `rust` 1.96.0 | `cargo --version` |
+| Python 3.14+ | offline system; Loadout `portable-python` 3.15.0 | `python3.15 --version` |
+| C compiler | offline system; gcc 8.5 (EL8) or clang 23 | `cc --version` |
+| Python packages | **not vendored** | examples need none; pytest does |
+
+`.cargo/config.toml` redirects crates.io to `vendor/cargo`, so
+`cargo build --offline --locked` never contacts a registry.
+
+### Engineering Loadout (the offline package manager)
+
+On the reference machine Loadout lives in `~/engineering-loadout` and installs
+under `$XDG_DATA_HOME/loadout` (default `~/.local/share/loadout`). It supplies
+the toolchain this repository needs:
+
+```bash
+./loadout info rust              # 1.96.0, payload/.../runtime/rust.tar.bz2
+./loadout info portable-python   # 3.15.0, BOLT-optimized CPython
+./loadout install rust portable-python
+export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/loadout/bin:$PATH"
+export PYTHON="${XDG_DATA_HOME:-$HOME/.local/share}/loadout/bin/python3.15"
+```
+
+Loadout installs from its release payload; neither the install nor the build
+needs network. `clang` 23 is also available (`./loadout install clang`) for
+systems without gcc: set `CC=clang` and `AR=llvm-ar`. gcc/glibc headers remain
+system prerequisites because `zstd-sys` compiles vendored C sources.
+
+### Reproduce the compile
+
+Run these from the repository root. Each step prints the expected evidence.
+
+```bash
+python3 scripts/check_vendored_crates.py
+# ok: 119 crates, 5536 files present and unchanged
+
+cd def_tools
+CARGO_NET_OFFLINE=true cargo build --release --locked --offline --lib
+# ...
+# Finished `release` profile [optimized] target(s) in ...
+```
+
+Run cargo from `def_tools/` (or any descendant of the repository root) so it
+discovers `.cargo/config.toml`; a build started elsewhere with
+`--manifest-path` misses the vendored source replacement.
+
+The output is `target/release/libdef_tools_native.so`, a non-abi3 extension.
+The extension and the interpreter that loads it must match; the helper exports
+`PYO3_PYTHON` for exactly that reason.
+
+### Run the example
+
+Everything writable stays in the current directory:
 
 ```bash
 mkdir -p /tmp/run && cd /tmp/run
-/path/to/open-eda-file-tools/def_tools/scripts/run_example_offline.sh \
-  dump_instances.py --lef design.lef --def design.def.gz
+PYTHON="${XDG_DATA_HOME:-$HOME/.local/share}/loadout/bin/python3.15" \
+  /path/to/open-eda-file-tools/def_tools/scripts/run_example_offline.sh \
+  dump_instances.py --lef design.lef --def design.def.gz --output instances.parquet
 ```
 
-It sets `CARGO_HOME` and `CARGO_TARGET_DIR` under `$PWD`, builds with
-`--offline --locked`, assembles an importable `py/def_tools` package, disables
-bytecode writes, and runs the example with that package on `PYTHONPATH`.
-Nothing outside `$PWD` is written.
+Expected tail:
 
-Interpreter selection is pinned, never a bare `python3` from `PATH`. The helper
-reads `def_tools/.python-version` (`3.14`), prefers the loadout `def-tools`
-venv interpreter, then `python3.14` / `python3.15`, then `python3`, checking
-each candidate's version. It exports `PYO3_PYTHON` so cargo builds the
-non-abi3 extension for exactly the interpreter that imports it. An explicit
-`PYTHON=/path/to/python3.14` is a contract: an interpreter older than
-`.python-version` is an error, not a fallback.
+```text
+instances: <N>
+format: parquet
+output: /tmp/run/instances.parquet (… bytes)
+```
 
-The same pinning is available once the package is installed: the
-`def-dump-instances` console script is generated with an absolute-interpreter
-shebang, so `uv tool install` / a loadout install runs it with the owning
-interpreter no matter what `python3` resolves to.
+The helper sets `CARGO_HOME`/`CARGO_TARGET_DIR` under `$PWD`, builds with
+`--offline --locked`, assembles `py/def_tools`, disables bytecode writes, and
+pins the interpreter (`PYTHON` override, checked against
+`def_tools/.python-version`). Nothing outside `$PWD` is written and the
+checkout may be read-only. Once installed, `def-dump-instances` uses the same
+pin through an absolute-interpreter shebang.
 
-Wheels are not published (PyPI or release assets), so an air-gapped machine
-needs the vendored checkout and a Rust toolchain; the helper removes the uv and
-editable-install requirements but not the compiler.
+Wheels are not published, so an air-gapped machine compiles from the vendored
+checkout.
+
+### Modify or optimize offline
+
+- Rust backend: `def_tools/rust/src/lib.rs`. Python API/CLI:
+  `def_tools/src/def_tools/` (`__init__.py`, `cli.py`, `dump_instances.py`,
+  `io_config.py`, `sdc.py`).
+- Rebuild incrementally with the same command. The helper is safe to re-run:
+  it reuses `$PWD/.cargo-target`.
+- **Do not add crates offline.** A new dependency needs a networked
+  `cargo vendor vendor/cargo` refresh (move `.cargo/config.toml` aside first),
+  then commit `vendor/` and re-run `scripts/check_vendored_crates.py`.
+- Keep `PYO3_PYTHON` in sync with the interpreter you run; the helper does.
+- Tests need dev-only Python packages (`pytest`), which are not vendored in
+  this repository. The examples and the native build need none.
+- The example report (`wall`, `peak RSS`, instances/s) is the quickest way to
+  measure a runtime change; every documented command already uses the release
+  profile.
+
+### Verify the result (self-evidence)
+
+```bash
+file def_tools/target/release/libdef_tools_native.so
+# ELF 64-bit ... shared object, x86-64
+ldd def_tools/target/release/libdef_tools_native.so
+# linux-vdso, libgcc_s, libm, libc, ld-linux -- no libpython or Loadout paths
+PYTHONPATH=/tmp/run/py python3.15 -c 'import def_tools; print(def_tools.__version__)'
+```
+
+The Docker run below exits 0 only when the vendored tree is complete, the
+extension builds with no network, and the example writes its Parquet output.
 
 ### zstd-sys OUT_DIR trap
 
@@ -98,27 +176,25 @@ Use a fresh target directory, `chmod -R u+w
 it — the helper repairs the OUT_DIR before and after each build, leaving it
 writable for the next build unit.
 
-### AlmaLinux 8 offline image
+### Docker reproduction (AlmaLinux 8, no network)
 
-`def_tools/docker/almalinux8.Dockerfile` proves the offline build on glibc
-2.28. `rustc`/`cargo` are assumed to be present on the offline system; the
-image installs the AlmaLinux Rust module and gcc for that baseline, plus a
-checksummed python-build-standalone CPython 3.15, then copies the checkout
-read-only. The compile and example run need no network and use only
-`vendor/cargo`:
+`def_tools/docker/almalinux8.Dockerfile` models an air-gapped AlmaLinux 8
+(glibc 2.28) workstation: gcc comes from the image, while rustc/cargo and
+Python come from the Engineering Loadout install mounted at `/opt/loadout`.
 
 ```bash
 docker build -f def_tools/docker/almalinux8.Dockerfile -t def-tools-almalinux8 .
-docker run --rm --network none def-tools-almalinux8
+docker run --rm --network none \
+  -v "${XDG_DATA_HOME:-$HOME/.local/share}/loadout:/opt/loadout:ro" \
+  def-tools-almalinux8
 ```
 
-The container checks the vendored crate tree, generates a synthetic design,
-builds the extension offline, and runs `dump_instances.py`; success ends with
-`ok: /run/work/instances.parquet (...)`. The image is a test harness, not a
-distribution: it pins CPython 3.15 for the non-abi3 extension. `.dockerignore`
-must never filter `vendor/cargo` — the crates contain checksummed `.pdf` and
-`.parquet` files, and the entry point's checksum check fails the build if any
-are missing.
+The entry point verifies the vendored tree, generates a synthetic design,
+builds offline, and runs `dump_instances.py`; success ends with
+`ok: /run/work/instances.parquet (...)`. `INSTANCES=2585205` exercises the
+full-size design (2.58M instances). `.dockerignore` must never filter
+`vendor/cargo` — the crates contain checksummed `.pdf` and `.parquet` files,
+and the entry point's checksum check fails the build if any are missing.
 
 ## Frontend
 
