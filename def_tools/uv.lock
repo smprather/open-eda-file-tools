@@ -22,7 +22,7 @@ wheels = [
 
 [[package]]
 name = "def-tools"
-version = "2026.11.4"
+version = "2026.11.5.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
