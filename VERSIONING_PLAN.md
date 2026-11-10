@@ -1,85 +1,97 @@
 # Versioning Plan
 
-The repository ships three distributions, each with its own version:
+`open-eda-file-tools` is one project with one version. It ships several
+command-line tools — `liberty-view`, `liberty-format`, `lef-tools`,
+`def-tools` — and every one of them comes from the same source tree, the same
+release, and the same version number.
 
-| Distribution | Version lives in | Scheme |
-| --- | --- | --- |
-| `liberty-tools` | root `Cargo.toml` and `pyproject.toml` | SemVer |
-| `lef-tools` | `lef_tools/Cargo.toml` and `lef_tools/pyproject.toml` | `YYYY.M.N` (CalVer, also valid SemVer) |
-| `def-tools` | `def_tools/Cargo.toml` and `def_tools/pyproject.toml` | `YYYY.M.N` (CalVer, also valid SemVer) |
+The project is packaged as three Python distributions because each Rust
+backend is its own extension module (`liberty_tools._native`,
+`lef_tools._lef`, `def_tools._def`). Those distributions are build units, not
+separate projects: they always carry the same version, are tagged and released
+together, and are installed from the same checkout.
 
-The Cargo and Python versions of one distribution must stay in sync: maturin
-takes the wheel version from `pyproject.toml`, while Cargo uses `Cargo.toml`.
+| Build unit | Version lives in |
+| --- | --- |
+| `liberty-tools` | root `Cargo.toml` (workspace), `pyproject.toml`, `uv.lock` |
+| `lef-tools` | `lef_tools/pyproject.toml`, `lef_tools/uv.lock`; Cargo version inherited |
+| `def-tools` | `def_tools/pyproject.toml`, `def_tools/uv.lock`; Cargo version inherited |
 
-GitHub release tags are repository-wide; a tag names a point where every
-distribution is at a stable version. A tool that did not change can keep its
-previous version across consecutive repository releases.
+## Scheme
 
-## Cargo Version
+Releases use the same CalVer as `watchglass`: the release date, `YYYY.M.D`,
+without zero padding, with a same-day ordinal when the project ships more than
+once in a day. Every version is valid PEP 440, so it can be uploaded to PyPI.
 
-Each package version must remain valid SemVer because Cargo enforces SemVer
-syntax.
-
-Release commits use stable versions:
-
-```toml
-version = "1.0.0"          # root: liberty-tools
-version = "2026.11.0"      # lef_tools: lef-tools, def_tools: def-tools
+```text
+2026.11.5        # release on 5 November 2026
+2026.11.5.1      # second release that day
 ```
 
-After a release, `main` is bumped to the next development version:
+There are no per-tool versions and no development versions:
+
+- The Cargo version is defined once, in `[workspace.package]` in the root
+  `Cargo.toml`. Every crate uses `version.workspace = true`.
+- Each `pyproject.toml` carries the same version, and each `uv.lock` records
+  it.
+- There is no `-dev` or `.dev0` suffix and no post-release bump: `main` keeps
+  the last released version until the next release commit sets the new date.
+  The release date is not known in advance, so a development version would
+  have to guess it.
+
+## Cargo and the Fourth Component
+
+Cargo accepts SemVer, which has exactly three numeric components. A fourth
+fails with `unexpected character '.' after patch version number`, so the
+Cargo version cannot be `2026.11.5.1`.
+
+The project therefore uses the full version on the Python side and the
+three-component date on the Cargo side for a same-day follow-up:
 
 ```toml
-version = "1.0.1-dev"
+# Cargo.toml (workspace) and Cargo.lock
+version = "2026.11.5"
+
+# pyproject.toml, uv.lock and the wheel
+version = "2026.11.5.1"
 ```
 
-Patch, minor, and major changes follow SemVer:
-
-- Patch: backward-compatible bug fixes.
-- Minor: backward-compatible new functionality.
-- Major: incompatible CLI, output, or behavior changes.
-
-Default post-release bump is patch `-dev`. Bump minor only when the next cycle
-has added backward-compatible functionality. Bump major only for breaking
-changes. `lef-tools` and `def-tools` use the same CalVer form for releases and
-bump the last component for development builds.
+The three components must match across the two. maturin takes the wheel
+version from `pyproject.toml` and accepts the difference: a wheel built from
+`2026.11.5.1` in `pyproject.toml` with `2026.11.5` in `Cargo.toml` reports
+`Version: 2026.11.5.1` in its metadata. Only the same-day ordinal is ever
+missing from Cargo.
 
 ## Release Tags
 
-GitHub releases use month-based tags:
+One tag covers the whole project:
 
 ```text
-vYYYY.M.N[-suffix]
+vYYYY.M.D[.N]
 ```
 
-Example:
+Examples:
 
 ```text
-v2026.10.1
+v2026.11.5
+v2026.11.5.1    # second release on 2026-11-05
 ```
 
-`N` starts at `1` for the first release of a month and increments for each
-additional release in the same month.
+`D` is the day of release without zero padding. `N` starts at `1` for the
+second release on that day and increments for each additional one. Release
+tags carry no suffix and point at commits where every build unit is at the
+released version.
 
-The optional `[-suffix]` marks a tag that is not a release — for example
-`v2026.10.1-dev` for a development snapshot. Release tags carry no suffix.
-
-Release tags should point at commits where `Cargo.toml` contains a stable
-SemVer version, not a `-dev` version.
-
-Tags released before this scheme (for example `v2026.06.01.1`) use the older
-date-based `vYYYY.MM.DD.N` form and are left as they are.
+Tags from the previous month-sequence scheme (`v2026.11.1` … `v2026.11.5`) and
+the older date-based `vYYYY.MM.DD.N` form (`v2026.06.01.1`) are historical and
+are left as they are.
 
 ## CLI Version Output
 
-`liberty-format --version` prints the Liberty package version, `lef-tools
---version` the LEF version, and `def-tools --version` the DEF version:
+Every tool prints the project version:
 
 ```text
-liberty-format 1.0.1-dev
-lef-tools, version 2026.11.0
-def-tools, version 2026.11.0
+liberty-format 2026.11.9
+lef-tools, version 2026.11.9
+def-tools, version 2026.11.9
 ```
-
-On release-tagged commits, each should print the stable version for its
-distribution.

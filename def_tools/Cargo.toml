@@ -1,6 +1,6 @@
 [package]
 name = "def-tools-native"
-version = "2026.11.5-dev"
+version.workspace = true
 edition = "2024"
 description = "Rust backend for fast DEF parsing and queries"
 license = "MIT"

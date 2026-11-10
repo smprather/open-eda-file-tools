@@ -42,8 +42,9 @@ The package also ships `py.typed` and `.pyi` stubs for coding tools.
 ## LEF Tools
 
 The `lef-tools` distribution parses cell LEF libraries into typed macros, pins,
-ports and rectangles. It is the project in `lef_tools/`, keeps its own
-virtualenv, and installs one command. All geometry stays in LEF microns.
+ports and rectangles. It is the library and CLI in `lef_tools/`, keeps its own
+development virtualenv, and installs one command. All geometry stays in LEF
+microns.
 
 ```bash
 cd lef_tools
@@ -64,8 +65,8 @@ for pin in macro.pins():
 
 ## DEF Tools
 
-The `def-tools` distribution parses and queries DEF designs. It is the project
-in `def_tools/` and installs one command:
+The `def-tools` distribution parses and queries DEF designs. It is the library
+and CLI in `def_tools/` and installs one command:
 
 | Command | What it does |
 |---|---|
@@ -95,11 +96,10 @@ cover the APIs, CLIs, binary DEF cache and storage configurator.
 
 ## Project Status
 
-The parser is already useful for large timing libraries. Releases follow
-SemVer (see
+The parser is already useful for large timing libraries. The whole project
+has one version (see
 [VERSIONING_PLAN.md](https://github.com/smprather/open-eda-file-tools/blob/main/VERSIONING_PLAN.md)):
-backward-compatible additions land in a minor release, and an incompatible
-API, output or CLI change gets a major bump.
+CalVer `YYYY.M.D`, with every tool released together from one tag.
 
 On the local 96.8 MB reference Liberty file, the release extension parses the
 whole library into an in-memory document in about 1.5 seconds (~150 MB peak
@@ -108,11 +108,14 @@ RSS). The lazy `LibraryIndex` used by the viewer opens the same file in about
 
 ## Repository Layout
 
-The Liberty tool is the package at the repository root (`liberty_tools`, with
-its Rust backend in `src/` and its tests in `tests/`). The LEF and DEF tools
-are self-contained projects in `lef_tools/` and `def_tools/`, each with its own
-`pyproject.toml`, distribution, Rust crate, tests and CLI. Each additional tool
-gets its own directory and its own distribution; the
+The repository is one project at one version. The Liberty tool is the package
+at the repository root (`liberty_tools`, with its Rust backend in `src/` and
+its tests in `tests/`); the LEF and DEF tools live in `lef_tools/` and
+`def_tools/`. Each directory holds its own Python package, `pyproject.toml`,
+Rust crate and development virtualenv, because each Rust backend is a separate
+extension module — they are build units of the same project, not separate
+projects. An additional tool gets its own directory and command-line entry
+point under the same version; the
 [Tools guide](https://smprather.github.io/open-eda-file-tools/user-guide/tools.html)
 lists the tools and the steps for adding one. Shared build, test and release
 conventions are in
@@ -135,7 +138,7 @@ For projects managed by `uv`:
 uv add "liberty-tools @ git+https://github.com/smprather/open-eda-file-tools.git"
 ```
 
-The LEF and DEF distributions are subdirectories of the same repository:
+The LEF and DEF tools install from their directories in the same repository:
 
 ```bash
 uv add "lef-tools @ git+https://github.com/smprather/open-eda-file-tools.git#subdirectory=lef_tools"

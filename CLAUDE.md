@@ -2,8 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-`open-eda-file-tools` hosts EDA data-file tooling. The repository ships three
-tools, each its own Python distribution:
+`open-eda-file-tools` is one project with one version that ships several
+command-line tools:
 
 - `liberty_tools` / `liberty-tools` — Liberty `.lib` parser, writer, viewer and
   formatter (`liberty-view`, `liberty-format`), at the repository root.
@@ -12,14 +12,20 @@ tools, each its own Python distribution:
 - `def_tools` / `def-tools` — DEF parser, binary cache and design queries
   (`def-tools`), in `def_tools/`.
 
+They are packaged as three Python distributions only because each Rust backend
+is its own extension module. They are build units of the same project: one
+version (`[workspace.package]` in the root `Cargo.toml` plus every
+`pyproject.toml`), one release tag, one release history.
+
 ## Repository Layout
 
-The repository root is the Liberty tool's project (`liberty_tools`, Rust
-backend in `src/`, tests in `tests/`). Every other tool is a self-contained
-project in its own directory at the root — currently `lef_tools/` and
-`def_tools/`, with more planned (VCD, …). Each tool directory has its own
-`pyproject.toml`, distribution, version, Rust crate, `tests/` and
-command-line entry points — see `user_guide/tools.qmd`. Do not add one
+The repository root is the Liberty tool (`liberty_tools`, Rust backend in
+`src/`, tests in `tests/`). Every other tool lives in its own directory at the
+root — currently `lef_tools/` and `def_tools/`, with more planned (VCD, …).
+Each directory has its own `pyproject.toml`, Python package, Rust crate,
+`tests/` and command-line entry points, because each Rust backend is a separate
+extension module; these are build units of the one project, which has one
+version and one release history — see `user_guide/tools.qmd`. Do not add one
 format's code to another tool's package.
 
 ```
@@ -201,9 +207,10 @@ packages stay independent.
 - **Errors name the input.** Malformed LEF raises `ValueError` naming file,
   macro and pin; unreadable files raise an `OSError` subclass; unknown
   `library.macro()` / `macro.pin()` names raise `KeyError`.
-- **`__version__` is the installed distribution version inside this repo.**
-  `version.py` consults git only when the tool's own project directory is a git
-  root; monorepo tags and commit counts must not leak into it.
+- **`__version__` is the installed distribution version, with no git fallback.**
+  CalVer releases (`YYYY.M.D`, same-day `YYYY.M.D.N`) ship the release version
+  on HEAD until the next release, so `version.py` reads installed metadata and
+  nothing else.
 
 ## DEF package (`def_tools/`)
 
@@ -239,9 +246,10 @@ def_tools/tests/gen/design_gen.py     synthetic LEF/DEF/SDC design generator
   only matching records. Bump `CACHE_VERSION` when the layout changes.
 - **Heavy work releases the GIL** via `py.detach(...)`; batch and parallelize
   in Rust (rayon), never by loading a whole DEF into Python.
-- **`__version__` is the installed distribution version inside this repo.**
-  `version.py` consults git only when the tool's own project directory is a git
-  root; monorepo tags and commit counts must not leak into it.
+- **`__version__` is the installed distribution version, with no git fallback.**
+  CalVer releases (`YYYY.M.D`, same-day `YYYY.M.D.N`) ship the release version
+  on HEAD until the next release, so `version.py` reads installed metadata and
+  nothing else.
 
 ## Liberty spec reference
 

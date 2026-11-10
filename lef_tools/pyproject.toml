@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "lef-tools"
-version = "2026.11.0"
+version = "2026.11.9"
 description = "Fast cell LEF parsing and query tools"
 readme = "README.md"
 requires-python = ">=3.14"

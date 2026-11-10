@@ -4,9 +4,10 @@ Parse and query cell LEF (Library Exchange Format) files.
 
 `lef-tools` is part of the
 [open-eda-file-tools](https://github.com/smprather/open-eda-file-tools)
-repository and lives in the `lef_tools/` subdirectory. It keeps its own
-distribution, version, Rust crate and virtualenv. It is split out of the
-former `lefdef-tools` project.
+project and lives in the `lef_tools/` directory. The directory keeps its own
+Python package, Rust crate and development virtualenv because its backend is a
+separate extension module; it is a library and CLI of the one project, which
+shares a single version across all tools.
 
 ## Install
 

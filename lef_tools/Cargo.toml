@@ -1,6 +1,6 @@
 [package]
 name = "lef-tools-native"
-version = "2026.11.0"
+version.workspace = true
 edition = "2024"
 description = "Rust backend for cell LEF parsing and queries"
 license = "MIT"

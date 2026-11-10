@@ -2,9 +2,13 @@
 members = ["lef_tools", "def_tools"]
 resolver = "3"
 
+[workspace.package]
+# One project, one version: every distribution and crate inherits this.
+version = "2026.11.9"
+
 [package]
 name = "liberty_tools_native"
-version = "2.0.6-dev"
+version.workspace = true
 edition = "2021"
 
 [lib]

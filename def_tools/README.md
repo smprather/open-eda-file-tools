@@ -4,11 +4,12 @@ Parse and query DEF (Design Exchange Format) files.
 
 `def-tools` is part of the
 [open-eda-file-tools](https://github.com/smprather/open-eda-file-tools)
-repository and lives in the `def_tools/` subdirectory. It keeps its own
-distribution, version, Rust crate and virtualenv. It is split out of the
-former `lefdef-tools` project. Cell LEF parsing lives in `lef-tools`; the DEF
-backend links it in Rust for macro sizes, so the Python packages stay
-independent.
+project and lives in the `def_tools/` directory. The directory keeps its own
+Python package, Rust crate and development virtualenv because its backend is a
+separate extension module; it is a library and CLI of the one project, which
+shares a single version across all tools. Cell LEF parsing lives in
+`lef-tools`; the DEF backend links it in Rust for macro sizes, so the Python
+packages stay independent.
 
 ## Install
 

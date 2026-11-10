@@ -248,7 +248,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/8a/3c/1b5a749a833696d83
 
 [[package]]
 name = "liberty-tools"
-version = "2.0.6.dev0"
+version = "2026.11.9"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
