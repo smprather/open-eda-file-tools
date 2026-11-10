@@ -718,7 +718,7 @@ def _spot_checks(spec: DesignSpec, count: int = 12) -> list[dict]:
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     ap.add_argument("-o", "--out-dir", type=Path, required=True)
     ap.add_argument("-n", "--instances", type=int, default=DesignSpec.instances)
     ap.add_argument("-s", "--seed", type=int, default=DesignSpec.seed)

@@ -11,22 +11,20 @@ Python packages stay independent.
 ## Install
 
 ```bash
-cd def_tools
 uv sync --dev
 uv run def-tools --help
 ```
 
-Or install it from the repository:
+Or install the project from the repository:
 
 ```bash
-uv tool install "def-tools @ git+https://github.com/smprather/open-eda-file-tools.git#subdirectory=def_tools"
+uv tool install "open-eda-file-tools @ git+https://github.com/smprather/open-eda-file-tools.git"
 ```
 
 The test suite stores no design files. To try the commands, generate a small
 synthetic design in a checkout:
 
 ```bash
-cd def_tools
 uv run python -m tests.gen.design_gen -o /tmp/design -n 500
 ```
 
@@ -37,18 +35,31 @@ of ground truth.
 
 ### `def-tools instances`
 
-Write placed instance bounding boxes as CSV. `--lef` may be repeated;
+Dump placed instance bounding boxes (in microns) as CSV (default), Parquet, or
+an aligned text table. `--lef` accepts one or more files or glob patterns after
+a single flag (`--lef a.lef b.lef "libs/*.lef"`) or repeated `--lef` flags;
 duplicate macro names resolve to the last definition and a warning lists them.
-`--threads` bounds the rayon pool for component parsing.
+`--columns` selects and renames columns (`source=output`), `--batch-size` and
+`--max-memory` bound Parquet buffering, and `--threads` bounds the rayon pool.
 
 ```bash
 uv run def-tools instances \
   --lef /tmp/design/design.lef --def /tmp/design/design.def.gz \
   --output instances.csv
+
+uv run def-tools instances --format parquet \
+  --lef "/tmp/design/*.lef" --def /tmp/design/design.def.gz \
+  --output instances.parquet
+
+uv run def-tools instances --format csv \
+  --columns instance=instance_name,base_cell=cell,status,orient,llx=llx_um \
+  --lef /tmp/design/design.lef --def /tmp/design/design.def.gz \
+  --output instances.csv
 ```
 
-Columns: `instance,macro,status,orient,llx,lly,urx,ury`.
-
+Default columns: `instance,base_cell,llx,lly,urx,ury` (with `status` and
+`orient` also available via `--columns`). Coordinates are in microns (`DBU /
+UNITS DISTANCE MICRONS`).
 ### `def-tools net-shapes`
 
 Write routed shape bounding boxes for one net and layer. Supply either a DEF

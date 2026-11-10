@@ -23,11 +23,12 @@ echo "cc:     $(cc --version | head -1)"
 
 "$PYTHON" /src/scripts/check_vendored_crates.py
 
-"$PYTHON" /src/def_tools/tests/gen/design_gen.py \
+"$PYTHON" /src/tests/gen/design_gen.py \
     -o "$PWD/gen" -n "${INSTANCES:-20000}" >/dev/null
 
 example_report=$(
-    /src/def_tools/scripts/run_example_offline.sh dump_instances.py \
+    /src/scripts/run_example_offline.sh \
+        --format parquet \
         --lef "$PWD/gen/design.lef" \
         --def "$PWD/gen/design.def.gz" \
         --output "$PWD/instances.parquet"

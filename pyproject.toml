@@ -1,19 +1,22 @@
 [project]
-name = "liberty-tools"
-version = "2026.11.9"
-description = "Fast Rust-backed parser and query tools for Liberty files"
+name = "open-eda-file-tools"
+version = "2026.11.9.1"
+description = "Fast Rust-backed Liberty, LEF, and DEF parsers and CLI tools"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
   "click>=8.4.1",
   "fastapi>=0.136.3",
   "polars>=2.1.0",
+  "rich-click>=1.9.8",
   "uvicorn[standard]>=0.48.0",
 ]
 
 [project.scripts]
 liberty-view = "viewer.__main__:main"
 liberty-format = "liberty_format.__main__:main"
+lef-tools = "lef_tools.cli:main"
+def-tools = "def_tools.cli:main"
 
 [build-system]
 requires = ["maturin>=1.8,<2"]
@@ -23,10 +26,31 @@ build-backend = "maturin"
 features = ["pyo3/extension-module"]
 module-name = "liberty_tools._native"
 python-source = "."
-# maturin only auto-bundles the `liberty_tools` package; the viewer (FastAPI app
-# + its static assets) must be listed explicitly so `liberty-view` works after a
-# non-editable `uv tool install .`.
-include = ["viewer/**/*.py", "viewer/static/*", "liberty_format/**/*.py"]
+# maturin only auto-bundles the `liberty_tools` package; list the sibling
+# packages and static assets explicitly so all libraries and CLIs work after a
+# non-editable wheel install (`uv tool install .` / `uv build --wheel`).
+include = [
+  "viewer/**/*.py",
+  "viewer/static/*",
+  "liberty_format/**/*.py",
+  "lef_tools/*.py",
+  "lef_tools/py.typed",
+  "def_tools/*.py",
+  "def_tools/py.typed",
+]
+exclude = [
+  "*.def",
+  "*.def.gz",
+  "*.lef",
+  "*.lef.gz",
+  "*.pdf",
+  "*.sdc",
+  "*.ldefcache",
+  "*.parquet",
+  "*.table",
+  "dist",
+  "target",
+]
 
 [dependency-groups]
 dev = [
@@ -41,12 +65,9 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-# Each tool owns its tests; the LEF and DEF projects have their own pyprojects
-# and venvs. Without this, `uv run pytest` from the repository root would
-# collect their tests and fail on the uninstalled extensions.
+pythonpath = ["."]
 testpaths = ["tests"]
+markers = ["perf: performance test, needs --runperf"]
 
 [tool.ty.src]
-# lef_tools and def_tools are separate projects with their own venvs and
-# `ty check` runs.
-exclude = ["lef_tools", "def_tools", "vendor"]
+exclude = ["vendor"]

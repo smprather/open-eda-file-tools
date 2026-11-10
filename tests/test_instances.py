@@ -78,12 +78,11 @@ def test_cli_writes_streaming_csv(tmp_path):
 
     assert result.exit_code == 0, result.output
     assert output.read_text(encoding="utf-8").splitlines() == [
-        "instance,macro,status,orient,llx,lly,urx,ury",
-        "u1,INV,PLACED,N,10,20,1210,2420",
-        "u2,INV,FIXED,E,30,40,2430,1240",
-        "u3,BUF,COVER,FS,5,6,3005,1006",
+        "instance,base_cell,llx,lly,urx,ury",
+        "u1,INV,0.01,0.02,1.21,2.42",
+        "u2,INV,0.03,0.04,2.43,1.24",
+        "u3,BUF,0.005,0.006,3.005,1.006",
     ]
-
 
 def test_cli_accepts_gzipped_def(tmp_path):
     lef, design = write_fixture(tmp_path)
@@ -99,9 +98,8 @@ def test_cli_accepts_gzipped_def(tmp_path):
 
     assert result.exit_code == 0, result.output
     lines = output.read_text(encoding="utf-8").splitlines()
-    assert lines[0] == "instance,macro,status,orient,llx,lly,urx,ury"
-    assert "u1,INV,PLACED,N,10,20,1210,2420" in lines
-
+    assert lines[0] == "instance,base_cell,llx,lly,urx,ury"
+    assert "u1,INV,0.01,0.02,1.21,2.42" in lines
 
 def test_python_iterator_returns_net_shapes(tmp_path):
     _lef, design = write_fixture(tmp_path)

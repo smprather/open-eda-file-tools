@@ -2,58 +2,43 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-`open-eda-file-tools` is one project with one version that ships several
-command-line tools:
+`open-eda-file-tools` is a single project with one `pyproject.toml`, one
+`Cargo.toml`, and one version (`2026.11.9` CalVer) that ships several Python
+libraries and command-line tools under the `open-eda-file-tools` umbrella:
 
-- `liberty_tools` / `liberty-tools` — Liberty `.lib` parser, writer, viewer and
-  formatter (`liberty-view`, `liberty-format`), at the repository root.
-- `lef_tools` / `lef-tools` — cell LEF parser and queries (`lef-tools`), in
-  `lef_tools/`.
-- `def_tools` / `def-tools` — DEF parser, binary cache and design queries
-  (`def-tools`), in `def_tools/`.
-
-They are packaged as three Python distributions only because each Rust backend
-is its own extension module. They are build units of the same project: one
-version (`[workspace.package]` in the root `Cargo.toml` plus every
-`pyproject.toml`), one release tag, one release history.
+- `liberty_tools` — Liberty `.lib` parser, writer, viewer and formatter
+  (`liberty-view`, `liberty-format`).
+- `lef_tools` — cell LEF parser and queries (`lef-tools`).
+- `def_tools` — DEF parser, binary cache and design queries (`def-tools`).
 
 ## Repository Layout
 
-The repository root is the Liberty tool (`liberty_tools`, Rust backend in
-`src/`, tests in `tests/`). Every other tool lives in its own directory at the
-root — currently `lef_tools/` and `def_tools/`, with more planned (VCD, …).
-Each directory has its own `pyproject.toml`, Python package, Rust crate,
-`tests/` and command-line entry points, because each Rust backend is a separate
-extension module; these are build units of the one project, which has one
-version and one release history — see `user_guide/tools.qmd`. Do not add one
-format's code to another tool's package.
-
 ```
-liberty_tools/, viewer/, liberty_format/, logic2svg/
-                           Liberty tool: package, Rust `src/`, tests, frontend
-lef_tools/                 Cell LEF project root (own pyproject and venv)
-  Cargo.toml               Rust crate `lef-tools-native` (cdylib + rlib)
-  rust/src/lexer.rs        Shared LEF/DEF tokenizer
-  rust/src/cell_lef.rs     LEF MACRO / PIN / PORT / RECT parser
-  src/lef_tools/           Python wrapper and CLI
-def_tools/                 DEF project root (own pyproject and venv)
-  Cargo.toml               Rust crate `def-tools-native`; links `lef-tools-native`
-  rust/src/lib.rs          DEF parser, binary cache, geometry kernels
-  src/def_tools/           Python wrapper, CLI, SDC reader, IO configurator
-  tests/                   pytest suite and the synthetic design generator
+pyproject.toml, Cargo.toml  Single project manifest and Rust crate
+src/
+  lib.rs                    Liberty lexer/parser/evaluator + PyO3 module `_native`
+  lef/lexer.rs              Shared LEF/DEF streaming tokenizer
+  lef/cell_lef.rs           LEF MACRO / PIN / PORT / RECT parser
+  def.rs                    DEF parser, binary cache, geometry kernels, Parquet/CSV/table writers
+liberty_tools/              Liberty Python wrapper and comparison module
+viewer/, liberty_format/, logic2svg/
+                            Browser viewer (`liberty-view`), formatter (`liberty-format`), symbol layout
+lef_tools/                  Cell LEF Python package and `lef-tools` CLI
+def_tools/                  DEF Python package, `def-tools` CLI, SDC reader, IO configurator
+tests/                      Unified pytest suite (Liberty, LEF, DEF, and `tests/gen/design_gen.py`)
 ```
 
 ## Commands
 
 ```bash
-# Liberty (repository root)
 uv sync --dev
 uv run maturin develop --release   # required after any Rust change
 
 # Tests
-uv run pytest -q                   # Python tests (testpaths = tests/)
-cargo fmt --all --check            # Rust format check, whole workspace
-cargo check --workspace            # Rust type check, whole workspace
+uv run pytest -q                   # Python tests across Liberty, LEF, and DEF (testpaths = tests/)
+cargo test                         # Rust unit tests
+cargo fmt --all --check            # Rust format check
+cargo check                        # Rust type check
 
 # Single test
 uv run pytest tests/test_extraction_api.py::test_1d_2d_and_3d_table_extraction -q
@@ -62,25 +47,6 @@ uv run pytest tests/test_extraction_api.py::test_1d_2d_and_3d_table_extraction -
 uv run ruff check .
 uv run ty check
 ```
-
-LEF and DEF each have their own project and virtualenv:
-
-```bash
-cd lef_tools
-uv sync --dev                      # installs deps and builds the extension
-uv run maturin develop --release   # after any Rust change
-uv run pytest -q
-uv run ruff check . && uv run ty check
-
-cd ../def_tools
-uv sync --dev
-uv run pytest -q
-uv run ruff check . && uv run ty check
-
-# Rust unit tests, from the repository root:
-cargo test -p lef-tools-native -p def-tools-native
-```
-
 The large-file smoke tests need `generic80_ss_125c_1p116v_0p84v.lib` in the repo root; they skip otherwise.
 
 Frontend-only sanity checks:
@@ -183,16 +149,10 @@ Logic-symbol rendering lessons learned:
 `lef_tools` owns the cell LEF parser and the shared tokenizer:
 
 ```
-lef_tools/Cargo.toml            crate `lef-tools-native` (cdylib + rlib)
-lef_tools/rust/src/lexer.rs     streaming LEF/DEF tokenizer (also linked by DEF)
-lef_tools/rust/src/cell_lef.rs  MACRO / PIN / PORT / RECT model in microns
-lef_tools/src/lef_tools/        Python wrapper and `lef-tools` CLI
+src/lef/lexer.rs     streaming LEF/DEF tokenizer (also used by `src/def.rs`)
+src/lef/cell_lef.rs  MACRO / PIN / PORT / RECT model in microns
+lef_tools/           Python wrapper and `lef-tools` CLI
 ```
-
-The crate is both the extension module (`lef_tools._lef`) and an rlib that
-`def_tools` links for the tokenizer and macro `SIZE`/`ORIGIN`. The Python
-packages stay independent.
-
 ### Key behaviors to preserve
 
 - **LEF coordinates stay in microns.** `parse_lef` never applies a DEF's
@@ -214,15 +174,15 @@ packages stay independent.
 
 ## DEF package (`def_tools/`)
 
-`def_tools` owns the DEF pipeline and links `lef-tools-native`:
+`def_tools` owns the DEF pipeline and uses `crate::lef` for macro sizes:
 
 ```
-def_tools/Cargo.toml            crate `def-tools-native`
-def_tools/rust/src/lib.rs       DEF parser, streaming reads, binary cache
-def_tools/src/def_tools/cli.py  click CLI (`def-tools <command>`)
-def_tools/src/def_tools/sdc.py  SDC `create_clock` / generated-clock reader
-def_tools/src/def_tools/io_config.py  storage benchmark / IO policy config
-def_tools/tests/gen/design_gen.py     synthetic LEF/DEF/SDC design generator
+src/def.rs                DEF parser, streaming reads, binary cache, Parquet/CSV/table writers
+def_tools/cli.py          click CLI (`def-tools <command>`)
+def_tools/instances.py    instance bbox dumper (`def-tools instances`, CSV/Parquet/table in microns)
+def_tools/sdc.py          SDC `create_clock` / generated-clock reader
+def_tools/io_config.py    storage benchmark / IO policy config
+tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
 ```
 
 ### Key behaviors to preserve
@@ -231,15 +191,15 @@ def_tools/tests/gen/design_gen.py     synthetic LEF/DEF/SDC design generator
   `tests/gen/design_gen.py`; assertions compare against the generator's
   `manifest.json`, never against values recomputed in the test — a parser bug
   and a generator bug must not cancel out. Details in
-  `def_tools/docs/test-collateral.md`.
+  `docs/test-collateral.md`.
 - **Two fixture kinds are not interchangeable.** Inline synthetic DEF/LEF
   written to `tmp_path` for one construct; generated designs for scale, cell
   mix and section proportions. `tests/test_real_world_def.py` and
   `tests/test_perf.py` use the generator. Tests marked `perf` are skipped
   without `--runperf`.
 - **Instance bboxes need LEF macro sizes.** `instance_bboxes` calls
-  `lef_tools_native::parse_library` for `SIZE`/`ORIGIN` and converts to the
-  DEF's database units; it does not expose the LEF classes.
+  `crate::lef::parse_library` for `SIZE`/`ORIGIN` and converts to the DEF's
+  database units; it does not expose the LEF classes.
 - **The binary cache is versioned.** Magic headers and `CACHE_VERSION` guard
   the on-disk format; components, raw net records, a fixed-offset net index, a
   name index and connectivity live in separate files so single-net queries read

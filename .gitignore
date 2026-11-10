@@ -239,6 +239,21 @@ node_modules/
 # Great Docs build output (great-docs.yml is committed)
 great-docs/
 
+# Local agent config
+.omp/
+
+# Local LEF/DEF design collateral and generated outputs
+*.def
+*.def.gz
+*.lef
+*.lef.gz
+*.sdc
+*.pdf
+*.ldefcache/
+*.parquet
+*.table
+def-tools-io-config.toml
+
 # Vendored crate trees are committed build inputs. Re-include everything under
 # vendor/ so the Python-template rules above (build/, lib/, target/, …) cannot
 # silently drop files that `cargo vendor` produced.

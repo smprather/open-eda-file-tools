@@ -18,7 +18,7 @@ from liberty_format import TransparencyError, format_text
 
 def _package_version() -> str:
     try:
-        return version("liberty-tools")
+        return version("open-eda-file-tools")
     except PackageNotFoundError:
         return "0.0.0+unknown"
 

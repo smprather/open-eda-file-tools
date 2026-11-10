@@ -6,12 +6,5 @@
 mod cell_lef;
 mod lexer;
 
-pub use cell_lef::{LefError, LibraryData, MacroData, parse_library};
+pub use cell_lef::{LefError, LibraryData, MacroData, parse_library, register};
 pub use lexer::{Lexer, Token, open_input};
-
-use pyo3::prelude::*;
-
-#[pymodule]
-fn _lef(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    cell_lef::register(m)
-}

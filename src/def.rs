@@ -15,12 +15,14 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
-use lef_tools_native::{Lexer, open_input};
+use crate::lef::{Lexer, open_input};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ColumnKind {
     Instance,
     BaseCell,
+    Status,
+    Orient,
     Llx,
     Lly,
     Urx,
@@ -79,13 +81,15 @@ fn parse_columns(columns: Option<Vec<(String, String)>>) -> Result<Vec<ColumnSpe
         let kind = match source.as_str() {
             "instance" => ColumnKind::Instance,
             "base_cell" => ColumnKind::BaseCell,
+            "status" => ColumnKind::Status,
+            "orient" => ColumnKind::Orient,
             "llx" => ColumnKind::Llx,
             "lly" => ColumnKind::Lly,
             "urx" => ColumnKind::Urx,
             "ury" => ColumnKind::Ury,
             other => {
                 return Err(format!(
-                    "unknown column '{other}' (choose instance, base_cell, llx, lly, urx, ury)"
+                    "unknown column '{other}' (choose instance, base_cell, status, orient, llx, lly, urx, ury)"
                 ));
             }
         };
@@ -362,16 +366,6 @@ fn net_shapes(def_path: PathBuf, net: String, layer: String) -> PyResult<NetShap
 }
 
 #[pyfunction]
-fn write_instance_csv(
-    py: Python<'_>,
-    lefs: Vec<PathBuf>,
-    def_path: PathBuf,
-    output: Option<PathBuf>,
-) -> PyResult<()> {
-    py.detach(|| write_instance_csv_impl(&lefs, &def_path, output.as_deref()).map_err(to_py_err))
-}
-
-#[pyfunction]
 #[pyo3(signature = (lefs, def_path, output, columns = None))]
 fn write_instance_table(
     py: Python<'_>,
@@ -484,15 +478,13 @@ fn write_clock_instances_csv_from_cache(
     })
 }
 
-#[pymodule]
-fn _def(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<InstanceBBox>()?;
     m.add_class::<InstanceBBoxIter>()?;
     m.add_class::<NetShape>()?;
     m.add_class::<NetShapeIter>()?;
     m.add_function(wrap_pyfunction!(instance_bboxes, m)?)?;
     m.add_function(wrap_pyfunction!(net_shapes, m)?)?;
-    m.add_function(wrap_pyfunction!(write_instance_csv, m)?)?;
     m.add_function(wrap_pyfunction!(write_instance_table, m)?)?;
     m.add_function(wrap_pyfunction!(write_instance_bbox_csv, m)?)?;
     m.add_function(wrap_pyfunction!(write_instance_parquet, m)?)?;
@@ -502,33 +494,6 @@ fn _def(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(write_clock_instances_csv, m)?)?;
     m.add_function(wrap_pyfunction!(write_clock_instances_csv_from_cache, m)?)?;
     Ok(())
-}
-
-fn write_instance_csv_impl(
-    lefs: &[PathBuf],
-    def_path: &Path,
-    output: Option<&Path>,
-) -> Result<(), String> {
-    let mut scanner = DefScanner::from_path(def_path).map_err(|e| e.to_string())?;
-    let (macros, duplicates) = parse_lef_files(lefs, scanner.dbu_per_micron)?;
-    if !duplicates.is_empty() {
-        eprintln!(
-            "warning: duplicate LEF macros, last definition used: {}",
-            duplicates.join(", ")
-        );
-    }
-
-    match output {
-        Some(path) => {
-            let file = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            write_csv_stream(&mut scanner, &macros, BufWriter::new(file))
-        }
-        None => {
-            let stdout = io::stdout();
-            let lock = stdout.lock();
-            write_csv_stream(&mut scanner, &macros, BufWriter::new(lock))
-        }
-    }
 }
 
 /// Widths for the selected name columns, plus the placed-row count.
@@ -617,6 +582,8 @@ fn write_instance_table_stream<W: Write>(
         .map(|column| match column.kind {
             ColumnKind::Instance => instance_width.unwrap_or(column.name.len()),
             ColumnKind::BaseCell => macro_width.unwrap_or(column.name.len()),
+            ColumnKind::Status => column.name.len().max(8),
+            ColumnKind::Orient => column.name.len().max(6),
             _ => column.name.len().max(12),
         })
         .collect();
@@ -627,7 +594,10 @@ fn write_instance_table_stream<W: Write>(
             write!(out, "  ").map_err(|e| e.to_string())?;
         }
         match column.kind {
-            ColumnKind::Instance | ColumnKind::BaseCell => {
+            ColumnKind::Instance
+            | ColumnKind::BaseCell
+            | ColumnKind::Status
+            | ColumnKind::Orient => {
                 write!(out, "{:<width$}", column.name, width = widths[index])
             }
             _ => write!(out, "{:>width$}", column.name, width = widths[index]),
@@ -665,6 +635,22 @@ fn write_instance_table_stream<W: Write>(
                             &mut buffer,
                             "{:<width$}",
                             bbox.macro_name,
+                            width = widths[index]
+                        )
+                    }
+                    ColumnKind::Status => {
+                        write!(
+                            &mut buffer,
+                            "{:<width$}",
+                            bbox.status,
+                            width = widths[index]
+                        )
+                    }
+                    ColumnKind::Orient => {
+                        write!(
+                            &mut buffer,
+                            "{:<width$}",
+                            bbox.orient,
                             width = widths[index]
                         )
                     }
@@ -782,6 +768,8 @@ fn write_instance_bbox_csv_stream<W: Write>(
                 match column.kind {
                     ColumnKind::Instance => append_csv_field(&mut buffer, &bbox.instance),
                     ColumnKind::BaseCell => append_csv_field(&mut buffer, &bbox.macro_name),
+                    ColumnKind::Status => append_csv_field(&mut buffer, &bbox.status),
+                    ColumnKind::Orient => append_csv_field(&mut buffer, &bbox.orient),
                     ColumnKind::Llx => append_csv_micron(&mut buffer, bbox.llx as f64 / dbu),
                     ColumnKind::Lly => append_csv_micron(&mut buffer, bbox.lly as f64 / dbu),
                     ColumnKind::Urx => append_csv_micron(&mut buffer, bbox.urx as f64 / dbu),
@@ -846,7 +834,10 @@ fn write_instance_parquet_impl(
         .iter()
         .map(|column| {
             let data_type = match column.kind {
-                ColumnKind::Instance | ColumnKind::BaseCell => DataType::Utf8,
+                ColumnKind::Instance
+                | ColumnKind::BaseCell
+                | ColumnKind::Status
+                | ColumnKind::Orient => DataType::Utf8,
                 _ => DataType::Float64,
             };
             Field::new(&column.name, data_type, false)
@@ -890,6 +881,18 @@ fn write_instance_parquet_impl(
                     bboxes
                         .iter()
                         .map(|item| item.macro_name.as_str())
+                        .collect::<Vec<_>>(),
+                )),
+                ColumnKind::Status => Arc::new(StringArray::from(
+                    bboxes
+                        .iter()
+                        .map(|item| item.status.as_str())
+                        .collect::<Vec<_>>(),
+                )),
+                ColumnKind::Orient => Arc::new(StringArray::from(
+                    bboxes
+                        .iter()
+                        .map(|item| item.orient.as_str())
                         .collect::<Vec<_>>(),
                 )),
                 ColumnKind::Llx => Arc::new(Float64Array::from(
@@ -1150,28 +1153,6 @@ fn write_clock_instances_csv_from_cache_impl(
             )
         }
     }
-}
-
-fn write_csv_stream<W: Write>(
-    scanner: &mut DefScanner,
-    macros: &MacroMap,
-    mut out: W,
-) -> Result<(), String> {
-    writeln!(out, "instance,macro,status,orient,llx,lly,urx,ury").map_err(|e| e.to_string())?;
-    loop {
-        let batch = scanner.next_batch(BATCH_SIZE).map_err(|e| e.to_string())?;
-        if batch.is_empty() {
-            break;
-        }
-        let bboxes = process_record_batch(&batch, macros)?;
-        let mut buffer = String::with_capacity(bboxes.len() * 96);
-        for bbox in bboxes {
-            append_csv_row(&mut buffer, &bbox);
-        }
-        out.write_all(buffer.as_bytes())
-            .map_err(|e| e.to_string())?;
-    }
-    out.flush().map_err(|e| e.to_string())
 }
 
 fn write_clock_instances_csv_stream<W: Write>(
@@ -2113,7 +2094,7 @@ fn parse_lef_files(
     paths: &[PathBuf],
     dbu_per_micron: i64,
 ) -> Result<(MacroMap, Vec<String>), String> {
-    let library = lef_tools_native::parse_library(paths, None, false).map_err(|e| e.to_string())?;
+    let library = crate::lef::parse_library(paths, None, false).map_err(|e| e.to_string())?;
     let mut macros = HashMap::with_capacity(library.macros.len());
     for item in &library.macros {
         macros.insert(
@@ -2525,17 +2506,6 @@ fn orientation(token: &[u8]) -> Option<&'static str> {
         b"FW" => Some("FW"),
         _ => None,
     }
-}
-
-fn append_csv_row(out: &mut String, bbox: &InstanceBBox) {
-    append_csv_field(out, &bbox.instance);
-    out.push(',');
-    append_csv_field(out, &bbox.macro_name);
-    let _ = writeln!(
-        out,
-        ",{},{},{},{},{},{}",
-        bbox.status, bbox.orient, bbox.llx, bbox.lly, bbox.urx, bbox.ury
-    );
 }
 
 fn append_net_shape_csv_row(out: &mut String, shape: &NetShape) {

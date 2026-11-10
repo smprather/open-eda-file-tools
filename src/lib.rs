@@ -1,3 +1,6 @@
+pub mod def;
+pub mod lef;
+
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyRuntimeError, PyValueError};
@@ -2056,6 +2059,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tokenize, m)?)?;
     m.add_function(wrap_pyfunction!(tokenize_str, m)?)?;
     m.add_function(wrap_pyfunction!(axis_role_matches, m)?)?;
+    lef::register(m)?;
+    def::register(m)?;
     Ok(())
 }
 
@@ -2510,7 +2515,7 @@ fn canonical_minterm_parts(
     let support: Vec<String> = mentioned
         .iter()
         .zip(&in_support)
-        .filter(|(_, &keep)| keep)
+        .filter(|&(_, &keep)| keep)
         .map(|(name, _)| name.clone())
         .collect();
 

@@ -18,25 +18,22 @@ per-tool version numbers.
 
 ## Adding a tool
 
-1. Create the tool's package in its own directory at the repository root
-   (`<name>_tools/`), with a `pyproject.toml` and tests. It is a library of
-   this project, not a separate project: it uses the shared version.
-2. Give it its own command-line entry points, kebab-case and prefixed with the
-   file format it reads (`liberty-…`, `vcd-…`, `lef-…`, `def-…`).
-3. If it has a Rust backend, point its `[build-system]` at `maturin` and keep
-   its native crate beside the package. Add that crate to the workspace
-   `members` in the root `Cargo.toml` and re-vendor the crates
-   (`BUILD.md`). A pure-Python tool uses a plain build backend.
-4. Add the tool to the table above and to the repository layout section of the
-   README.
-5. Set the shared project version in its `pyproject.toml` and follow
-   `VERSIONING_PLAN.md`; do not introduce a tool-specific version.
+1. Create the tool's Python package at the repository root (`<name>_tools/`)
+   and add it to `[tool.maturin] include` in `pyproject.toml`. It is a library
+   of this project, not a separate project: there is only the root
+   `pyproject.toml`.
+2. Add its command-line entry points to `[project.scripts]` in the root
+   `pyproject.toml`, kebab-case and prefixed with the file format it reads
+   (`liberty-…`, `vcd-…`, `lef-…`, `def-…`).
+3. If it has a Rust backend, add its module under `src/` and register its
+   classes/functions in `_native` (`src/lib.rs`).
+4. Add its tests under `tests/` and add the tool to the table above and to
+   `README.md`.
 
 ## Shared conventions
 
-- Tests live beside the tool they cover: `tests/` covers the Liberty tool,
-  `lef_tools/tests/` covers LEF and `def_tools/tests/` covers DEF. Each tool
-  directory keeps its own development virtualenv and test suite.
+- All tests live in `tests/` at the repository root and run in a single
+  `uv run pytest -q` invocation.
 - `BUILD.md` covers the toolchain, `CLAUDE.md` covers the repository structure
   and the invariants a tool must preserve.
 - There is one release history for the project: tags in `vYYYY.M.D` form, with

@@ -41,14 +41,10 @@ The package also ships `py.typed` and `.pyi` stubs for coding tools.
 
 ## LEF Tools
 
-The `lef-tools` distribution parses cell LEF libraries into typed macros, pins,
-ports and rectangles. It is the library and CLI in `lef_tools/`, keeps its own
-development virtualenv, and installs one command. All geometry stays in LEF
-microns.
+The `lef_tools` library and `lef-tools` CLI parse cell LEF libraries into typed
+macros, pins, ports and rectangles. All geometry stays in LEF microns.
 
 ```bash
-cd lef_tools
-uv sync --dev
 uv run lef-tools macros --lef sky130_fd_sc_hd.lef
 ```
 
@@ -65,21 +61,19 @@ for pin in macro.pins():
 
 ## DEF Tools
 
-The `def-tools` distribution parses and queries DEF designs. It is the library
-and CLI in `def_tools/` and installs one command:
+The `def_tools` library and `def-tools` CLI parse and query DEF designs:
 
 | Command | What it does |
 |---|---|
-| `instances` | Emit placed instance bounding boxes as CSV. |
+| `instances` | Dump placed instance bounding boxes (in microns) as CSV, Parquet, or an aligned table. |
 | `net-shapes` | Emit routed shape bboxes for one net and layer, from a DEF or a cache. |
 | `cache create` | Convert a DEF into an indexed binary cache directory. |
 | `clock-instances` | Walk DEF connectivity from SDC clock roots. |
 | `configure-io` | Benchmark storage targets and write an IO policy config. |
 
 ```bash
-cd def_tools
-uv sync --dev
-uv run def-tools instances --lef design.lef --def design.def.gz -o instances.csv
+uv run def-tools instances --lef design.lef --def design.def.gz --output instances.csv
+uv run def-tools instances --format parquet --lef "libs/*.lef" --def design.def.gz --output instances.parquet
 ```
 
 ```python
@@ -108,14 +102,11 @@ RSS). The lazy `LibraryIndex` used by the viewer opens the same file in about
 
 ## Repository Layout
 
-The repository is one project at one version. The Liberty tool is the package
-at the repository root (`liberty_tools`, with its Rust backend in `src/` and
-its tests in `tests/`); the LEF and DEF tools live in `lef_tools/` and
-`def_tools/`. Each directory holds its own Python package, `pyproject.toml`,
-Rust crate and development virtualenv, because each Rust backend is a separate
-extension module — they are build units of the same project, not separate
-projects. An additional tool gets its own directory and command-line entry
-point under the same version; the
+The repository is a single project (`open-eda-file-tools`) with a single
+`pyproject.toml`, `Cargo.toml`, and version. The Python libraries live in
+`liberty_tools/`, `lef_tools/`, `def_tools/`, `viewer/`, and `liberty_format/`;
+the shared Rust backend lives in `src/` (`src/lib.rs`, `src/lef/`, `src/def.rs`),
+and the unified test suite lives in `tests/`. The
 [Tools guide](https://smprather.github.io/open-eda-file-tools/user-guide/tools.html)
 lists the tools and the steps for adding one. Shared build, test and release
 conventions are in
@@ -135,14 +126,7 @@ python -m pip install "git+https://github.com/smprather/open-eda-file-tools.git"
 For projects managed by `uv`:
 
 ```bash
-uv add "liberty-tools @ git+https://github.com/smprather/open-eda-file-tools.git"
-```
-
-The LEF and DEF tools install from their directories in the same repository:
-
-```bash
-uv add "lef-tools @ git+https://github.com/smprather/open-eda-file-tools.git#subdirectory=lef_tools"
-uv add "def-tools @ git+https://github.com/smprather/open-eda-file-tools.git#subdirectory=def_tools"
+uv add "open-eda-file-tools @ git+https://github.com/smprather/open-eda-file-tools.git"
 ```
 
 This package contains a Rust extension, so source installs need:
@@ -167,21 +151,8 @@ Run tests:
 ```bash
 uv run pytest -q
 cargo fmt --all --check
-cargo check --workspace
-```
-
-LEF and DEF each keep their own virtualenv:
-
-```bash
-cd lef_tools
-uv sync --dev
-uv run maturin develop --release
-uv run pytest -q
-
-cd ../def_tools
-uv sync --dev
-uv run maturin develop --release
-uv run pytest -q
+cargo check
+cargo test
 ```
 
 The repository does not include large Liberty reference files. If you have a

@@ -1,6 +1,6 @@
 """Python frontend for the Rust DEF parser."""
 
-from ._def import (
+from liberty_tools._native import (
     InstanceBBox,
     NetShape,
     instance_bboxes,
@@ -9,7 +9,6 @@ from ._def import (
     write_clock_instances_csv_from_cache,
     write_def_cache,
     write_instance_bbox_csv,
-    write_instance_csv,
     write_instance_parquet,
     write_instance_table,
     write_net_shapes_csv,
@@ -34,7 +33,6 @@ __all__ = [
     "write_clock_instances_csv_from_cache",
     "write_def_cache",
     "write_instance_bbox_csv",
-    "write_instance_csv",
     "write_instance_parquet",
     "write_instance_table",
     "write_io_config",

@@ -1,9 +1,9 @@
 # Offline build test on AlmaLinux 8 (glibc 2.28, gcc 8.5).
 #
-#   docker build -f def_tools/docker/almalinux8.Dockerfile -t def-tools-almalinux8 .
+#   docker build -f docker/almalinux8.Dockerfile -t open-eda-file-tools-almalinux8 .
 #   docker run --rm --network none \
 #     -v "${XDG_DATA_HOME:-$HOME/.local/share}/loadout:/opt/loadout:ro" \
-#     def-tools-almalinux8
+#     open-eda-file-tools-almalinux8
 #
 # The toolchain matches an air-gapped workstation: rustc/cargo and Python come
 # from an Engineering Loadout install (rust + portable-python); gcc is the
@@ -27,4 +27,4 @@ RUN chmod -R a-w /src \
 
 USER runner
 WORKDIR /run/work
-CMD ["/bin/bash", "/src/def_tools/docker/run-offline-example.sh"]
+CMD ["/bin/bash", "/src/docker/run-offline-example.sh"]

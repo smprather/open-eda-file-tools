@@ -2,20 +2,93 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 import rich_click as click
 
-from ._def import (
+from liberty_tools._native import (
     write_clock_instances_csv,
     write_clock_instances_csv_from_cache,
     write_def_cache,
-    write_instance_csv,
     write_net_shapes_csv,
     write_net_shapes_csv_from_cache,
+)
+
+from .instances import (
+    AVAILABLE_COLUMNS,
+    CANONICAL_COLUMNS,
+    FORMATS,
+    effective_batch_size,
+    expand_lef_argv,
+    memory_ceiling,
+    parse_column_spec,
+    parse_size,
+    peak_rss_bytes,
+    read_header,
+    rss_bytes,
+    run_instances,
 )
 from .io_config import DEFAULT_PROBE_MIB, write_io_config
 from .sdc import clock_roots_from_sdc
 from .version import get_version
+
+__all__ = [
+    "AVAILABLE_COLUMNS",
+    "CANONICAL_COLUMNS",
+    "FORMATS",
+    "effective_batch_size",
+    "expand_lef_argv",
+    "main",
+    "memory_ceiling",
+    "parse_column_spec",
+    "parse_size",
+    "peak_rss_bytes",
+    "read_header",
+    "rss_bytes",
+]
+
+
+class _SizeParam(click.ParamType):
+    name = "size"
+
+    def convert(
+        self,
+        value: Any,
+        param: click.Parameter | None,
+        ctx: click.Context | None,
+    ) -> int:
+        if isinstance(value, int):
+            return value
+        try:
+            return parse_size(str(value))
+        except ValueError as exc:
+            self.fail(str(exc), param, ctx)
+
+
+class _ColumnSpecParam(click.ParamType):
+    name = "spec"
+
+    def convert(
+        self,
+        value: Any,
+        param: click.Parameter | None,
+        ctx: click.Context | None,
+    ) -> list[tuple[str, str]]:
+        if isinstance(value, list):
+            return value
+        try:
+            return parse_column_spec(str(value))
+        except ValueError as exc:
+            self.fail(str(exc), param, ctx)
+
+
+class _VariadicLefCommand(click.RichCommand):
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        try:
+            args[:] = expand_lef_argv(args)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), ctx=ctx, param_hint="'--lef'") from exc
+        return super().parse_args(ctx, args)
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -24,27 +97,65 @@ def main() -> None:
     """Fast DEF query tools."""
 
 
-@main.command()
+@main.command(cls=_VariadicLefCommand)
 @click.option(
     "--lef",
     "lefs",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    type=click.Path(dir_okay=False, path_type=Path),
     multiple=True,
     required=True,
-    help="LEF library file. May be provided more than once.",
+    help="Cell LEF file(s) or glob pattern(s). Accepts multiple arguments after --lef.",
 )
 @click.option(
     "--def",
     "def_path",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    type=click.Path(dir_okay=False, path_type=Path),
     required=True,
-    help="DEF design file.",
+    help="DEF design file (.def or .def.gz).",
 )
 @click.option(
-    "-o",
+    "--format",
+    "fmt",
+    type=click.Choice(FORMATS),
+    default="csv",
+    show_default=True,
+    help="Output format (coordinates in microns).",
+)
+@click.option(
     "--output",
     type=click.Path(dir_okay=False, path_type=Path),
-    help="CSV output path. Defaults to stdout.",
+    default=None,
+    help="Output path (defaults to stdout for csv/table, or instances.parquet for parquet).",
+)
+@click.option(
+    "--columns",
+    type=_ColumnSpecParam(),
+    default=None,
+    metavar="SPEC",
+    help=(
+        "Comma-separated columns in output order; rename with source=output, "
+        "for example instance=instance_name,base_cell,llx=llx_um. "
+        f"Sources: {','.join(AVAILABLE_COLUMNS)}. "
+        f"Defaults to {','.join(CANONICAL_COLUMNS)}."
+    ),
+)
+@click.option(
+    "--batch-size",
+    type=click.IntRange(min=1),
+    default=131_072,
+    show_default=True,
+    help="Maximum rows buffered per Parquet row group.",
+)
+@click.option(
+    "--max-memory",
+    type=_SizeParam(),
+    default=1024**3,
+    show_default="1GiB",
+    metavar="SIZE",
+    help=(
+        "Soft upper bound on process peak RSS, in binary units (1GB = 1 GiB); "
+        "clamps the Parquet row group and aborts only after a 10% overshoot."
+    ),
 )
 @click.option(
     "--threads",
@@ -54,13 +165,26 @@ def main() -> None:
 def instances(
     lefs: tuple[Path, ...],
     def_path: Path,
+    fmt: str,
     output: Path | None,
+    columns: list[tuple[str, str]] | None,
+    batch_size: int,
+    max_memory: int,
     threads: int | None,
 ) -> None:
-    """Write placed instance bounding boxes as CSV."""
-    if threads is not None:
-        os.environ["RAYON_NUM_THREADS"] = str(threads)
-    write_instance_csv(list(lefs), def_path, output)
+    """Dump placed instance bounding boxes (in microns) as CSV, Parquet, or table."""
+    rc = run_instances(
+        lefs,
+        def_path,
+        fmt=fmt,
+        output=output,
+        columns=columns,
+        batch_size=batch_size,
+        max_memory=max_memory,
+        threads=threads,
+    )
+    if rc != 0:
+        raise SystemExit(rc)
 
 
 @main.command(name="net-shapes")
@@ -237,3 +361,7 @@ def configure_io(
             f"{status} {result.path} kind={result.kind} fs={result.fs_type} "
             f"write={result.seq_write_mib_s:.1f}MiB/s read={result.seq_read_mib_s:.1f}MiB/s"
         )
+
+
+if __name__ == "__main__":
+    main()

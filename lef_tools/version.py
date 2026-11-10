@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from importlib import metadata
 
-DIST_NAME = "lef-tools"
+DIST_NAME = "open-eda-file-tools"
 
 
 def get_version() -> str:

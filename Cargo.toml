@@ -1,15 +1,7 @@
-[workspace]
-members = ["lef_tools", "def_tools"]
-resolver = "3"
-
-[workspace.package]
-# One project, one version: every distribution and crate inherits this.
-version = "2026.11.9"
-
 [package]
-name = "liberty_tools_native"
-version.workspace = true
-edition = "2021"
+name = "open-eda-file-tools-native"
+version = "2026.11.9"
+edition = "2024"
 
 [lib]
 name = "_native"
@@ -20,8 +12,11 @@ codegen-units = 1
 lto = "thin"
 
 [dependencies]
+arrow = { version = "60.1", default-features = false }
 # zlib-rs backend: pure-Rust, ~2-3x faster inflate than the default miniz_oxide,
 # no C toolchain. Speeds the gzip decompress that dominates LibraryIndex.open.
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+parquet = { version = "60.1", default-features = false, features = ["arrow", "zstd"] }
 pyo3 = { version = "=0.28.3", features = ["extension-module"] }
 quine-mc_cluskey = "0.2.4"
+rayon = "1.11"

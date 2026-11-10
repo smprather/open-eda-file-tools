@@ -352,18 +352,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
-name = "def-tools-native"
-version = "2026.11.9"
-dependencies = [
- "arrow",
- "flate2",
- "lef-tools-native",
- "parquet",
- "pyo3",
- "rayon",
-]
-
-[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -523,14 +511,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lef-tools-native"
-version = "2026.11.9"
-dependencies = [
- "flate2",
- "pyo3",
-]
-
-[[package]]
 name = "lexical-core"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -592,15 +572,6 @@ name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
-
-[[package]]
-name = "liberty_tools_native"
-version = "2026.11.9"
-dependencies = [
- "flate2",
- "pyo3",
- "quine-mc_cluskey",
-]
 
 [[package]]
 name = "libm"
@@ -673,6 +644,18 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "open-eda-file-tools-native"
+version = "2026.11.9"
+dependencies = [
+ "arrow",
+ "flate2",
+ "parquet",
+ "pyo3",
+ "quine-mc_cluskey",
+ "rayon",
+]
 
 [[package]]
 name = "parquet"

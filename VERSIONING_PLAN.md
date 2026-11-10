@@ -1,22 +1,16 @@
 # Versioning Plan
 
-`open-eda-file-tools` is one project with one version. It ships several
-command-line tools — `liberty-view`, `liberty-format`, `lef-tools`,
-`def-tools` — and every one of them comes from the same source tree, the same
+`open-eda-file-tools` is a single project with one `pyproject.toml`, one
+`Cargo.toml`, and one version. It ships several libraries (`liberty_tools`,
+`lef_tools`, `def_tools`) and command-line tools (`liberty-view`,
+`liberty-format`, `lef-tools`, `def-tools`) from the same source tree, the same
 release, and the same version number.
 
-The project is packaged as three Python distributions because each Rust
-backend is its own extension module (`liberty_tools._native`,
-`lef_tools._lef`, `def_tools._def`). Those distributions are build units, not
-separate projects: they always carry the same version, are tagged and released
-together, and are installed from the same checkout.
-
-| Build unit | Version lives in |
+| File | Role |
 | --- | --- |
-| `liberty-tools` | root `Cargo.toml` (workspace), `pyproject.toml`, `uv.lock` |
-| `lef-tools` | `lef_tools/pyproject.toml`, `lef_tools/uv.lock`; Cargo version inherited |
-| `def-tools` | `def_tools/pyproject.toml`, `def_tools/uv.lock`; Cargo version inherited |
-
+| `pyproject.toml` | Project version (`[project] version`), dependencies, and CLI entry points |
+| `Cargo.toml` | Native extension crate version (`[package] version`) |
+| `uv.lock`, `Cargo.lock` | Locked Python and Rust dependency graphs |
 ## Scheme
 
 Releases use the same CalVer as `watchglass`: the release date, `YYYY.M.D`,
@@ -30,10 +24,8 @@ once in a day. Every version is valid PEP 440, so it can be uploaded to PyPI.
 
 There are no per-tool versions and no development versions:
 
-- The Cargo version is defined once, in `[workspace.package]` in the root
-  `Cargo.toml`. Every crate uses `version.workspace = true`.
-- Each `pyproject.toml` carries the same version, and each `uv.lock` records
-  it.
+- `pyproject.toml` and `Cargo.toml` at the repository root carry the project
+  version, and `uv.lock` and `Cargo.lock` record it.
 - There is no `-dev` or `.dev0` suffix and no post-release bump: `main` keeps
   the last released version until the next release commit sets the new date.
   The release date is not known in advance, so a development version would
@@ -79,8 +71,8 @@ v2026.11.5.1    # second release on 2026-11-05
 
 `D` is the day of release without zero padding. `N` starts at `1` for the
 second release on that day and increments for each additional one. Release
-tags carry no suffix and point at commits where every build unit is at the
-released version.
+tags carry no suffix and point at commits where the project is at the released
+version.
 
 Tags from the previous month-sequence scheme (`v2026.11.1` … `v2026.11.5`) and
 the older date-based `vYYYY.MM.DD.N` form (`v2026.06.01.1`) are historical and

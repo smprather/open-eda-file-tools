@@ -10,15 +10,14 @@ in LEF microns; a DEF's `UNITS DISTANCE MICRONS` never changes it. Plain
 ## Install
 
 ```bash
-cd lef_tools
 uv sync --dev
 uv run lef-tools --help
 ```
 
-Or install it from the repository:
+Or install the project from the repository:
 
 ```bash
-uv tool install "lef-tools @ git+https://github.com/smprather/open-eda-file-tools.git#subdirectory=lef_tools"
+uv tool install "open-eda-file-tools @ git+https://github.com/smprather/open-eda-file-tools.git"
 ```
 
 ## Python API

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::{Lexer, Token, open_input};
+use super::lexer::{Lexer, Token, open_input};
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -764,7 +764,7 @@ pub fn parse_lef(
     })
 }
 
-pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LefLibrary>()?;
     m.add_class::<LefMacro>()?;
     m.add_class::<LefPin>()?;
