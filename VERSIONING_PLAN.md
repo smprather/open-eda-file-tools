@@ -13,13 +13,15 @@ release, and the same version number.
 | `uv.lock`, `Cargo.lock` | Locked Python and Rust dependency graphs |
 ## Scheme
 
-Releases use the same CalVer as `watchglass`: the release date, `YYYY.M.D`,
+Releases use the same CalVer as `watchglass`: the UTC release date, `YYYY.M.D`,
 without zero padding, with a same-day ordinal when the project ships more than
-once in a day. Every version is valid PEP 440, so it can be uploaded to PyPI.
+once in a UTC day. Every version is valid PEP 440, so it can be uploaded to
+PyPI. UTC is what the tag, the GitHub release timestamp and `date -u` agree
+on; a late-evening local release is dated by the next UTC day.
 
 ```text
-2026.11.5        # release on 5 November 2026
-2026.11.5.1      # second release that day
+2026.11.5        # release on 5 November 2026 (UTC)
+2026.11.5.1      # second release that UTC day
 ```
 
 There are no per-tool versions and no development versions:

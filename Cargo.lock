@@ -647,7 +647,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "open-eda-file-tools-native"
-version = "2026.11.9"
+version = "2026.11.10"
 dependencies = [
  "arrow",
  "flate2",
