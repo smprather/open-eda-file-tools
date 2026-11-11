@@ -22,6 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install Tcl 8.6 (sdc-tools)
+        run: sudo apt-get update && sudo apt-get install -y tcl
+
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: "3.14"

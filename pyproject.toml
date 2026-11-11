@@ -17,6 +17,7 @@ liberty-view = "viewer.__main__:main"
 liberty-format = "liberty_format.__main__:main"
 lef-tools = "lef_tools.cli:main"
 def-tools = "def_tools.cli:main"
+sdc-tools = "sdc_tools.cli:main"
 
 [build-system]
 requires = ["maturin>=1.8,<2"]
@@ -37,6 +38,8 @@ include = [
   "lef_tools/py.typed",
   "def_tools/*.py",
   "def_tools/py.typed",
+  "sdc_tools/*.py",
+  "sdc_tools/py.typed",
 ]
 exclude = [
   "*.def",

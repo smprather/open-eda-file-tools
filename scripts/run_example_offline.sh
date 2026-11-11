@@ -155,9 +155,9 @@ if [ -z "$SUFFIX" ]; then
 fi
 
 rm -rf "$RUN/py"
-mkdir -p "$RUN/py/liberty_tools" "$RUN/py/lef_tools" "$RUN/py/def_tools"
+mkdir -p "$RUN/py/liberty_tools" "$RUN/py/lef_tools" "$RUN/py/def_tools" "$RUN/py/sdc_tools"
 : > "$MARKER"
-for pkg in liberty_tools lef_tools def_tools; do
+for pkg in liberty_tools lef_tools def_tools sdc_tools; do
     cp "$REPO_DIR/$pkg"/*.py "$RUN/py/$pkg"/
     for extra in __init__.pyi _native.pyi py.typed; do
         if [ -f "$REPO_DIR/$pkg/$extra" ]; then

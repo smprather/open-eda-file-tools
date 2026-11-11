@@ -10,6 +10,8 @@ libraries and command-line tools under the `open-eda-file-tools` umbrella:
   (`liberty-view`, `liberty-format`).
 - `lef_tools` — cell LEF parser and queries (`lef-tools`).
 - `def_tools` — DEF parser, binary cache and design queries (`def-tools`).
+- `sdc_tools` — SDC clock extraction (`sdc-tools`), evaluated in a real Tcl
+  interpreter with stubbed SDC commands.
 
 ## Repository Layout
 
@@ -25,7 +27,8 @@ viewer/, liberty_format/, logic2svg/
                             Browser viewer (`liberty-view`), formatter (`liberty-format`), symbol layout
 lef_tools/                  Cell LEF Python package and `lef-tools` CLI
 def_tools/                  DEF Python package, `def-tools` CLI, SDC reader, IO configurator
-tests/                      Unified pytest suite (Liberty, LEF, DEF, and `tests/gen/design_gen.py`)
+sdc_tools/                  SDC clock extraction, `sdc-tools` CLI (Tcl stub evaluator)
+tests/                      Unified pytest suite (Liberty, LEF, DEF, SDC, and `tests/gen/design_gen.py`)
 ```
 
 ## Commands
@@ -210,6 +213,31 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   CalVer releases (`YYYY.M.D`, same-day `YYYY.M.D.N`) ship the release version
   on HEAD until the next release, so `version.py` reads installed metadata and
   nothing else.
+
+## SDC package (`sdc_tools/`)
+
+`sdc_tools` extracts the clocks an SDC creates:
+
+```
+sdc_tools/tcl.py     tclsh >= 8.6 discovery, safe interpreter, stub prelude
+sdc_tools/clocks.py  create_clock / create_generated_clock records
+sdc_tools/cli.py     `sdc-tools clocks` (TSV or JSON)
+```
+
+### Key behaviors to preserve
+
+- **SDC runs in a real Tcl interpreter, never a subset parser.** The file is
+  evaluated in `interp create -safe`; SDC commands are stubs that record their
+  arguments, and a `proc unknown` inside the slave records every unimplemented
+  command and returns `{}`, so `set_clock_groups`, `set_false_path` and vendor
+  commands never abort a run.
+- **Tcl >= 8.6 is an environment prerequisite.** `TCLSH` overrides discovery;
+  otherwise `tclsh8.6`, then `tclsh`. There is no static-parser fallback.
+- **Collections stay symbolic**: `port:clk`, `pin:div/Q`, `net:clk`,
+  `cell:u1`. Resolving names against DEF/LEF/Liberty is a separate pass.
+- **Records cross the process boundary as JSON** emitted by the prelude and
+  parsed with `json.loads`; the prelude must stay Tcl 8.6-compatible.
+- **The safe interpreter hides `exec`, `open`, `source`, and `load`.**
 
 ## Liberty spec reference
 

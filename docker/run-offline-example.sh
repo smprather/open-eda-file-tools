@@ -47,3 +47,15 @@ fi
 
 test -s "$PWD/instances.parquet"
 echo "ok: $PWD/instances.parquet ($(stat -c %s "$PWD/instances.parquet") bytes)"
+
+sdc_report=$(
+    PYTHONPATH="$PWD/py" "$PYTHON" -c \
+        'from sdc_tools import clocks; import sys; print("\n".join(c.name for c in clocks(sys.argv[1])))' \
+        "$PWD/gen/design.sdc"
+)
+printf '%s\n' "$sdc_report"
+if ! printf '%s\n' "$sdc_report" | grep -q '^core_clk'; then
+    echo "error: sdc-tools did not report core_clk" >&2
+    exit 1
+fi
+echo "ok: sdc-tools clocks"

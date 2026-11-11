@@ -13,7 +13,7 @@
 
 FROM almalinux:8
 
-RUN dnf install -y gcc make zlib-devel tar gzip \
+RUN dnf install -y gcc make zlib-devel tar gzip tcl \
     && dnf clean all
 
 # The source is read-only and the scratch directory is owned by an

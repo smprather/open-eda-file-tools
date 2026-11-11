@@ -41,6 +41,7 @@ user_guide:
       - cli.qmd
       - lef.qmd
       - def.qmd
+      - sdc.qmd
       - tools.qmd
 
 reference:

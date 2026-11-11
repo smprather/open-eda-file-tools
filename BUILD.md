@@ -53,6 +53,7 @@ No compiler or interpreter is vendored: an offline workstation provides those
 | `rustc`, `cargo` | offline system; Loadout `rust` 1.96.0 | `cargo --version` |
 | Python 3.14+ | offline system; Loadout `portable-python` 3.15.0 | `python3.15 --version` |
 | C compiler | offline system; gcc 8.5 (EL8) or clang 23 | `cc --version` |
+| Tcl >= 8.6 (`sdc-tools`) | offline system; `tclsh8.6` or `tclsh` | `tclsh <<< 'package require Tcl 8.6'` |
 | Python packages | **not vendored** | examples need none; pytest does |
 
 `.cargo/config.toml` redirects crates.io to `vendor/cargo`, so
@@ -227,6 +228,7 @@ uv run pytest -q tests/test_symbol_render.py
 
 - **Rust toolchain** (`rustc` + `cargo`, edition 2024).
 - **CPython 3.14** with `venv`.
+- **Tcl >= 8.6** for `sdc-tools` (`tclsh8.6`/`tclsh`; `TCLSH` overrides).
 
 ## Build
 

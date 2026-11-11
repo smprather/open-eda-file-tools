@@ -88,6 +88,21 @@ read. The [LEF guide](https://smprather.github.io/open-eda-file-tools/user-guide
 and [DEF guide](https://smprather.github.io/open-eda-file-tools/user-guide/def.html)
 cover the APIs, CLIs, binary DEF cache and storage configurator.
 
+## SDC Tools
+
+The `sdc_tools` library and `sdc-tools` CLI return the clocks an SDC creates.
+The file runs in a real Tcl interpreter (>= 8.6) with stubbed SDC commands, so
+variables, loops and flow-generated Tcl work as authored:
+
+```bash
+uv run sdc-tools clocks --sdc design.sdc
+```
+
+```text
+clock	period	waveform	sources	generated_from	divide_by	multiply_by
+clk	10	0 5	port:clk
+```
+
 ## Project Status
 
 The parser is already useful for large timing libraries. The whole project
