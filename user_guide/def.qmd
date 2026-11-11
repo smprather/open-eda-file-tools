@@ -60,6 +60,28 @@ uv run def-tools instances --format csv \
 Default columns: `instance,base_cell,llx,lly,urx,ury` (with `status` and
 `orient` also available via `--columns`). Coordinates are in microns (`DBU /
 UNITS DISTANCE MICRONS`).
+
+Two columns are conditional on their input, so the writer only emits data it
+was given:
+
+| Column | Available when | Meaning |
+| --- | --- | --- |
+| `is_seq` | `--lib LIBERTY` | the instance's macro is a flip-flop or latch |
+| `is_clock` | `--clock-cells PATH` | the instance is a clock-tree cell |
+
+With those inputs the default schema grows to
+`…,is_seq,is_clock`; without them the columns do not exist and asking for one
+with `--columns` is an error. `--clock-cells` takes one instance name per
+line (or a JSON list); the list is produced by `sdc-tools` and the orchestrator
+that traces the clock network.
+
+```bash
+uv run def-tools instances \
+  --lef design.lef --def design.def.gz \
+  --lib sg13g2_stdcell_typ_1p20V_25C.lib \
+  --clock-cells clock_cells.txt \
+  --format parquet --output instances.parquet
+```
 ### `def-tools net-shapes`
 
 Write routed shape bounding boxes for one net and layer. Supply either a DEF

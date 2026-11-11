@@ -65,7 +65,7 @@ The `def_tools` library and `def-tools` CLI parse and query DEF designs:
 
 | Command | What it does |
 |---|---|
-| `instances` | Dump placed instance bounding boxes (in microns) as CSV, Parquet, or an aligned table. |
+| `instances` | Dump placed instance bounding boxes (in microns) as CSV, Parquet, or an aligned table; adds `is_seq` when `--lib` is supplied and `is_clock` when `--clock-cells` is supplied. |
 | `net-shapes` | Emit routed shape bboxes for one net and layer, from a DEF or a cache. |
 | `cache create` | Convert a DEF into an indexed binary cache directory. |
 | `clock-instances` | Walk DEF connectivity from SDC clock roots. |

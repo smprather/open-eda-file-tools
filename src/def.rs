@@ -8,7 +8,7 @@ use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Array, StringArray};
+use arrow::array::{ArrayRef, BooleanArray, Float64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -23,6 +23,8 @@ enum ColumnKind {
     BaseCell,
     Status,
     Orient,
+    IsSeq,
+    IsClock,
     Llx,
     Lly,
     Urx,
@@ -68,7 +70,15 @@ fn default_columns() -> Vec<ColumnSpec> {
 /// ``None`` selects the canonical six columns in their canonical order. The
 /// source names are the project's column names; the output names are what the
 /// file gets, so a rename is just a different second half of the pair.
-fn parse_columns(columns: Option<Vec<(String, String)>>) -> Result<Vec<ColumnSpec>, String> {
+///
+/// ``is_seq`` and ``is_clock`` are conditional: they exist only when the data
+/// behind them was supplied (a Liberty library and clock-cell set,
+/// respectively).
+fn parse_columns(
+    columns: Option<Vec<(String, String)>>,
+    has_sequential: bool,
+    has_clock: bool,
+) -> Result<Vec<ColumnSpec>, String> {
     let Some(pairs) = columns else {
         return Ok(default_columns());
     };
@@ -83,13 +93,28 @@ fn parse_columns(columns: Option<Vec<(String, String)>>) -> Result<Vec<ColumnSpe
             "base_cell" => ColumnKind::BaseCell,
             "status" => ColumnKind::Status,
             "orient" => ColumnKind::Orient,
+            "is_seq" => {
+                if !has_sequential {
+                    return Err("column 'is_seq' requires a Liberty library (--lib)".to_string());
+                }
+                ColumnKind::IsSeq
+            }
+            "is_clock" => {
+                if !has_clock {
+                    return Err(
+                        "column 'is_clock' requires clock-cell data (--clock-cells, produced by sdc-tools)"
+                            .to_string(),
+                    );
+                }
+                ColumnKind::IsClock
+            }
             "llx" => ColumnKind::Llx,
             "lly" => ColumnKind::Lly,
             "urx" => ColumnKind::Urx,
             "ury" => ColumnKind::Ury,
             other => {
                 return Err(format!(
-                    "unknown column '{other}' (choose instance, base_cell, status, orient, llx, lly, urx, ury)"
+                    "unknown column '{other}' (choose instance, base_cell, status, orient, is_seq, is_clock, llx, lly, urx, ury)"
                 ));
             }
         };
@@ -366,38 +391,63 @@ fn net_shapes(def_path: PathBuf, net: String, layer: String) -> PyResult<NetShap
 }
 
 #[pyfunction]
-#[pyo3(signature = (lefs, def_path, output, columns = None))]
+#[pyo3(signature = (lefs, def_path, output, columns = None, sequential = None, clock = None))]
 fn write_instance_table(
     py: Python<'_>,
     lefs: Vec<PathBuf>,
     def_path: PathBuf,
     output: Option<PathBuf>,
     columns: Option<Vec<(String, String)>>,
+    sequential: Option<Vec<String>>,
+    clock: Option<Vec<String>>,
 ) -> PyResult<usize> {
-    let columns = parse_columns(columns).map_err(PyRuntimeError::new_err)?;
+    let sequential = sequential.map(|values| values.into_iter().collect::<HashSet<_>>());
+    let clock = clock.map(|values| values.into_iter().collect::<HashSet<_>>());
+    let columns = parse_columns(columns, sequential.is_some(), clock.is_some())
+        .map_err(PyRuntimeError::new_err)?;
     py.detach(|| {
-        write_instance_table_impl(&lefs, &def_path, output.as_deref(), &columns).map_err(to_py_err)
+        write_instance_table_impl(
+            &lefs,
+            &def_path,
+            output.as_deref(),
+            &columns,
+            sequential.as_ref(),
+            clock.as_ref(),
+        )
+        .map_err(to_py_err)
     })
 }
 
 #[pyfunction]
-#[pyo3(signature = (lefs, def_path, output, columns = None))]
+#[pyo3(signature = (lefs, def_path, output, columns = None, sequential = None, clock = None))]
 fn write_instance_bbox_csv(
     py: Python<'_>,
     lefs: Vec<PathBuf>,
     def_path: PathBuf,
     output: Option<PathBuf>,
     columns: Option<Vec<(String, String)>>,
+    sequential: Option<Vec<String>>,
+    clock: Option<Vec<String>>,
 ) -> PyResult<usize> {
-    let columns = parse_columns(columns).map_err(PyRuntimeError::new_err)?;
+    let sequential = sequential.map(|values| values.into_iter().collect::<HashSet<_>>());
+    let clock = clock.map(|values| values.into_iter().collect::<HashSet<_>>());
+    let columns = parse_columns(columns, sequential.is_some(), clock.is_some())
+        .map_err(PyRuntimeError::new_err)?;
     py.detach(|| {
-        write_instance_bbox_csv_impl(&lefs, &def_path, output.as_deref(), &columns)
-            .map_err(to_py_err)
+        write_instance_bbox_csv_impl(
+            &lefs,
+            &def_path,
+            output.as_deref(),
+            &columns,
+            sequential.as_ref(),
+            clock.as_ref(),
+        )
+        .map_err(to_py_err)
     })
 }
 
 #[pyfunction]
-#[pyo3(signature = (lefs, def_path, output, batch_size, columns = None))]
+#[pyo3(signature = (lefs, def_path, output, batch_size, columns = None, sequential = None, clock = None))]
 fn write_instance_parquet(
     py: Python<'_>,
     lefs: Vec<PathBuf>,
@@ -405,11 +455,24 @@ fn write_instance_parquet(
     output: PathBuf,
     batch_size: usize,
     columns: Option<Vec<(String, String)>>,
+    sequential: Option<Vec<String>>,
+    clock: Option<Vec<String>>,
 ) -> PyResult<(usize, usize)> {
-    let columns = parse_columns(columns).map_err(PyRuntimeError::new_err)?;
+    let sequential = sequential.map(|values| values.into_iter().collect::<HashSet<_>>());
+    let clock = clock.map(|values| values.into_iter().collect::<HashSet<_>>());
+    let columns = parse_columns(columns, sequential.is_some(), clock.is_some())
+        .map_err(PyRuntimeError::new_err)?;
     py.detach(|| {
-        write_instance_parquet_impl(&lefs, &def_path, &output, batch_size, &columns)
-            .map_err(to_py_err)
+        write_instance_parquet_impl(
+            &lefs,
+            &def_path,
+            &output,
+            batch_size,
+            &columns,
+            sequential.as_ref(),
+            clock.as_ref(),
+        )
+        .map_err(to_py_err)
     })
 }
 
@@ -575,6 +638,8 @@ fn write_instance_table_stream<W: Write>(
     columns: &[ColumnSpec],
     instance_width: Option<usize>,
     macro_width: Option<usize>,
+    sequential: Option<&HashSet<String>>,
+    clock: Option<&HashSet<String>>,
     mut out: W,
 ) -> Result<usize, String> {
     let widths: Vec<usize> = columns
@@ -584,6 +649,7 @@ fn write_instance_table_stream<W: Write>(
             ColumnKind::BaseCell => macro_width.unwrap_or(column.name.len()),
             ColumnKind::Status => column.name.len().max(8),
             ColumnKind::Orient => column.name.len().max(6),
+            ColumnKind::IsSeq | ColumnKind::IsClock => column.name.len().max(5),
             _ => column.name.len().max(12),
         })
         .collect();
@@ -597,7 +663,9 @@ fn write_instance_table_stream<W: Write>(
             ColumnKind::Instance
             | ColumnKind::BaseCell
             | ColumnKind::Status
-            | ColumnKind::Orient => {
+            | ColumnKind::Orient
+            | ColumnKind::IsSeq
+            | ColumnKind::IsClock => {
                 write!(out, "{:<width$}", column.name, width = widths[index])
             }
             _ => write!(out, "{:>width$}", column.name, width = widths[index]),
@@ -654,6 +722,22 @@ fn write_instance_table_stream<W: Write>(
                             width = widths[index]
                         )
                     }
+                    ColumnKind::IsSeq => {
+                        let text = if sequential.is_some_and(|set| set.contains(&bbox.macro_name)) {
+                            "true"
+                        } else {
+                            "false"
+                        };
+                        write!(&mut buffer, "{:<width$}", text, width = widths[index])
+                    }
+                    ColumnKind::IsClock => {
+                        let text = if clock.is_some_and(|set| set.contains(&bbox.instance)) {
+                            "true"
+                        } else {
+                            "false"
+                        };
+                        write!(&mut buffer, "{:<width$}", text, width = widths[index])
+                    }
                     ColumnKind::Llx => write!(
                         &mut buffer,
                         "{:>width$.3}",
@@ -696,6 +780,8 @@ fn write_instance_table_impl(
     def_path: &Path,
     output: Option<&Path>,
     columns: &[ColumnSpec],
+    sequential: Option<&HashSet<String>>,
+    clock: Option<&HashSet<String>>,
 ) -> Result<usize, String> {
     let (instance_width, macro_width) = instance_table_widths(def_path, columns)?;
     let mut scanner = DefScanner::from_path(def_path).map_err(|e| e.to_string())?;
@@ -716,6 +802,8 @@ fn write_instance_table_impl(
                 columns,
                 instance_width,
                 macro_width,
+                sequential,
+                clock,
                 BufWriter::new(file),
             )
         }
@@ -728,6 +816,8 @@ fn write_instance_table_impl(
                 columns,
                 instance_width,
                 macro_width,
+                sequential,
+                clock,
                 BufWriter::new(lock),
             )
         }
@@ -738,6 +828,8 @@ fn write_instance_bbox_csv_stream<W: Write>(
     scanner: &mut DefScanner,
     macros: &MacroMap,
     columns: &[ColumnSpec],
+    sequential: Option<&HashSet<String>>,
+    clock: Option<&HashSet<String>>,
     mut out: W,
 ) -> Result<usize, String> {
     let mut header = String::new();
@@ -770,6 +862,22 @@ fn write_instance_bbox_csv_stream<W: Write>(
                     ColumnKind::BaseCell => append_csv_field(&mut buffer, &bbox.macro_name),
                     ColumnKind::Status => append_csv_field(&mut buffer, &bbox.status),
                     ColumnKind::Orient => append_csv_field(&mut buffer, &bbox.orient),
+                    ColumnKind::IsSeq => append_csv_field(
+                        &mut buffer,
+                        if sequential.is_some_and(|set| set.contains(&bbox.macro_name)) {
+                            "true"
+                        } else {
+                            "false"
+                        },
+                    ),
+                    ColumnKind::IsClock => append_csv_field(
+                        &mut buffer,
+                        if clock.is_some_and(|set| set.contains(&bbox.instance)) {
+                            "true"
+                        } else {
+                            "false"
+                        },
+                    ),
                     ColumnKind::Llx => append_csv_micron(&mut buffer, bbox.llx as f64 / dbu),
                     ColumnKind::Lly => append_csv_micron(&mut buffer, bbox.lly as f64 / dbu),
                     ColumnKind::Urx => append_csv_micron(&mut buffer, bbox.urx as f64 / dbu),
@@ -791,6 +899,8 @@ fn write_instance_bbox_csv_impl(
     def_path: &Path,
     output: Option<&Path>,
     columns: &[ColumnSpec],
+    sequential: Option<&HashSet<String>>,
+    clock: Option<&HashSet<String>>,
 ) -> Result<usize, String> {
     let mut scanner = DefScanner::from_path(def_path).map_err(|e| e.to_string())?;
     let (macros, duplicates) = parse_lef_files(lefs, scanner.dbu_per_micron)?;
@@ -804,12 +914,26 @@ fn write_instance_bbox_csv_impl(
     match output {
         Some(path) => {
             let file = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            write_instance_bbox_csv_stream(&mut scanner, &macros, columns, BufWriter::new(file))
+            write_instance_bbox_csv_stream(
+                &mut scanner,
+                &macros,
+                columns,
+                sequential,
+                clock,
+                BufWriter::new(file),
+            )
         }
         None => {
             let stdout = io::stdout();
             let lock = stdout.lock();
-            write_instance_bbox_csv_stream(&mut scanner, &macros, columns, BufWriter::new(lock))
+            write_instance_bbox_csv_stream(
+                &mut scanner,
+                &macros,
+                columns,
+                sequential,
+                clock,
+                BufWriter::new(lock),
+            )
         }
     }
 }
@@ -820,6 +944,8 @@ fn write_instance_parquet_impl(
     output: &Path,
     batch_size: usize,
     columns: &[ColumnSpec],
+    sequential: Option<&HashSet<String>>,
+    clock: Option<&HashSet<String>>,
 ) -> Result<(usize, usize), String> {
     let mut scanner = DefScanner::from_path(def_path).map_err(|e| e.to_string())?;
     let (macros, duplicates) = parse_lef_files(lefs, scanner.dbu_per_micron)?;
@@ -838,6 +964,7 @@ fn write_instance_parquet_impl(
                 | ColumnKind::BaseCell
                 | ColumnKind::Status
                 | ColumnKind::Orient => DataType::Utf8,
+                ColumnKind::IsSeq | ColumnKind::IsClock => DataType::Boolean,
                 _ => DataType::Float64,
             };
             Field::new(&column.name, data_type, false)
@@ -893,6 +1020,18 @@ fn write_instance_parquet_impl(
                     bboxes
                         .iter()
                         .map(|item| item.orient.as_str())
+                        .collect::<Vec<_>>(),
+                )),
+                ColumnKind::IsSeq => Arc::new(BooleanArray::from(
+                    bboxes
+                        .iter()
+                        .map(|item| sequential.is_some_and(|set| set.contains(&item.macro_name)))
+                        .collect::<Vec<_>>(),
+                )),
+                ColumnKind::IsClock => Arc::new(BooleanArray::from(
+                    bboxes
+                        .iter()
+                        .map(|item| clock.is_some_and(|set| set.contains(&item.instance)))
                         .collect::<Vec<_>>(),
                 )),
                 ColumnKind::Llx => Arc::new(Float64Array::from(
@@ -2668,13 +2807,18 @@ mod tests {
         .unwrap();
         let output = tempfile_path("def_tools_columns.parquet");
 
-        let columns = parse_columns(Some(vec![
-            ("instance".to_string(), "name".to_string()),
-            ("base_cell".to_string(), "cell".to_string()),
-        ]))
+        let columns = parse_columns(
+            Some(vec![
+                ("instance".to_string(), "name".to_string()),
+                ("base_cell".to_string(), "cell".to_string()),
+            ]),
+            false,
+            false,
+        )
         .unwrap();
         let (rows, row_groups) =
-            write_instance_parquet_impl(&[lef.clone()], &def, &output, 1024, &columns).unwrap();
+            write_instance_parquet_impl(&[lef.clone()], &def, &output, 1024, &columns, None, None)
+                .unwrap();
         assert_eq!((rows, row_groups), (1, 1));
 
         let reader = SerializedFileReader::new(File::open(&output).unwrap()).unwrap();

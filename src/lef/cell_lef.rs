@@ -216,6 +216,12 @@ pub fn parse_library(
         let input = open_input(path).map_err(|err| io_error(path, err))?;
         let mut lexer = LefLexer::new(input);
         while let Some(token) = lexer.next()? {
+            if token.text.eq_ignore_ascii_case("PROPERTYDEFINITIONS") {
+                // Property definitions may declare `MACRO <name> <TYPE> ;`
+                // entries; those are property types, not macro bodies.
+                skip_property_definitions(&mut lexer, path)?;
+                continue;
+            }
             if !token.text.eq_ignore_ascii_case("MACRO") {
                 continue;
             }
@@ -418,6 +424,32 @@ fn parse_port_body<R: Read, F: Fn() -> String>(
     }
 
     Ok(PortData { rects, unsupported })
+}
+
+/// Skip the `PROPERTYDEFINITIONS` section without interpreting it.
+///
+/// Property declarations can begin with the same words as groups (`MACRO`,
+/// `PIN`, `PORT`), so the whole section is consumed rather than parsed.
+fn skip_property_definitions<R: Read>(lexer: &mut LefLexer<R>, path: &Path) -> LefResult<()> {
+    loop {
+        let Some(token) = lexer.next()? else {
+            return value_error(format!(
+                "{}: unterminated PROPERTYDEFINITIONS",
+                path.display()
+            ));
+        };
+        if token.text.eq_ignore_ascii_case("END") {
+            let Some(next) = lexer.next()? else {
+                return value_error(format!(
+                    "{}: unterminated PROPERTYDEFINITIONS",
+                    path.display()
+                ));
+            };
+            if next.text.eq_ignore_ascii_case("PROPERTYDEFINITIONS") {
+                return Ok(());
+            }
+        }
+    }
 }
 
 /// Skip a group without allocating its contents, tracking nested groups so the

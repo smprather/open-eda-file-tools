@@ -148,6 +148,8 @@ def write_instance_bbox_csv(
     def_path: _StrPath,
     output: _StrPath | None,
     columns: Sequence[tuple[str, str]] | None = None,
+    sequential: Sequence[str] | None = None,
+    clock: Sequence[str] | None = None,
 ) -> int: ...
 def write_instance_parquet(
     lefs: Sequence[_StrPath],
@@ -155,12 +157,16 @@ def write_instance_parquet(
     output: _StrPath,
     batch_size: int,
     columns: Sequence[tuple[str, str]] | None = None,
+    sequential: Sequence[str] | None = None,
+    clock: Sequence[str] | None = None,
 ) -> tuple[int, int]: ...
 def write_instance_table(
     lefs: Sequence[_StrPath],
     def_path: _StrPath,
     output: _StrPath | None,
     columns: Sequence[tuple[str, str]] | None = None,
+    sequential: Sequence[str] | None = None,
+    clock: Sequence[str] | None = None,
 ) -> int: ...
 def write_net_shapes_csv(
     def_path: _StrPath, net: str, layer: str, output: _StrPath | None

@@ -18,15 +18,18 @@ from .instances import (
     AVAILABLE_COLUMNS,
     CANONICAL_COLUMNS,
     FORMATS,
+    default_instance_columns,
     effective_batch_size,
     expand_lef_argv,
     memory_ceiling,
     parse_column_spec,
     parse_size,
     peak_rss_bytes,
+    read_clock_cells,
     read_header,
     rss_bytes,
     run_instances,
+    sequential_macros,
 )
 from .io_config import DEFAULT_PROBE_MIB, write_io_config
 from .sdc import clock_roots_from_sdc
@@ -114,6 +117,21 @@ def main() -> None:
     help="DEF design file (.def or .def.gz).",
 )
 @click.option(
+    "--lib",
+    "libs",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    multiple=True,
+    help="Liberty library. Supply it to make the is_seq column available.",
+)
+@click.option(
+    "--clock-cells",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help=(
+        "Clock-tree instance names (from sdc-tools): one per line, or a JSON "
+        "list. Supply it to make the is_clock column available."
+    ),
+)
+@click.option(
     "--format",
     "fmt",
     type=click.Choice(FORMATS),
@@ -136,7 +154,8 @@ def main() -> None:
         "Comma-separated columns in output order; rename with source=output, "
         "for example instance=instance_name,base_cell,llx=llx_um. "
         f"Sources: {','.join(AVAILABLE_COLUMNS)}. "
-        f"Defaults to {','.join(CANONICAL_COLUMNS)}."
+        "Defaults to the canonical six, plus is_seq with --lib and is_clock "
+        "with --clock-cells."
     ),
 )
 @click.option(
@@ -165,6 +184,8 @@ def main() -> None:
 def instances(
     lefs: tuple[Path, ...],
     def_path: Path,
+    libs: tuple[Path, ...],
+    clock_cells: Path | None,
     fmt: str,
     output: Path | None,
     columns: list[tuple[str, str]] | None,
@@ -173,12 +194,23 @@ def instances(
     threads: int | None,
 ) -> None:
     """Dump placed instance bounding boxes (in microns) as CSV, Parquet, or table."""
+    try:
+        sequential = sorted(sequential_macros(list(libs))) if libs else None
+        clock = (
+            sorted(read_clock_cells(clock_cells)) if clock_cells is not None else None
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if columns is None:
+        columns = default_instance_columns(sequential is not None, clock is not None)
     rc = run_instances(
         lefs,
         def_path,
         fmt=fmt,
         output=output,
         columns=columns,
+        sequential=sequential,
+        clock=clock,
         batch_size=batch_size,
         max_memory=max_memory,
         threads=threads,

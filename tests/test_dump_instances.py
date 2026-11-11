@@ -303,3 +303,119 @@ def test_failed_run_removes_a_new_output(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert not output.exists()
+
+
+def write_flag_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """A combinational and a sequential instance, with Liberty and clock cells."""
+    lef = tmp_path / "flag_cells.lef"
+    lef.write_text(
+        "VERSION 5.8 ;\n"
+        "UNITS DATABASE MICRONS 1000 ;\n"
+        "MACRO INV\n  SIZE 1.2 BY 2.4 ;\nEND INV\n"
+        "MACRO DFF\n  SIZE 2.0 BY 2.0 ;\nEND DFF\n",
+        encoding="utf-8",
+    )
+    design = tmp_path / "flag_design.def"
+    design.write_text(
+        "VERSION 5.8 ;\n"
+        "DESIGN flags ;\n"
+        "UNITS DISTANCE MICRONS 1000 ;\n"
+        "COMPONENTS 2 ;\n"
+        "  - u1 INV + PLACED ( 10 20 ) N ;\n"
+        "  - u2 DFF + PLACED ( 30 40 ) N ;\n"
+        "END COMPONENTS\n"
+        "END DESIGN\n",
+        encoding="utf-8",
+    )
+    liberty = tmp_path / "flag.lib"
+    liberty.write_text(
+        "library (flag) {\n"
+        "  cell (INV) {\n"
+        "    pin (A) { direction : input; }\n"
+        "    pin (X) { direction : output; function : \"A\"; }\n"
+        "  }\n"
+        "  cell (DFF) {\n"
+        "    ff (IQ, IQN) { next_state : \"D\"; clocked_on : \"CK\"; }\n"
+        "    pin (CK) { direction : input; clock : true; }\n"
+        "    pin (D) { direction : input; }\n"
+        "    pin (Q) { direction : output; function : \"IQ\"; }\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    clock_cells = tmp_path / "clock_cells.txt"
+    clock_cells.write_text("u1\n# comment\n\n", encoding="utf-8")
+    return lef, design, liberty, clock_cells
+
+
+def test_flag_columns_appear_with_their_inputs(tmp_path: Path) -> None:
+    lef, design, liberty, clock_cells = write_flag_fixture(tmp_path)
+    output = tmp_path / "instances.csv"
+
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "instances",
+            "--lef",
+            str(lef),
+            "--def",
+            str(design),
+            "--lib",
+            str(liberty),
+            "--clock-cells",
+            str(clock_cells),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "instance,base_cell,llx,lly,urx,ury,is_seq,is_clock",
+        "u1,INV,0.01,0.02,1.21,2.42,false,true",
+        "u2,DFF,0.03,0.04,2.03,2.04,true,false",
+    ]
+
+
+def test_flag_columns_require_their_inputs(tmp_path: Path) -> None:
+    lef, design, _liberty, _clock_cells = write_flag_fixture(tmp_path)
+
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "instances",
+            "--lef",
+            str(lef),
+            "--def",
+            str(design),
+            "--columns",
+            "instance,is_seq,is_clock",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "is_seq" in result.output
+    assert "Liberty" in result.output
+
+
+def test_flag_columns_are_booleans_in_parquet(tmp_path: Path) -> None:
+    from def_tools import write_instance_parquet
+
+    lef, design, _liberty, _clock_cells = write_flag_fixture(tmp_path)
+    output = tmp_path / "instances.parquet"
+
+    written, _ = write_instance_parquet(
+        [lef],
+        design,
+        output,
+        1024,
+        columns=[("instance", "instance"), ("is_seq", "is_seq"), ("is_clock", "is_clock")],
+        sequential=["DFF"],
+        clock=["u1"],
+    )
+
+    assert written == 2
+    frame = pl.read_parquet(output)
+    assert frame["is_seq"].to_list() == [False, True]
+    assert frame["is_clock"].to_list() == [True, False]
+    assert frame.schema["is_seq"] == pl.Boolean

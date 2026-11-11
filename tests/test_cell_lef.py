@@ -614,3 +614,22 @@ def test_missing_file_raises_oserror(tmp_path):
     with pytest.raises(FileNotFoundError) as excinfo:
         parse_lef(tmp_path / "does_not_exist.lef")
     assert "does_not_exist.lef" in str(excinfo.value)
+
+
+def test_property_definitions_are_not_macros(tmp_path):
+    path = tmp_path / "props.lef"
+    path.write_text(
+        "VERSION 5.8 ;\n"
+        "PROPERTYDEFINITIONS\n"
+        "  MACRO CatenaDesignType STRING ;\n"
+        "  PIN Foo STRING ;\n"
+        "END PROPERTYDEFINITIONS\n"
+        "MACRO BUF\n"
+        "  SIZE 1 BY 1 ;\n"
+        "END BUF\n",
+        encoding="utf-8",
+    )
+
+    library = parse_lef(path)
+
+    assert library.macro_names() == ["BUF"]

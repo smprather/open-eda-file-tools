@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import glob
 import gzip
+import json
 import os
 import re
 import resource
@@ -26,11 +27,52 @@ AVAILABLE_COLUMNS = (
     "base_cell",
     "status",
     "orient",
+    "is_seq",
+    "is_clock",
     "llx",
     "lly",
     "urx",
     "ury",
 )
+
+
+def default_instance_columns(
+    has_sequential: bool, has_clock: bool
+) -> list[tuple[str, str]]:
+    """Columns the dump carries by default, given the inputs supplied."""
+    columns = [(name, name) for name in CANONICAL_COLUMNS]
+    if has_sequential:
+        columns.append(("is_seq", "is_seq"))
+    if has_clock:
+        columns.append(("is_clock", "is_clock"))
+    return columns
+
+
+def sequential_macros(libs: Sequence[Path]) -> set[str]:
+    """Macro names whose Liberty cells are flip-flops or latches."""
+    from liberty_tools import parse_file
+
+    names: set[str] = set()
+    for lib in libs:
+        document = parse_file(str(lib))
+        for cell_name in document.cells():
+            cell = document.cell(cell_name)
+            if cell.ff() is not None or cell.latch() is not None:
+                names.add(cell_name)
+    return names
+
+
+def read_clock_cells(path: Path) -> set[str]:
+    """Read clock-tree instance names: a JSON list or one name per line."""
+    text = path.read_text(encoding="utf-8")
+    stripped = text.lstrip()
+    if stripped.startswith("["):
+        return {str(value) for value in json.loads(stripped)}
+    return {
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
 
 # Conservative sizing for --max-memory. The native Parquet batch costs much
 # less than this per row; 4 KiB/row leaves ample room for the Arrow arrays.
@@ -244,6 +286,8 @@ def run_instances(
     fmt: str = "csv",
     output: Path | None = None,
     columns: Sequence[tuple[str, str]] | None = None,
+    sequential: Sequence[str] | None = None,
+    clock: Sequence[str] | None = None,
     batch_size: int = 131_072,
     max_memory: int = 1024**3,
     threads: int | None = None,
@@ -270,14 +314,34 @@ def run_instances(
     try:
         dbu_per_micron, expected = read_header(def_path)
         if fmt == "table":
-            written = write_instance_table(lef_list, def_path, output, columns=columns)
+            written = write_instance_table(
+                lef_list,
+                def_path,
+                output,
+                columns=columns,
+                sequential=sequential,
+                clock=clock,
+            )
         elif fmt == "csv":
-            written = write_instance_bbox_csv(lef_list, def_path, output, columns=columns)
+            written = write_instance_bbox_csv(
+                lef_list,
+                def_path,
+                output,
+                columns=columns,
+                sequential=sequential,
+                clock=clock,
+            )
         else:
             assert output is not None
             eff_batch = effective_batch_size(max_memory, batch_size)
             written, row_groups = write_instance_parquet(
-                lef_list, def_path, output, eff_batch, columns=columns
+                lef_list,
+                def_path,
+                output,
+                eff_batch,
+                columns=columns,
+                sequential=sequential,
+                clock=clock,
             )
             parquet_info = (eff_batch, row_groups)
     except (OSError, ValueError, RuntimeError) as exc:
@@ -334,6 +398,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="def-tools instances")
     parser.add_argument("--lef", type=Path, action="append", required=True)
     parser.add_argument("--def", dest="def_path", type=Path, required=True)
+    parser.add_argument("--lib", type=Path, action="append", default=[])
+    parser.add_argument("--clock-cells", type=Path, default=None)
     parser.add_argument("--format", dest="fmt", choices=FORMATS, default="csv")
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--columns", type=parse_column_spec, default=None)
@@ -343,12 +409,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(normalized)
     if args.batch_size < 1:
         parser.error("--batch-size must be at least 1")
+    try:
+        sequential = sorted(sequential_macros(args.lib)) if args.lib else None
+        clock = sorted(read_clock_cells(args.clock_cells)) if args.clock_cells else None
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    columns = args.columns
+    if columns is None:
+        columns = default_instance_columns(sequential is not None, clock is not None)
     return run_instances(
         args.lef,
         args.def_path,
         fmt=args.fmt,
         output=args.output,
-        columns=args.columns,
+        columns=columns,
+        sequential=sequential,
+        clock=clock,
         batch_size=args.batch_size,
         max_memory=args.max_memory,
         threads=args.threads,
