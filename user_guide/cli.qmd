@@ -7,6 +7,7 @@ title: Command Line Tools
 | Command | What it does |
 |---|---|
 | `liberty-tools format` | Reformats a Liberty file by brace depth, provably without changing its meaning. |
+| `liberty-format` | Convenience entry point for `liberty-tools format`; same command, same options. |
 | `liberty-view` | Serves a browser viewer for a Liberty library. |
 
 The commands are installed with the package:
@@ -26,6 +27,7 @@ In a checkout of the repository, run them through `uv run`:
 ```bash
 uv run liberty-view dev.lib
 uv run liberty-tools format dev.lib
+uv run liberty-format dev.lib        # same command as liberty-tools format
 ```
 
 Every command supports `--help` and `--version`:

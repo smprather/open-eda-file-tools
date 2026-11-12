@@ -188,7 +188,8 @@ uv run liberty-view dev.lib
 The viewer serves all frontend assets locally, including Plotly. See
 [CLI reference](https://smprather.github.io/open-eda-file-tools/user-guide/cli.html)
 for the full command line reference of
-`liberty-view` and `liberty-tools format`. It renders:
+`liberty-view` and `liberty-tools format` (also installed as `liberty-format`).
+It renders:
 
 - scalar tables as compact tables
 - 1D tables as line plots

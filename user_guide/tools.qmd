@@ -8,7 +8,7 @@ a single tag.
 
 | Tool | Library | Commands | Status |
 | --- | --- | --- | --- |
-| Liberty `.lib` parser, writer, viewer and formatter | `liberty_tools` | `liberty-view`, `liberty-tools format` | shipped |
+| Liberty `.lib` parser, writer, viewer and formatter | `liberty_tools` | `liberty-view`, `liberty-tools format`, `liberty-format` | shipped |
 | Cell LEF parser and query tools | `lef_tools` | `lef-tools` | shipped (alpha) |
 | DEF parser, binary cache and design queries | `def_tools` | `def-tools` | shipped (alpha) |
 | SDC clock extraction | `sdc_tools` | `sdc-tools` | shipped (alpha) |

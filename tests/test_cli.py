@@ -49,3 +49,44 @@ def test_format_subcommand_check_reports_unformatted(tmp_path):
 
     assert result.exit_code == 1
     assert "would reformat" in result.output
+
+
+def test_liberty_format_wrapper_version(capsys):
+    from liberty_tools.cli import format_main
+
+    format_main(["--version"])
+
+    assert (
+        capsys.readouterr().out
+        == f"liberty-format, version {version('open-eda-file-tools')}\n"
+    )
+
+
+def test_liberty_format_wrapper_formats(tmp_path, capsys):
+    import pytest
+
+    from liberty_tools.cli import format_main
+
+    path = tmp_path / "test.lib"
+    path.write_text(LIB, encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        format_main([str(path)])
+
+    assert excinfo.value.code == 0
+    assert capsys.readouterr().out == format_text(LIB)
+
+
+def test_liberty_format_wrapper_check_exits_one(tmp_path, capsys):
+    import pytest
+
+    from liberty_tools.cli import format_main
+
+    path = tmp_path / "test.lib"
+    path.write_text(LIB, encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        format_main(["--check", str(path)])
+
+    assert excinfo.value.code == 1
+    assert "would reformat" in capsys.readouterr().out

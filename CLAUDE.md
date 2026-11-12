@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 libraries and command-line tools under the `open-eda-file-tools` umbrella:
 
 - `liberty_tools` — Liberty `.lib` parser, writer, viewer and formatter
-  (`liberty-view`, `liberty-tools format`).
+  (`liberty-view`, `liberty-tools format`, and the `liberty-format` wrapper).
 - `lef_tools` — cell LEF parser and queries (`lef-tools`).
 - `def_tools` — DEF parser, binary cache and design queries (`def-tools`).
 - `sdc_tools` — SDC clock extraction (`sdc-tools`), evaluated in a real Tcl

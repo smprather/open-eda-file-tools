@@ -26,7 +26,7 @@ With `uv`:
 uv add "liberty-tools @ git+https://github.com/smprather/open-eda-file-tools.git"
 ```
 
-To install the `liberty-view` and `liberty-tools` commands globally:
+To install the `liberty-view`, `liberty-tools` and `liberty-format` commands globally:
 
 ```bash
 uv tool install "liberty-tools @ git+https://github.com/smprather/open-eda-file-tools.git"

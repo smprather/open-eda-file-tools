@@ -100,5 +100,24 @@ def format_command(
         click.echo(formatted, nl=False)
 
 
+def format_main(argv: list[str] | None = None) -> None:
+    """``liberty-format`` console script: invoke the same command as
+    ``liberty-tools format``.
+
+    This is a thin entry point, not a second implementation: it runs the
+    group's ``format`` command object directly so help, options and behaviour
+    cannot drift.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "--version" in args:
+        click.echo(f"liberty-format, version {_package_version()}")
+        return
+    format_command.main(
+        args=args,
+        prog_name="liberty-format",
+        standalone_mode=True,
+    )
+
+
 if __name__ == "__main__":
     main()
