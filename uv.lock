@@ -366,7 +366,7 @@ wheels = [
 
 [[package]]
 name = "open-eda-file-tools"
-version = "2026.11.10"
+version = "2026.11.12"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
