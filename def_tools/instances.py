@@ -12,6 +12,7 @@ import resource
 import sys
 import time
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from liberty_tools._native import (
@@ -49,12 +50,22 @@ def default_instance_columns(
 
 
 def sequential_macros(libs: Sequence[Path]) -> set[str]:
-    """Macro names whose Liberty cells are flip-flops or latches."""
+    """Macro names whose Liberty cells are flip-flops or latches.
+
+    Only the structural fields are needed, so each library parses with
+    ``skip_tables=True`` and one thread per library (``parse_file`` releases
+    the GIL).
+    """
     from liberty_tools import parse_file
 
+    if not libs:
+        return set()
+    with ThreadPoolExecutor(max_workers=len(libs)) as pool:
+        documents = list(
+            pool.map(lambda path: parse_file(str(path), skip_tables=True), libs)
+        )
     names: set[str] = set()
-    for lib in libs:
-        document = parse_file(str(lib))
+    for document in documents:
         for cell_name in document.cells():
             cell = document.cell(cell_name)
             if cell.ff() is not None or cell.latch() is not None:

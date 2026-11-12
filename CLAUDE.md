@@ -213,7 +213,9 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   (`instance,base_cell,llx,lly,urx,ury`) need only DEF+LEF; `is_seq` exists
   only when a Liberty library is supplied (`ff`/`latch` groups) and `is_clock`
   only when a clock-cell set is supplied. Selecting a column whose input is
-  absent is an error, never a silent false column.
+  absent is an error, never a silent false column. `is_seq` parses each
+  library with `skip_tables=True`, one thread per library; only structural
+  fields are needed.
 - **The binary cache is versioned.** Magic headers and `CACHE_VERSION` guard
   the on-disk format; components, raw net records, a fixed-offset net index, a
   name index and connectivity live in separate files so single-net queries read
