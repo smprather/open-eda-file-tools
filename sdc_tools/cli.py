@@ -8,6 +8,7 @@ from pathlib import Path
 
 import rich_click as click
 
+from .clock_tree import clock_cells as find_clock_cells
 from .clocks import Clock, clocks
 from .version import get_version
 
@@ -63,6 +64,58 @@ def _render(clocks_found: list[Clock], fmt: str) -> str:
 def clocks_command(sdc_path: Path, fmt: str, output: Path | None) -> None:
     """List the clocks created by an SDC."""
     rendered = _render(clocks(sdc_path), fmt)
+    if output is None:
+        click.echo(rendered, nl=False)
+    else:
+        output.write_text(rendered, encoding="utf-8")
+
+
+@main.command(name="clock-cells")
+@click.option(
+    "--sdc",
+    "sdc_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="SDC file that creates the clock roots.",
+)
+@click.option(
+    "--def",
+    "def_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="DEF design with the instance connectivity.",
+)
+@click.option(
+    "--lib",
+    "libs",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    multiple=True,
+    required=True,
+    help="Liberty library for pin directions and sequential types.",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["lines", "json"]),
+    default="lines",
+    show_default=True,
+    help="One instance per line, or a JSON list.",
+)
+@click.option(
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write here instead of stdout.",
+)
+def clock_cells_command(
+    sdc_path: Path, def_path: Path, libs: tuple[Path, ...], fmt: str, output: Path | None
+) -> None:
+    """List the clock-tree instances reachable from the SDC clock roots."""
+    result = find_clock_cells(def_path, list(libs), sdc_path)
+    if fmt == "json":
+        rendered = json.dumps(list(result.cells), indent=2) + "\n"
+    else:
+        rendered = "\n".join(result.cells)
+        rendered = rendered + "\n" if rendered else ""
     if output is None:
         click.echo(rendered, nl=False)
     else:

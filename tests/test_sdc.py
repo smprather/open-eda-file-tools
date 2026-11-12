@@ -135,3 +135,112 @@ def test_openlane_hello_world_sdc() -> None:
     assert [(c.name, c.period, c.sources) for c in found] == [
         ("clk", 10.0, ("port:clk",))
     ]
+
+
+TRACE_DEF = """\
+VERSION 5.8 ;
+DESIGN trace ;
+UNITS DISTANCE MICRONS 1000 ;
+COMPONENTS 3 ;
+  - u1 BUFX + PLACED ( 0 0 ) N ;
+  - u2 GATEX + PLACED ( 0 0 ) N ;
+  - u3 DFFX + PLACED ( 0 0 ) N ;
+END COMPONENTS
+NETS 4 ;
+  - clk ( PIN clk ) ( u1 A ) + USE CLOCK ;
+  - n1 ( u1 X ) ( u2 A ) + USE CLOCK ;
+  - n2 ( u2 X ) ( u3 CK ) + USE CLOCK ;
+  - d ( u3 D ) ;
+END NETS
+END DESIGN
+"""
+
+TRACE_LIB = """\
+library (trace) {
+  cell (BUFX) {
+    pin (A) { direction : input; }
+    pin (X) { direction : output; function : "A"; }
+  }
+  cell (GATEX) {
+    pin (A) { direction : input; }
+    pin (EN) { direction : input; }
+    pin (X) { direction : output; function : "A EN"; }
+  }
+  cell (DFFX) {
+    ff (IQ, IQN) { next_state : "D"; clocked_on : "CK"; }
+    pin (CK) { direction : input; clock : true; }
+    pin (D) { direction : input; }
+    pin (Q) { direction : output; function : "IQ"; }
+  }
+}
+"""
+
+
+def test_clock_cells_trace_forward_to_sequential_endpoints(tmp_path: Path) -> None:
+    from sdc_tools import clock_cells
+
+    design = tmp_path / "trace.def"
+    design.write_text(TRACE_DEF, encoding="utf-8")
+    liberty = tmp_path / "trace.lib"
+    liberty.write_text(TRACE_LIB, encoding="utf-8")
+    sdc = write_sdc(
+        tmp_path, "create_clock -name clk -period 10 [get_ports clk]\n"
+    )
+
+    result = clock_cells(design, [liberty], sdc)
+
+    assert [clock.name for clock in result.clocks] == ["clk"]
+    assert result.cells == ("u1", "u2")
+
+
+def test_clock_cells_cli_writes_lines(tmp_path: Path) -> None:
+    design = tmp_path / "trace.def"
+    design.write_text(TRACE_DEF, encoding="utf-8")
+    liberty = tmp_path / "trace.lib"
+    liberty.write_text(TRACE_LIB, encoding="utf-8")
+    sdc = write_sdc(
+        tmp_path, "create_clock -name clk -period 10 [get_ports clk]\n"
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "clock-cells",
+            "--sdc",
+            str(sdc),
+            "--def",
+            str(design),
+            "--lib",
+            str(liberty),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == ["u1", "u2"]
+
+
+OPENLANE_DEF = Path.home() / "openlane2-hello-world" / "gcd.def.gz"
+OPENLANE_LIB = (
+    Path.home()
+    / "pdk/IHP-Open-PDK/ihp-sg13g2/libs.ref/sg13g2_stdcell/lib"
+    / "sg13g2_stdcell_typ_1p20V_25C.lib"
+)
+
+
+@pytest.mark.skipif(
+    not (OPENLANE_SDC.exists() and OPENLANE_DEF.exists() and OPENLANE_LIB.exists()),
+    reason="local OpenLane/IHP fixture missing",
+)
+def test_openlane_clock_cells() -> None:
+    from sdc_tools import clock_cells
+
+    result = clock_cells(OPENLANE_DEF, [OPENLANE_LIB], OPENLANE_SDC)
+
+    assert result.cells == (
+        "clkbuf_0_clk",
+        "clkbuf_2_0__f_clk",
+        "clkbuf_2_1__f_clk",
+        "clkbuf_2_2__f_clk",
+        "clkbuf_2_3__f_clk",
+    )
+    assert "_419_" not in result.cells  # a flop, not a distribution cell

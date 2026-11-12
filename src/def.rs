@@ -541,6 +541,166 @@ fn write_clock_instances_csv_from_cache(
     })
 }
 
+#[pyfunction]
+#[pyo3(signature = (def_path, roots, macros))]
+fn clock_tree_cells(
+    py: Python<'_>,
+    def_path: PathBuf,
+    roots: Vec<String>,
+    macros: Vec<(String, Vec<String>, Vec<String>, bool)>,
+) -> PyResult<Vec<String>> {
+    py.detach(|| clock_tree_cells_impl(&def_path, &roots, &macros).map_err(to_py_err))
+}
+
+/// Forward trace from symbolic clock roots through DEF connectivity.
+///
+/// `macros` carries `(name, input pins, output pins, sequential)` per Liberty
+/// cell. A combinational cell whose input pin sits on a clock net is a clock
+/// tree cell; its output nets are followed. Sequential cells end the trace and
+/// are not reported as tree cells.
+fn clock_tree_cells_impl(
+    def_path: &Path,
+    roots: &[String],
+    macros: &[(String, Vec<String>, Vec<String>, bool)],
+) -> Result<Vec<String>, String> {
+    let (components, nets) = collect_def_connectivity(def_path)?;
+    let macro_map: HashMap<&str, (&Vec<String>, &Vec<String>, bool)> = macros
+        .iter()
+        .map(|(name, inputs, outputs, sequential)| (name.as_str(), (inputs, outputs, *sequential)))
+        .collect();
+
+    let mut instance_nets: HashMap<&str, Vec<(usize, &str)>> = HashMap::new();
+    let mut net_by_name: HashMap<&str, usize> = HashMap::new();
+    for (index, net) in nets.iter().enumerate() {
+        net_by_name.insert(net.name.as_str(), index);
+        for conn in &net.conns {
+            if let Some(instance) = &conn.instance {
+                instance_nets
+                    .entry(instance.as_str())
+                    .or_default()
+                    .push((index, conn.pin.as_str()));
+            }
+        }
+    }
+
+    let mut seeds: Vec<usize> = Vec::new();
+    for root in roots {
+        collect_root_nets(
+            root,
+            &nets,
+            &net_by_name,
+            &instance_nets,
+            &macro_map,
+            &components,
+            &mut seeds,
+        );
+    }
+    seeds.sort_unstable();
+    seeds.dedup();
+
+    let mut queue: VecDeque<usize> = seeds.into_iter().collect();
+    let mut seen_nets = vec![false; nets.len()];
+    let mut expanded: HashSet<String> = HashSet::new();
+    let mut cells: HashSet<String> = HashSet::new();
+
+    while let Some(net_index) = queue.pop_front() {
+        if net_index >= nets.len() || seen_nets[net_index] {
+            continue;
+        }
+        seen_nets[net_index] = true;
+        for conn in &nets[net_index].conns {
+            let Some(instance) = conn.instance.as_ref() else {
+                continue;
+            };
+            let Some(macro_name) = components.get(instance) else {
+                continue;
+            };
+            let Some((inputs, outputs, sequential)) = macro_map.get(macro_name.as_str()) else {
+                continue;
+            };
+            if *sequential || outputs.is_empty() {
+                continue;
+            }
+            if !inputs.iter().any(|pin| pin == &conn.pin) {
+                continue;
+            }
+            if !expanded.insert(instance.clone()) {
+                continue;
+            }
+            cells.insert(instance.clone());
+            if let Some(connections) = instance_nets.get(instance.as_str()) {
+                for (next_net, pin) in connections {
+                    if outputs.iter().any(|output| output == pin) && !seen_nets[*next_net] {
+                        queue.push_back(*next_net);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut result: Vec<String> = cells.into_iter().collect();
+    result.sort();
+    Ok(result)
+}
+
+fn collect_root_nets(
+    root: &str,
+    nets: &[NetInfo],
+    net_by_name: &HashMap<&str, usize>,
+    instance_nets: &HashMap<&str, Vec<(usize, &str)>>,
+    macros: &HashMap<&str, (&Vec<String>, &Vec<String>, bool)>,
+    components: &HashMap<String, String>,
+    seeds: &mut Vec<usize>,
+) {
+    if let Some(name) = root.strip_prefix("port:") {
+        if let Some(&index) = net_by_name.get(name) {
+            seeds.push(index);
+        }
+        for (index, net) in nets.iter().enumerate() {
+            if net
+                .conns
+                .iter()
+                .any(|conn| conn.instance.is_none() && conn.pin == name)
+            {
+                seeds.push(index);
+            }
+        }
+    } else if let Some(name) = root.strip_prefix("net:") {
+        if let Some(&index) = net_by_name.get(name) {
+            seeds.push(index);
+        }
+    } else if let Some(path) = root.strip_prefix("pin:") {
+        let Some((instance, pin)) = split_root_pin(path) else {
+            return;
+        };
+        if let Some(connections) = instance_nets.get(instance) {
+            for (index, conn_pin) in connections {
+                if *conn_pin == pin {
+                    seeds.push(*index);
+                }
+            }
+        }
+    } else if let Some(instance) = root.strip_prefix("cell:") {
+        let Some(macro_name) = components.get(instance) else {
+            return;
+        };
+        let Some((_, outputs, _)) = macros.get(macro_name.as_str()) else {
+            return;
+        };
+        if let Some(connections) = instance_nets.get(instance) {
+            for (index, pin) in connections {
+                if outputs.iter().any(|output| output == pin) {
+                    seeds.push(*index);
+                }
+            }
+        }
+    }
+}
+
+fn split_root_pin(path: &str) -> Option<(&str, &str)> {
+    path.rsplit_once('/').or_else(|| path.rsplit_once('.'))
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<InstanceBBox>()?;
     m.add_class::<InstanceBBoxIter>()?;
@@ -556,6 +716,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(write_net_shapes_csv_from_cache, m)?)?;
     m.add_function(wrap_pyfunction!(write_clock_instances_csv, m)?)?;
     m.add_function(wrap_pyfunction!(write_clock_instances_csv_from_cache, m)?)?;
+    m.add_function(wrap_pyfunction!(clock_tree_cells, m)?)?;
     Ok(())
 }
 

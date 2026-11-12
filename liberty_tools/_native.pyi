@@ -187,4 +187,9 @@ def write_clock_instances_csv_from_cache(
     clock_cell_patterns: Sequence[str],
     output: _StrPath | None,
 ) -> None: ...
+def clock_tree_cells(
+    def_path: _StrPath,
+    roots: Sequence[str],
+    macros: Sequence[tuple[str, Sequence[str], Sequence[str], bool]],
+) -> list[str]: ...
 def __getattr__(name: str) -> Any: ...

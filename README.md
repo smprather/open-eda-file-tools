@@ -96,12 +96,17 @@ variables, loops and flow-generated Tcl work as authored:
 
 ```bash
 uv run sdc-tools clocks --sdc design.sdc
+uv run sdc-tools clock-cells --sdc design.sdc --def design.def.gz --lib cells.lib
 ```
 
 ```text
 clock	period	waveform	sources	generated_from	divide_by	multiply_by
 clk	10	0 5	port:clk
 ```
+
+`clock-cells` traces forward from each clock root through DEF connectivity and
+prints the clock-tree instances, which feed `def-tools instances
+--clock-cells` to produce the `is_clock` column.
 
 ## Project Status
 

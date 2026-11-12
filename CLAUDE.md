@@ -226,7 +226,8 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
 ```
 sdc_tools/tcl.py     tclsh >= 8.6 discovery, safe interpreter, stub prelude
 sdc_tools/clocks.py  create_clock / create_generated_clock records
-sdc_tools/cli.py     `sdc-tools clocks` (TSV or JSON)
+sdc_tools/clock_tree.py  forward trace from clock roots through DEF connectivity
+sdc_tools/cli.py     `sdc-tools clocks` / `sdc-tools clock-cells`
 ```
 
 ### Key behaviors to preserve
@@ -242,6 +243,13 @@ sdc_tools/cli.py     `sdc-tools clocks` (TSV or JSON)
   `cell:u1`. Resolving names against DEF/LEF/Liberty is a separate pass.
 - **Records cross the process boundary as JSON** emitted by the prelude and
   parsed with `json.loads`; the prelude must stay Tcl 8.6-compatible.
+- **Clock-tree cells come from connectivity, never names.** `clock_tree_cells`
+  (`src/def.rs`) seeds nets from the SDC roots and follows input→output through
+  combinational cells; sequential cells end the trace and are not reported.
+  Liberty supplies pin directions and `ff`/`latch`; LEF is not needed.
+- **Liberty metadata parses one thread per library.** `clock_tree.py` parses
+  each library with `ThreadPoolExecutor`; `parse_file` releases the GIL, so the
+  set parses concurrently. Later libraries win for duplicate cell names.
 - **The safe interpreter hides `exec`, `open`, `source`, and `load`.**
 
 ## Liberty spec reference
