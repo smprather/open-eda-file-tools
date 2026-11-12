@@ -48,7 +48,9 @@ def macro_pin_data(libs: list[Path]) -> dict[str, MacroPins]:
     if not libs:
         return {}
     with ThreadPoolExecutor(max_workers=len(libs)) as pool:
-        documents = list(pool.map(lambda path: parse_file(str(path)), libs))
+        documents = list(
+            pool.map(lambda path: parse_file(str(path), skip_tables=True), libs)
+        )
     merged: dict[str, MacroPins] = {}
     for document in documents:
         merged.update(_cell_pins(document))

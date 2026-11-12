@@ -1332,10 +1332,15 @@ def parse_file(path: str | Path, **filters: Any) -> LibertyDocument:
     Args:
         path: ``.lib`` or ``.lib.gz`` path.
         **filters: Parse-time filters. ``cells=[...]`` parses only the named
-            cells and skips the rest of the file.
+            cells and skips the rest of the file. ``skip_tables=True`` parses
+            structure (cells, pins, arcs, scalars) but skips every
+            floating-point table body (``cell_rise``/``cell_fall``/transitions/
+            constraints, power, CCSN waves) at the byte level, leaving their
+            table lists empty.
 
     Examples:
         >>> doc = parse_file("library.lib", cells=["target_cell"])
+        >>> pins_only = parse_file("library.lib", skip_tables=True)
     """
     return LibertyDocument(_native.parse_file(str(path), **filters))
 

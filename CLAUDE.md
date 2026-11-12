@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 libraries and command-line tools under the `open-eda-file-tools` umbrella:
 
 - `liberty_tools` — Liberty `.lib` parser, writer, viewer and formatter
-  (`liberty-view`, `liberty-format`).
+  (`liberty-view`, `liberty-tools format`).
 - `lef_tools` — cell LEF parser and queries (`lef-tools`).
 - `def_tools` — DEF parser, binary cache and design queries (`def-tools`).
 - `sdc_tools` — SDC clock extraction (`sdc-tools`), evaluated in a real Tcl
@@ -24,7 +24,7 @@ src/
   def.rs                    DEF parser, binary cache, geometry kernels, Parquet/CSV/table writers
 liberty_tools/              Liberty Python wrapper and comparison module
 viewer/, liberty_format/, logic2svg/
-                            Browser viewer (`liberty-view`), formatter (`liberty-format`), symbol layout
+                            Browser viewer (`liberty-view`), formatter (`liberty-tools format`), symbol layout
 lef_tools/                  Cell LEF Python package and `lef-tools` CLI
 def_tools/                  DEF Python package, `def-tools` CLI, SDC reader, IO configurator
 sdc_tools/                  SDC clock extraction, `sdc-tools` CLI (Tcl stub evaluator)
@@ -145,6 +145,12 @@ Logic-symbol rendering lessons learned:
 - **The compare module is `liberty_tools/comparison.py`**: the package re-exports it, so `lt.compare` is the *function* and `liberty_tools.comparison.Comparison` is the class. Keep the re-export (and the `.pyi` re-export) in place — the package attribute must stay the function.
 - **Compare reports what it cannot compare, it never guesses**: a table whose unit dimension (time, capacitive load, voltage) differs between the two libraries is reported in `Comparison.unit_mismatches` as a `UnitMismatch`; a table whose axis roles are known on both sides but do not correspond is reported in `Comparison.axis_role_mismatches` as an `AxisRoleMismatch` (matching positionally would compare different quantities); a table whose `values` length does not match its grid is reported in `Comparison.malformed_tables` as a `MalformedTable`. None of them is diffed or interpolated. `Comparison.has_differences` is true for any of those, and `summary()` counts every kind of difference.
 - **`value_at` raises `IndexError` for a negative position**: a negative `row`/`col`/`depth` is out of range like any other position, so it is reported as an `IndexError` and not as a conversion overflow. `lookup()` matches *axis values* (not grid positions) and returns `None` for a coordinate that is not an axis value; `value_at()` is the by-grid-index accessor.
+- **`skip_tables=True` is the structural parse.** It keeps cells, pins, arcs
+  and scalars identical but skips floating-point table bodies at the byte
+  level; the lexer's skipper honors strings and comments and still updates
+  line/column and the source hash. Table lists come back empty. Measured on
+  the IHP sg13g2 standard-cell library: 23.8 ms → 15.3 ms (36% faster) with
+  identical structural output.
 - **Minimum pulse width has two forms**: the `min_pulse_width_high`/`_low` pin attributes and a `min_pulse_width` timing arc with `rise_constraint`/`fall_constraint` tables. `pin.min_pulse_width()` normalizes both and reports which form it read in `MinPulseWidth.source`; the attribute form wins.
 
 ## LEF package (`lef_tools/`)

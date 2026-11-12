@@ -1977,20 +1977,26 @@ impl TimingTable {
 }
 
 #[pyfunction]
-#[pyo3(signature = (path, cells=None))]
-fn parse_file(py: Python<'_>, path: &str, cells: Option<Vec<String>>) -> PyResult<Document> {
+#[pyo3(signature = (path, cells=None, skip_tables=false))]
+fn parse_file(
+    py: Python<'_>,
+    path: &str,
+    cells: Option<Vec<String>>,
+    skip_tables: bool,
+) -> PyResult<Document> {
     let path = path.to_string();
     let filter = cells.map(|items| items.into_iter().collect::<HashSet<_>>());
-    py.detach(move || parse_file_document(&path, filter))
+    py.detach(move || parse_file_document(&path, filter, skip_tables))
         .map_err(ParseLoadError::into_py)
 }
 
 fn parse_file_document(
     path: &str,
     filter: Option<HashSet<String>>,
+    skip_tables: bool,
 ) -> Result<Document, ParseLoadError> {
     let reader = open_input(path).map_err(ParseLoadError::Io)?;
-    let mut parser = Parser::new(reader, filter).map_err(ParseLoadError::Parse)?;
+    let mut parser = Parser::new(reader, filter, skip_tables).map_err(ParseLoadError::Parse)?;
     let mut document = parser.parse_document().map_err(ParseLoadError::Parse)?;
     document.source_path = Some(path.to_string());
     Ok(document)
@@ -3087,7 +3093,7 @@ fn parse_slice_as_library(name: &str, body: &[u8]) -> Result<Document, ParseErro
     buf.extend_from_slice(body);
     buf.extend_from_slice(b"\n}\n");
     let reader: Box<dyn Read> = Box::new(io::Cursor::new(buf));
-    Parser::new(reader, None)?.parse_document()
+    Parser::new(reader, None, false)?.parse_document()
 }
 
 /// Cell-offset index over an in-memory Liberty file: list cells cheaply, parse
@@ -3443,6 +3449,72 @@ impl Lexer {
         Err(ParseError::new(line, column, "unterminated block comment"))
     }
 
+    /// Skip bytes until the brace nesting level in `depth` reaches zero.
+    ///
+    /// Strings and comments are honored so a brace inside `"..."` or a comment
+    /// does not change the depth. This is the fast path for table bodies: it
+    /// hashes and positions every byte but allocates no tokens or values.
+    fn skip_braces(&mut self, mut depth: usize) -> Result<(), ParseError> {
+        while depth > 0 {
+            let Some(byte) = self.bump()? else {
+                return Err(ParseError::new(
+                    self.line,
+                    self.column,
+                    "unexpected end of file while skipping group",
+                ));
+            };
+            match byte {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                b'"' | b'\'' => self.skip_quoted_bytes(byte)?,
+                b'#' => self.skip_line(),
+                b'/' => match self.peek()? {
+                    Some(b'/') => {
+                        self.bump()?;
+                        self.skip_line();
+                    }
+                    Some(b'*') => {
+                        let line = self.line;
+                        let column = self.column;
+                        self.bump()?;
+                        self.skip_block_comment(line, column)?;
+                    }
+                    _ => {}
+                },
+                b'\\' => {
+                    if matches!(self.peek()?, Some(b'\n' | b'\r')) {
+                        let first = self.bump()?.unwrap_or(b'\n');
+                        if first == b'\r' && self.peek()? == Some(b'\n') {
+                            self.bump()?;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn skip_quoted_bytes(&mut self, quote: u8) -> Result<(), ParseError> {
+        let line = self.line;
+        let column = self.column;
+        let mut escaped = false;
+        while let Some(byte) = self.bump()? {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if byte == b'\\' {
+                escaped = true;
+                continue;
+            }
+            if byte == quote {
+                return Ok(());
+            }
+        }
+        Err(ParseError::new(line, column, "unterminated quoted string"))
+    }
+
     fn bump(&mut self) -> Result<Option<u8>, ParseError> {
         self.fill_peek(1)?;
         let Some(byte) = self.peeked.pop_front() else {
@@ -3500,6 +3572,9 @@ struct Parser {
     lexer: Lexer,
     current: Option<Token>,
     cell_filter: Option<HashSet<String>>,
+    /// Skip floating-point table bodies (`cell_rise`, power, CCSN) without
+    /// materializing them. Structural metadata (pins, arcs, scalars) is kept.
+    skip_tables: bool,
     /// End offset of the most recently consumed token. `advance()` overwrites
     /// it, so it is only meaningful right after a token has been consumed.
     previous_end: usize,
@@ -3511,11 +3586,13 @@ impl Parser {
     fn new(
         reader: Box<dyn Read>,
         cell_filter: Option<HashSet<String>>,
+        skip_tables: bool,
     ) -> Result<Self, ParseError> {
         let mut parser = Self {
             lexer: Lexer::new(reader)?,
             current: None,
             cell_filter,
+            skip_tables,
             previous_end: 0,
             cell_spans: Vec::new(),
         };
@@ -3666,9 +3743,13 @@ impl Parser {
                         }
                         "normalized_driver_waveform" => {
                             let tmpl = args.first().cloned();
-                            units
-                                .driver_waveforms
-                                .push(self.parse_timing_table_body(String::new(), tmpl)?);
+                            if self.skip_tables {
+                                self.skip_group_body_fast()?;
+                            } else {
+                                units
+                                    .driver_waveforms
+                                    .push(self.parse_timing_table_body(String::new(), tmpl)?);
+                            }
                         }
                         _ => {
                             self.skip_group_body()?;
@@ -4076,8 +4157,12 @@ impl Parser {
                 let args = self.read_args(&item_name)?;
                 if self.consume_symbol(b'{')? {
                     if is_power_table_group(&item_name) {
-                        let template = args.first().cloned();
-                        tables.push(self.parse_timing_table_body(item_name, template)?);
+                        if self.skip_tables {
+                            self.skip_group_body_fast()?;
+                        } else {
+                            let template = args.first().cloned();
+                            tables.push(self.parse_timing_table_body(item_name, template)?);
+                        }
                     } else {
                         self.skip_group_body()?;
                     }
@@ -4307,8 +4392,12 @@ impl Parser {
                     if is_ccsn_stage_group(&item_name) {
                         ccsn_stages.push(self.parse_ccsn_stage_body(item_name)?);
                     } else if is_timing_table_group(&item_name) {
-                        let template = args.first().cloned();
-                        tables.push(self.parse_timing_table_body(item_name, template)?);
+                        if self.skip_tables {
+                            self.skip_group_body_fast()?;
+                        } else {
+                            let template = args.first().cloned();
+                            tables.push(self.parse_timing_table_body(item_name, template)?);
+                        }
                     } else {
                         self.skip_group_body()?;
                     }
@@ -4360,16 +4449,29 @@ impl Parser {
                 if self.consume_symbol(b'{')? {
                     match item_name.as_str() {
                         "dc_current" => {
-                            let template = args.first().cloned();
-                            dc_current = Some(self.parse_timing_table_body(item_name, template)?);
+                            if self.skip_tables {
+                                self.skip_group_body_fast()?;
+                            } else {
+                                let template = args.first().cloned();
+                                dc_current =
+                                    Some(self.parse_timing_table_body(item_name, template)?);
+                            }
                         }
                         "output_voltage_rise" => {
-                            let table = self.parse_timing_table_body(item_name, None)?;
-                            output_voltage_rise = table.vectors;
+                            if self.skip_tables {
+                                self.skip_group_body_fast()?;
+                            } else {
+                                let table = self.parse_timing_table_body(item_name, None)?;
+                                output_voltage_rise = table.vectors;
+                            }
                         }
                         "output_voltage_fall" => {
-                            let table = self.parse_timing_table_body(item_name, None)?;
-                            output_voltage_fall = table.vectors;
+                            if self.skip_tables {
+                                self.skip_group_body_fast()?;
+                            } else {
+                                let table = self.parse_timing_table_body(item_name, None)?;
+                                output_voltage_fall = table.vectors;
+                            }
                         }
                         "propagated_noise_high" | "propagated_noise_low" => {
                             // TODO: deferred 4D propagated-noise parsing.
@@ -4493,6 +4595,28 @@ impl Parser {
             }
         }
         Err(self.error_here("unexpected end of file while skipping group"))
+    }
+
+    /// Skip a group at the byte level instead of tokenizing its body.
+    ///
+    /// The parser has already consumed the opening `{`, so `current` is the
+    /// first body token. It accounts for that token, then lets the lexer skip
+    /// the remaining bytes while handling strings, comments and escapes.
+    fn skip_group_body_fast(&mut self) -> Result<(), ParseError> {
+        let Some(token) = self.current.take() else {
+            return Err(self.error_here("unexpected end of file while skipping group"));
+        };
+        let mut depth = 1usize;
+        match token.kind {
+            TokenKind::Symbol(b'{') => depth += 1,
+            TokenKind::Symbol(b'}') => depth -= 1,
+            _ => {}
+        }
+        if depth > 0 {
+            self.lexer.skip_braces(depth)?;
+        }
+        self.current = self.lexer.next_token()?;
+        Ok(())
     }
 
     fn read_args(&mut self, name: &str) -> Result<Vec<String>, ParseError> {
