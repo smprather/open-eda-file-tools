@@ -2,14 +2,14 @@
 title: Command Line Tools
 ---
 
-`liberty-tools` installs two commands:
+`liberty-tools` and `liberty-view` are installed with the package:
 
 | Command | What it does |
 |---|---|
+| `liberty-tools format` | Reformats a Liberty file by brace depth, provably without changing its meaning. |
 | `liberty-view` | Serves a browser viewer for a Liberty library. |
-| `liberty-format` | Reformats a Liberty file by brace depth, provably without changing its meaning. |
 
-Both are installed with the package:
+The commands are installed with the package:
 
 ```bash
 uv tool install "liberty-tools @ git+https://github.com/smprather/open-eda-file-tools.git"
@@ -25,14 +25,15 @@ In a checkout of the repository, run them through `uv run`:
 
 ```bash
 uv run liberty-view dev.lib
-uv run liberty-format dev.lib
+uv run liberty-tools format dev.lib
 ```
 
 Every command supports `--help` and `--version`:
 
 ```bash
 liberty-view --help
-liberty-format --version
+liberty-tools --version
+liberty-tools format --help
 ```
 
 ---
@@ -96,10 +97,10 @@ liberty-view --reload --access-log dev.lib
 
 ---
 
-## `liberty-format`
+## `liberty-tools format`
 
 ```text
-Usage: liberty-format [OPTIONS] FILE
+Usage: liberty-tools format [OPTIONS] FILE
 
   Reindent a Liberty (.lib / .lib.gz) file by brace depth.
 ```
@@ -146,16 +147,16 @@ Usage: liberty-format [OPTIONS] FILE
 
 ```bash
 # Print the formatted file to stdout.
-liberty-format dev.lib
+liberty-tools format dev.lib
 
 # Write a formatted copy.
-liberty-format dev.lib -o dev.formatted.lib
+liberty-tools format dev.lib -o dev.formatted.lib
 
 # Reformat in place.
-liberty-format --in-place dev.lib
+liberty-tools format --in-place dev.lib
 
 # Fail the build when a file is not formatted.
-liberty-format --check dev.lib
+liberty-tools format --check dev.lib
 ```
 
 ---
@@ -199,10 +200,10 @@ curl -s "http://127.0.0.1:8123/api/cells?filter=inv&limit=20"
 liberty-view library.lib --no-open-browser --port 8123 &
 
 # 2. Check that a file is formatted before committing it.
-liberty-format --check library.lib
+liberty-tools format --check library.lib
 
 # 3. Normalize the formatting of a file.
-liberty-format --in-place library.lib
+liberty-tools format --in-place library.lib
 ```
 
 For programmatic work, use the Python API instead — see the

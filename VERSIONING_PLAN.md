@@ -2,9 +2,9 @@
 
 `open-eda-file-tools` is a single project with one `pyproject.toml`, one
 `Cargo.toml`, and one version. It ships several libraries (`liberty_tools`,
-`lef_tools`, `def_tools`) and command-line tools (`liberty-view`,
-`liberty-format`, `lef-tools`, `def-tools`) from the same source tree, the same
-release, and the same version number.
+`lef_tools`, `def_tools`, `sdc_tools`) and command-line tools (`liberty-view`,
+`liberty-tools format`, `lef-tools`, `def-tools`, `sdc-tools`) from the same
+source tree, the same release, and the same version number.
 
 | File | Role |
 | --- | --- |
@@ -85,7 +85,8 @@ are left as they are.
 Every tool prints the project version:
 
 ```text
-liberty-format 2026.11.9
-lef-tools, version 2026.11.9
-def-tools, version 2026.11.9
+liberty-tools, version 2026.11.12
+lef-tools, version 2026.11.12
+def-tools, version 2026.11.12
+sdc-tools, version 2026.11.12
 ```

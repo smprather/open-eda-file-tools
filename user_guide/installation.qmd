@@ -26,7 +26,7 @@ With `uv`:
 uv add "liberty-tools @ git+https://github.com/smprather/open-eda-file-tools.git"
 ```
 
-To install the `liberty-view` and `liberty-format` commands globally:
+To install the `liberty-view` and `liberty-tools` commands globally:
 
 ```bash
 uv tool install "liberty-tools @ git+https://github.com/smprather/open-eda-file-tools.git"
@@ -74,7 +74,7 @@ uv run maturin develop --release
 ```bash
 uv run python -c "import liberty_tools as lt; print(lt.__file__)"
 uv run liberty-view --version
-uv run liberty-format --version
+uv run liberty-tools --version
 
 cd lef_tools
 uv run python -c "import lef_tools as lt; print(lt.__version__)"

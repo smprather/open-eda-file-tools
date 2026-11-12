@@ -27,7 +27,7 @@ source:
 
 # Great Docs extracts one Click command tree; liberty-view is the first
 # [project.scripts] entry and the richer command. The user guide covers both
-# liberty-view and liberty-format.
+# liberty-view and liberty-tools format.
 cli:
   enabled: true
   module: viewer.__main__

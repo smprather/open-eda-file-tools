@@ -251,7 +251,7 @@ crate fetch fail loudly.
 ```bash
 # Liberty
 uv run liberty-view dev.lib          # browser viewer (Plotly served locally)
-uv run liberty-format dev.lib        # transparency-checked formatter
+uv run liberty-tools format dev.lib  # transparency-checked formatter
 
 # LEF and DEF
 uv run lef-tools --help

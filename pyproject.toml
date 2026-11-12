@@ -14,7 +14,7 @@ dependencies = [
 
 [project.scripts]
 liberty-view = "viewer.__main__:main"
-liberty-format = "liberty_format.__main__:main"
+liberty-tools = "liberty_tools.cli:main"
 lef-tools = "lef_tools.cli:main"
 def-tools = "def_tools.cli:main"
 sdc-tools = "sdc_tools.cli:main"
