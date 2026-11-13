@@ -258,3 +258,6 @@ def-tools-io-config.toml
 # vendor/ so the Python-template rules above (build/, lib/, target/, …) cannot
 # silently drop files that `cargo vendor` produced.
 !vendor/cargo/**
+
+# Local-only PEX reference material (GPL/CC BY-SA)
+/docs/pex/local/

@@ -12,6 +12,8 @@ libraries and command-line tools under the `open-eda-file-tools` umbrella:
 - `def_tools` — DEF parser, binary cache and design queries (`def-tools`).
 - `sdc_tools` — SDC clock extraction (`sdc-tools`), evaluated in a real Tcl
   interpreter with stubbed SDC commands.
+- `pex_tools` — SPEF/DSPF parasitic parser (`pex-tools`), parallel net-block
+  parsing with a streaming low-memory mode.
 
 ## Repository Layout
 
@@ -28,6 +30,8 @@ viewer/, liberty_format/, logic2svg/
 lef_tools/                  Cell LEF Python package and `lef-tools` CLI
 def_tools/                  DEF Python package, `def-tools` CLI, SDC reader, IO configurator
 sdc_tools/                  SDC clock extraction, `sdc-tools` CLI (Tcl stub evaluator)
+pex_tools/                  SPEF/DSPF parser, `pex-tools` CLI
+src/pex.rs                  SPEF/DSPF parser (parallel + streaming modes)
 tests/                      Unified pytest suite (Liberty, LEF, DEF, SDC, and `tests/gen/design_gen.py`)
 ```
 
@@ -259,6 +263,33 @@ sdc_tools/cli.py     `sdc-tools clocks` / `sdc-tools clock-cells`
   each library with `ThreadPoolExecutor`; `parse_file` releases the GIL, so the
   set parses concurrently. Later libraries win for duplicate cell names.
 - **The safe interpreter hides `exec`, `open`, `source`, and `load`.**
+
+## PEX package (`pex_tools/`)
+
+`pex_tools` reads SPEF and DSPF:
+
+```
+src/pex.rs             parser: header/name map, then Rayon over net blocks
+pex_tools/__init__.py  Python API (`header`, `summaries`, `histogram`, `parse`)
+pex_tools/cli.py       `pex-tools summary|histogram|nets`
+docs/pex/              format notes; MIT Parser-SPEF docs; `local/` is gitignored
+```
+
+### Key behaviors to preserve
+
+- **Header and `*NAME_MAP` are sequential; net blocks are parallel.** Every
+  `*D_NET`/`*R_NET` block is an independent Rayon task; results keep source
+  order. `mode="stream"` buffers one block at a time for a low-memory pass.
+- **SPEF and DSPF share the section skeleton.** DSPF is distinguished by
+  connection attributes (`*C x y`, `*L`, `*S`, `*D cell`) and `$` comments;
+  both are parsed.
+- **`$` extensions are preserved verbatim** on caps, resistors and
+  connections (`ext`), so layer/coordinate metadata is not lost. `//` and
+  `/* ... */` comments are accepted.
+- **Names resolve through `*NAME_MAP`** using the header delimiter; unresolved
+  tokens stay as written.
+- **Physical (`*D_PNET`/`*R_PNET`) and reduced-RSPF sections are skipped**;
+  they are not silently interpreted as electrical nets.
 
 ## Liberty spec reference
 

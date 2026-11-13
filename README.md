@@ -108,6 +108,22 @@ clk	10	0 5	port:clk
 prints the clock-tree instances, which feed `def-tools instances
 --clock-cells` to produce the `is_clock` column.
 
+## PEX Tools
+
+The `pex_tools` library and `pex-tools` CLI read SPEF and DSPF files. The Rust
+parser indexes every net block and parses them in parallel; `--mode stream`
+buffers one net block at a time for a much smaller footprint.
+
+```bash
+uv run pex-tools summary --spef design.spef
+uv run pex-tools histogram --spef design.spef --bins 20
+uv run pex-tools nets --spef design.spef --top 20
+```
+
+`summary` reports units and total/ground/coupling capacitance, `histogram`
+writes per-net total-cap bins, and `nets` ranks nets by capacitance. `$`
+extension comments (layer and x/y metadata) survive parsing.
+
 ## Project Status
 
 The parser is already useful for large timing libraries. The whole project

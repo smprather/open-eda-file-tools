@@ -192,4 +192,87 @@ def clock_tree_cells(
     roots: Sequence[str],
     macros: Sequence[tuple[str, Sequence[str], Sequence[str], bool]],
 ) -> list[str]: ...
+@final
+class PexHeader:
+    standard: str
+    design: str
+    date: str
+    vendor: str
+    program: str
+    version: str
+    design_flow: str
+    divider: str
+    delimiter: str
+    bus_delimiter: str
+    t_unit: str
+    c_unit: str
+    r_unit: str
+    l_unit: str
+    ports: list[tuple[str, str]]
+
+@final
+class PexConn:
+    name: str
+    direction: str
+    attrs: list[str]
+    x: float | None
+    y: float | None
+
+@final
+class PexCap:
+    id: str
+    node1: str
+    node2: str | None
+    value: float
+    ext: str | None
+
+@final
+class PexRes:
+    id: str
+    node1: str
+    node2: str
+    value: float
+    ext: str | None
+
+@final
+class PexNet:
+    name: str
+    total_cap: float
+    ground_cap: float
+    coupling_cap: float
+    conns: list[PexConn]
+    caps: list[PexCap]
+    res: list[PexRes]
+    ext: str | None
+
+@final
+class PexSummary:
+    name: str
+    total_cap: float
+    ground_cap: float
+    coupling_cap: float
+    cap_count: int
+    res_count: int
+    res_total: float
+
+@final
+class PexFile:
+    header: PexHeader
+    nets: list[PexNet]
+
+@final
+class PexHistogram:
+    min: float
+    max: float
+    bounds: list[float]
+    counts: list[int]
+
+def parse_pex(
+    path: _StrPath, keep_entries: bool = True, mode: str = "auto"
+) -> PexFile: ...
+def pex_summaries(path: _StrPath, mode: str = "auto") -> list[PexSummary]: ...
+def pex_histogram(
+    path: _StrPath, bins: int = 20, mode: str = "auto"
+) -> PexHistogram: ...
+def pex_header(path: _StrPath) -> PexHeader: ...
 def __getattr__(name: str) -> Any: ...

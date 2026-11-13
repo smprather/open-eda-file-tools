@@ -1,5 +1,6 @@
 pub mod def;
 pub mod lef;
+pub mod pex;
 
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -2067,6 +2068,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(axis_role_matches, m)?)?;
     lef::register(m)?;
     def::register(m)?;
+    pex::register(m)?;
     Ok(())
 }
 

@@ -1,0 +1,87 @@
+---
+title: PEX Tools
+---
+
+`pex-tools` reads SPEF and DSPF parasitic-exchange files. The parser lives in
+the shared Rust extension: it reads the file once, indexes every
+`*D_NET`/`*R_NET` block, and parses the blocks in parallel.
+
+## Install
+
+```bash
+uv sync --dev
+uv run pex-tools --help
+```
+
+## Performance modes
+
+| `--mode` | Memory | Speed | Use when |
+| --- | --- | --- | --- |
+| `auto` (default) | whole file + per-net results | fastest: Rayon parses all net blocks concurrently | the file fits comfortably in RAM |
+| `stream` | one net block at a time | roughly 2× slower in exchange for a much lower RSS | huge files or many jobs on one machine |
+
+Measured on the 95 MB `vga_lcd` benchmark (139,632 nets): `auto` 0.39 s and
+216 MiB peak RSS; `stream` 0.87 s and 44 MiB peak RSS. Both produce identical
+net counts and totals.
+
+## Command line
+
+```bash
+# Header and aggregate parasitics.
+uv run pex-tools summary --spef design.spef
+
+# Histogram of per-net total capacitance.
+uv run pex-tools histogram --spef design.spef --bins 20 --output cap.hist.tsv
+
+# Largest nets by total capacitance.
+uv run pex-tools nets --spef design.spef --top 20
+```
+
+`summary` prints the design, SPEF standard, units, net count, total/ground/
+coupling capacitance, and resistor count. `histogram` writes
+`bin_low bin_high count` TSV. `nets` writes
+`net total_cap ground_cap coupling_cap caps resistors` TSV.
+
+## Python API
+
+```python
+import pex_tools
+
+info = pex_tools.header("design.spef")
+nets = pex_tools.summaries("design.spef")            # per-net totals
+hist = pex_tools.histogram("design.spef", bins=20)   # min/max + counts
+parsed = pex_tools.parse("design.spef")              # full entries
+for net in parsed.nets:
+    for cap in net.caps:
+        print(cap.node1, cap.node2, cap.value, cap.ext)
+```
+
+All calls accept `mode="auto" | "stream"`. `parse()` keeps entries in memory
+and therefore always uses the parallel path.
+
+## Syntax and extensions
+
+- Header: `*SPEF` / `*DSPF`, design/date/vendor/program/version,
+  divider/delimiter, and time/capacitance/resistance/inductance units.
+- `*NAME_MAP`, `*PORTS`, power/ground net lists.
+- `*D_NET` and `*R_NET` with `*CONN`, `*CAP`, `*RES`, `*INDUC`, `*END`.
+- DSPF connection attributes `*C x y`, `*L`, `*S`, `*D cell`, exposed on
+  `PexConn` (`x`, `y`, `attrs`).
+- `$` extension comments are preserved verbatim on each cap/resistor/connection
+  (`PexCap.ext`, `PexRes.ext`), so `$layer=...`, `$x=...`, `$y=...` metadata
+  survives parsing. `//` and `/* ... */` comments are accepted.
+- Physical (`*D_PNET`/`*R_PNET`) and reduced-RSPF sections are skipped in this
+  version.
+
+## Obvious applications
+
+1. **Net-capacitance histogram** (`histogram`): find the long tail of nets
+   that dominate dynamic power.
+2. **Top-N net ranking** (`nets`): pick candidates for shielding, layer
+   promotion, or buffer insertion.
+3. **Ground vs coupling split** (`summary`, `nets`): decide whether to attack
+   self-capacitance or neighbor coupling.
+4. **Layer aggregation** from the `$layer=` extensions: group capacitance by
+   metal layer to see which layer carries the load.
+5. **Corner comparison**: run `summary` on min/nom/max SPEFs and diff the
+   totals.

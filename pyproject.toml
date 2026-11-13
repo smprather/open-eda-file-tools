@@ -16,6 +16,7 @@ dependencies = [
 liberty-view = "viewer.__main__:main"
 liberty-tools = "liberty_tools.cli:main"
 liberty-format = "liberty_tools.cli:format_main"
+pex-tools = "pex_tools.cli:main"
 lef-tools = "lef_tools.cli:main"
 def-tools = "def_tools.cli:main"
 sdc-tools = "sdc_tools.cli:main"
@@ -41,6 +42,8 @@ include = [
   "def_tools/py.typed",
   "sdc_tools/*.py",
   "sdc_tools/py.typed",
+  "pex_tools/*.py",
+  "pex_tools/py.typed",
 ]
 exclude = [
   "*.def",

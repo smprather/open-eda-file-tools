@@ -12,6 +12,7 @@ a single tag.
 | Cell LEF parser and query tools | `lef_tools` | `lef-tools` | shipped (alpha) |
 | DEF parser, binary cache and design queries | `def_tools` | `def-tools` | shipped (alpha) |
 | SDC clock extraction | `sdc_tools` | `sdc-tools` | shipped (alpha) |
+| SPEF/DSPF parasitic parser | `pex_tools` | `pex-tools` | shipped (alpha) |
 | VCD toggle-count profiler | `vcd_tools` (reserved) | — | on the way |
 
 Every tool shares the project version (`VERSIONING_PLAN.md`); there are no
