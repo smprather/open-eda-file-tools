@@ -90,3 +90,19 @@ def test_liberty_format_wrapper_check_exits_one(tmp_path, capsys):
 
     assert excinfo.value.code == 1
     assert "would reformat" in capsys.readouterr().out
+
+
+def test_docs_cover_every_cli_entry_point():
+    from pathlib import Path
+    import tomllib
+
+    repo = Path(__file__).resolve().parent.parent
+    scripts = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]["scripts"]
+    ai_api = (repo / "docs" / "ai-api.md").read_text(encoding="utf-8")
+    cli_doc = (repo / "docs" / "cli.md").read_text(encoding="utf-8")
+
+    for script_name in scripts:
+        assert script_name in ai_api, f"{script_name} missing from docs/ai-api.md"
+        assert script_name in cli_doc, f"{script_name} missing from docs/cli.md"

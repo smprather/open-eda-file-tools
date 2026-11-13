@@ -23,3 +23,10 @@ command-line front ends:
    `liberty_tools/_native.pyi`.
 4. Add tests under `tests/` and document the Python and CLI interfaces in
    `docs/ai-api.md` and `README.md`.
+
+## Documentation Synchronization Mandate
+
+All documentation (`docs/ai-api.md`, `docs/cli.md`, `docs/*.md`, `README.md`,
+`CLAUDE.md`, and `.pyi` type stubs) **must be kept in sync with the code at all
+times**. Every new or changed CLI flag, subcommand, output schema, or Python API
+must update its documentation and type stubs in the same commit.

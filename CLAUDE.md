@@ -32,8 +32,26 @@ def_tools/                  DEF Python package, `def-tools` CLI, SDC reader, IO 
 sdc_tools/                  SDC clock extraction, `sdc-tools` CLI (Tcl stub evaluator)
 pex_tools/                  SPEF/DSPF parser, `pex-tools` CLI
 src/pex.rs                  SPEF/DSPF parser (parallel + streaming modes)
-tests/                      Unified pytest suite (Liberty, LEF, DEF, SDC, and `tests/gen/design_gen.py`)
+tests/                      Unified pytest suite (Liberty, LEF, DEF, SDC, PEX, and `tests/gen/design_gen.py`)
+docs/                       AI-agent and per-tool Markdown documentation (`docs/ai-api.md`, `docs/cli.md`, `docs/*.md`)
 ```
+
+## Documentation Synchronization Mandate (REQUIRED)
+
+These tools are primarily consumed by AI coding agents. **Documentation MUST be
+kept in sync with the code at all times** — never ship a CLI flag, subcommand,
+output column, Python function, class, or behavioral change without updating the
+corresponding documentation in the same change:
+
+- `docs/ai-api.md` — single-page token-dense AI Agent Reference (decision table,
+  typed Python signatures for all five packages, CLI invocations, invariants,
+  and multi-tool recipes).
+- `docs/cli.md` — command-line reference for all six `[project.scripts]` entry
+  points.
+- `docs/{lef,def,sdc,pex,tools,installation}.md` — per-tool and setup guides.
+- `README.md` and `CLAUDE.md` — repository overview and architectural invariants.
+- `.pyi` type stubs (`liberty_tools/__init__.pyi`, `liberty_tools/_native.pyi`)
+  and package docstrings.
 
 ## Commands
 
