@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1326,23 +1327,32 @@ class LibraryIndex:
         return self._native.cell_source(name)
 
 
-def parse_file(path: str | Path, **filters: Any) -> LibertyDocument:
+def parse_file(
+    path: str | Path,
+    cells: Sequence[str] | None = None,
+    *,
+    skip_tables: bool = False,
+) -> LibertyDocument:
     """Parse a Liberty file into a :class:`LibertyDocument`.
 
     Args:
         path: ``.lib`` or ``.lib.gz`` path.
-        **filters: Parse-time filters. ``cells=[...]`` parses only the named
-            cells and skips the rest of the file. ``skip_tables=True`` parses
-            structure (cells, pins, arcs, scalars) but skips every
-            floating-point table body (``cell_rise``/``cell_fall``/transitions/
-            constraints, power, CCSN waves) at the byte level, leaving their
-            table lists empty.
+        cells: Optional cell-name whitelist. Unselected cell bodies are skipped
+            at parse time without materializing their contents.
+        skip_tables: When ``True``, parses structure (cells, pins, timing arcs,
+            scalar attributes, ``ff``/``latch`` groups) and skips all
+            floating-point table bodies (``cell_rise``, ``cell_fall``,
+            transitions, constraints, internal power, CCSN waves, driver
+            waveforms) at the byte level, leaving table lists empty.
 
     Examples:
         >>> doc = parse_file("library.lib", cells=["target_cell"])
         >>> pins_only = parse_file("library.lib", skip_tables=True)
     """
-    return LibertyDocument(_native.parse_file(str(path), **filters))
+    cell_list = list(cells) if cells is not None else None
+    return LibertyDocument(
+        _native.parse_file(str(path), cells=cell_list, skip_tables=skip_tables)
+    )
 
 
 __all__ = [

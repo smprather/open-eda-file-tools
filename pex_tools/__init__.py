@@ -7,6 +7,8 @@ a much smaller memory footprint at the cost of speed.
 
 from __future__ import annotations
 
+from os import PathLike
+
 from liberty_tools._native import (
     PexCap,
     PexConn,
@@ -25,26 +27,46 @@ from .version import get_version
 
 __version__ = get_version()
 
+_StrPath = str | PathLike[str]
 
-def parse(path, keep_entries: bool = True, mode: str = "auto") -> PexFile:
-    """Parse a SPEF/DSPF file into header and net data."""
+
+def parse(
+    path: _StrPath, keep_entries: bool = True, mode: str = "auto"
+) -> PexFile:
+    """Parse a SPEF/DSPF file (plain or ``.gz``) into header and per-net RC data.
+
+    Args:
+        path: Path to ``.spef``, ``.spef.gz``, ``.dspf``, or ``.dspf.gz``.
+        keep_entries: When ``True`` (default), populates ``conns``, ``caps``,
+            and ``res`` on each :class:`PexNet`. When ``False``, retains only
+            per-net capacitance/resistance totals.
+        mode: ``"auto"`` (parallel Rayon over net blocks) or ``"stream"``
+            (low-memory single-block buffering; requires ``keep_entries=False``).
+    """
     return parse_pex(path, keep_entries=keep_entries, mode=mode)
 
 
-def summaries(path, mode: str = "auto") -> list[PexSummary]:
-    """Per-net totals only; much smaller than full entries."""
+def summaries(path: _StrPath, mode: str = "auto") -> list[PexSummary]:
+    """Return per-net capacitance/resistance totals without materializing elements.
+
+    Args:
+        path: Path to ``.spef``, ``.spef.gz``, ``.dspf``, or ``.dspf.gz``.
+        mode: ``"auto"`` (parallel whole-file parse) or ``"stream"`` (low-memory
+            single-block buffering).
+    """
     return pex_summaries(path, mode=mode)
 
 
-def histogram(path, bins: int = 20, mode: str = "auto") -> PexHistogram:
-    """Histogram of per-net total capacitance."""
+def histogram(
+    path: _StrPath, bins: int = 20, mode: str = "auto"
+) -> PexHistogram:
+    """Compute a histogram of per-net total capacitance across all electrical nets."""
     return pex_histogram(path, bins=bins, mode=mode)
 
 
-def header(path) -> PexHeader:
-    """The file header, without parsing nets."""
+def header(path: _StrPath) -> PexHeader:
+    """Parse only the SPEF/DSPF header and ``*PORTS`` without scanning nets."""
     return pex_header(path)
-
 
 __all__ = [
     "PexCap",

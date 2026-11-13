@@ -1,21 +1,21 @@
 # open-eda-file-tools
 
-`open-eda-file-tools` is a home for open EDA data-file tooling. Its first
-package is `liberty-tools`, a fast Python library for parsing and querying
-Synopsys Liberty `.lib` timing models: it streams Liberty files through a Rust
-backend and exposes a Python API for cells, pins, timing arcs, timing tables,
-and Polars dataframe extraction.
+`open-eda-file-tools` is a single Python/Rust project for open EDA data-file
+tooling, shipping five libraries and their command-line front ends from one
+package and version:
 
-More EDA data-file tools join it in this repository: `lef-tools` parses cell
-LEF libraries and `def-tools` parses and queries DEF designs, both Rust-backed.
-A VCD toggle-count profiler and others are still planned.
+- **`liberty_tools`** (`liberty-tools format`, `liberty-format`, `liberty-view`) — Synopsys Liberty `.lib` / `.lib.gz` parser, surgical writer, Polars extractor, library comparator, formatter, and browser viewer.
+- **`lef_tools`** (`lef-tools`) — Cell LEF (`.lef` / `.lef.gz`) macro, pin, port, and rectangle parser (in microns).
+- **`def_tools`** (`def-tools`) — DEF (`.def` / `.def.gz`) instance bbox dumper (CSV, Parquet, table in microns), routed net-shape queries, binary DEF cache, and storage IO configurator.
+- **`sdc_tools`** (`sdc-tools`) — SDC (`.sdc`) clock extractor (evaluated in a sandboxed Tcl >= 8.6 interpreter with stubbed SDC commands) and forward clock-tree instance tracer.
+- **`pex_tools`** (`pex-tools`) — SPEF and DSPF (`.spef`, `.dspf`, `.gz`) parasitic parser (parallel Rayon over net blocks + low-memory streaming mode) with capacitance histograms, summaries, and `$` extension support.
 
-The rendered documentation is at
-<https://smprather.github.io/open-eda-file-tools/>.
+For AI coding agents consuming these libraries or CLIs, start with
+[`docs/ai-api.md`](docs/ai-api.md).
 
 The Liberty implementation focuses on standard-cell timing, power, and CCS data:
 
-- streaming parse from `.lib` and `.lib.gz` paths
+- streaming parse from `.lib` and `.lib.gz` paths, plus `skip_tables=True` for fast structural-only parsing
 - low-memory Rust-backed indexing with on-demand cell parsing (`LibraryIndex`)
 - cell, pin, and timing arc lookup
 - bus, bundle, and Liberty `type(...)` bus definition lookup
@@ -33,11 +33,9 @@ The Liberty implementation focuses on standard-cell timing, power, and CCS data:
 - browser viewer for navigating cells, source text, timing/power tables,
   CCS/CCSN waves, and combinational logic symbols
 
-For LLM/agent-oriented API usage, see the
-[AI API guide](https://smprather.github.io/open-eda-file-tools/user-guide/ai-api.html).
-For the command line tools, see the
-[CLI reference](https://smprather.github.io/open-eda-file-tools/user-guide/cli.html).
-The package also ships `py.typed` and `.pyi` stubs for coding tools.
+For LLM/agent-oriented API and CLI usage across all tools, see
+[`docs/ai-api.md`](docs/ai-api.md) and [`docs/cli.md`](docs/cli.md).
+Every package ships `py.typed` and `.pyi` stubs for static type checkers and agents.
 
 ## LEF Tools
 
@@ -83,10 +81,9 @@ for bbox in instance_bboxes(["sky130.lef"], "design.def.gz"):
     print(bbox.instance, bbox.llx, bbox.lly, bbox.urx, bbox.ury)
 ```
 
-DEF coordinates stay in database units; plain and gzipped inputs are both
-read. The [LEF guide](https://smprather.github.io/open-eda-file-tools/user-guide/lef.html)
-and [DEF guide](https://smprather.github.io/open-eda-file-tools/user-guide/def.html)
-cover the APIs, CLIs, binary DEF cache and storage configurator.
+DEF iterator coordinates stay in database units (DBU), while `def-tools instances`
+converts bounding boxes to microns; plain and gzipped inputs are both read.
+See [`docs/lef.md`](docs/lef.md) and [`docs/def.md`](docs/def.md) for full details.
 
 ## SDC Tools
 
@@ -106,8 +103,7 @@ clk	10	0 5	port:clk
 
 `clock-cells` traces forward from each clock root through DEF connectivity and
 prints the clock-tree instances, which feed `def-tools instances
---clock-cells` to produce the `is_clock` column.
-
+--clock-cells` to produce the `is_clock` column. See [`docs/sdc.md`](docs/sdc.md).
 ## PEX Tools
 
 The `pex_tools` library and `pex-tools` CLI read SPEF and DSPF files. The Rust
@@ -122,8 +118,7 @@ uv run pex-tools nets --spef design.spef --top 20
 
 `summary` reports units and total/ground/coupling capacitance, `histogram`
 writes per-net total-cap bins, and `nets` ranks nets by capacitance. `$`
-extension comments (layer and x/y metadata) survive parsing.
-
+extension comments (layer and x/y metadata) survive parsing. See [`docs/pex.md`](docs/pex.md).
 ## Project Status
 
 The parser is already useful for large timing libraries. The whole project
@@ -140,16 +135,12 @@ RSS). The lazy `LibraryIndex` used by the viewer opens the same file in about
 
 The repository is a single project (`open-eda-file-tools`) with a single
 `pyproject.toml`, `Cargo.toml`, and version. The Python libraries live in
-`liberty_tools/`, `lef_tools/`, `def_tools/`, `viewer/`, and `liberty_format/`;
-the shared Rust backend lives in `src/` (`src/lib.rs`, `src/lef/`, `src/def.rs`),
-and the unified test suite lives in `tests/`. The
-[Tools guide](https://smprather.github.io/open-eda-file-tools/user-guide/tools.html)
-lists the tools and the steps for adding one. Shared build, test and release
-conventions are in
-[BUILD.md](https://github.com/smprather/open-eda-file-tools/blob/main/BUILD.md),
-[VERSIONING_PLAN.md](https://github.com/smprather/open-eda-file-tools/blob/main/VERSIONING_PLAN.md)
-and
-[CLAUDE.md](https://github.com/smprather/open-eda-file-tools/blob/main/CLAUDE.md).
+`liberty_tools/`, `lef_tools/`, `def_tools/`, `sdc_tools/`, `pex_tools/`,
+`viewer/`, and `liberty_format/`; the shared Rust backend lives in `src/`
+(`src/lib.rs`, `src/lef/`, `src/def.rs`, `src/pex.rs`), and the unified test
+suite lives in `tests/`. See [`docs/tools.md`](docs/tools.md),
+[`BUILD.md`](BUILD.md), [`VERSIONING_PLAN.md`](VERSIONING_PLAN.md), and
+[`CLAUDE.md`](CLAUDE.md).
 
 ## Install From GitHub
 
@@ -202,8 +193,7 @@ uv run liberty-view dev.lib
 ```
 
 The viewer serves all frontend assets locally, including Plotly. See
-[CLI reference](https://smprather.github.io/open-eda-file-tools/user-guide/cli.html)
-for the full command line reference of
+[`docs/cli.md`](docs/cli.md) for the full command line reference of
 `liberty-view` and `liberty-tools format` (also installed as `liberty-format`).
 It renders:
 
@@ -565,24 +555,26 @@ conditions require `A=1`, regardless of the other pins:
 Supported operators include `!`, `~`, postfix `'`, `&`, `*`, `|`, `+`, `^`, and
 parentheses.
 
-## Selective Parsing
+## Selective & Structural Parsing
 
-For large libraries, restrict indexing to selected cells:
+For large libraries, restrict materialization to selected cells or skip
+floating-point lookup tables at the byte level:
 
 ```python
 doc = lt.parse_file(
     "generic80_ss_125c_1p116v_0p84v.lib",
     cells=["and2d102srdh", "and2d12sr"],
 )
-```
 
-The parser still streams through the input file, but it only materializes data
-for the requested cells.
+# Skip all timing/power/CCSN table bodies (36% faster) when only pins,
+# directions, attributes, or ff/latch groups are needed:
+structural = lt.parse_file("generic80_ss_125c_1p116v_0p84v.lib", skip_tables=True)
+```
 
 ## Current API
 
 ```python
-lt.parse_file(path, cells=None) -> LibertyDocument
+lt.parse_file(path, cells=None, *, skip_tables=False) -> LibertyDocument
 lt.compare(a, b, *, cells=None, cell=None, interpolate=False) -> Comparison
 
 lt.UnitMismatch        # a table not compared: the unit dimension differs

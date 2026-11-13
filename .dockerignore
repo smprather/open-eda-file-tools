@@ -4,7 +4,6 @@
 /.git/
 **/.venv/
 /target/
-/great-docs/
 **/__pycache__/
 **/*.py[cod]
 **/.pytest_cache/

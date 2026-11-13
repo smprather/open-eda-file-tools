@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Literal
 
 # The comparison API lives in its own module; the package re-exports it so
 # that `liberty_tools.compare` stays the *function* and the module stays
@@ -451,4 +452,9 @@ class MinPulseWidth:
 def _axis_role_matches(role: str, keyword: str) -> bool: ...
 
 
-def parse_file(path: str | Path, **filters: Any) -> LibertyDocument: ...
+def parse_file(
+    path: str | Path,
+    cells: Sequence[str] | None = None,
+    *,
+    skip_tables: bool = False,
+) -> LibertyDocument: ...

@@ -251,11 +251,13 @@ crate fetch fail loudly.
 ```bash
 # Liberty
 uv run liberty-view dev.lib          # browser viewer (Plotly served locally)
-uv run liberty-tools format dev.lib  # transparency-checked formatter
+uv run liberty-tools format dev.lib  # transparency-checked formatter (also: liberty-format)
 
-# LEF and DEF
+# LEF, DEF, SDC, and PEX
 uv run lef-tools --help
 uv run def-tools --help
+uv run sdc-tools --help
+uv run pex-tools --help
 
 # Tests and static checks (whole project)
 uv run pytest -q                     # Python/CLI tests; perf tests skip without --runperf
@@ -266,17 +268,8 @@ cargo test && cargo fmt --all --check
 
 ## Documentation
 
-The documentation site is built with Great Docs and Quarto. `great-docs.yml`
-is the source of truth; narrative pages live in `user_guide/`, and the
-generated `great-docs/` directory is gitignored.
-
-Install [Quarto](https://quarto.org/docs/get-started/) and run:
-
-```bash
-PYTHONPATH=$PWD uvx --from great-docs==0.17.0 --with uvicorn great-docs build
-PYTHONPATH=$PWD uvx --from great-docs==0.17.0 --with uvicorn great-docs preview
-```
-
-The build uses griffe static analysis (`dynamic: false`), so it does not need
-the native extension or a `uv sync`. `.github/workflows/docs.yml` deploys the
-site to GitHub Pages on `main`.
+Documentation lives in plain Markdown under `docs/` (`docs/ai-api.md` is the
+token-dense reference for AI agents; `docs/cli.md`, `docs/lef.md`,
+`docs/def.md`, `docs/sdc.md`, `docs/pex.md`, `docs/installation.md`, and
+`docs/tools.md` cover each tool), alongside `README.md` and `CLAUDE.md` at the
+repository root.
