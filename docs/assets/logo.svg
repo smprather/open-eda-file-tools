@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="t">
+  <title id="t">open-eda-file-tools</title>
+  <!-- tile -->
+  <rect width="256" height="256" rx="52" fill="#0f172a"/>
+  <!-- package pins -->
+  <g stroke="#64748b" stroke-width="8" stroke-linecap="round">
+    <path d="M34 92H56M34 128H56M34 164H56"/>
+    <path d="M200 92H222M200 128H222M200 164H222"/>
+    <path d="M92 34V56M128 34V56M164 34V56"/>
+    <path d="M92 200V222M128 200V222M164 200V222"/>
+  </g>
+  <!-- die -->
+  <rect x="56" y="56" width="144" height="144" rx="16" fill="#1e293b" stroke="#94a3b8" stroke-width="6"/>
+  <!-- placed cells: three rows, five colors for five formats -->
+  <g>
+    <rect x="76" y="76" width="36" height="24" rx="4" fill="#2dd4bf"/>
+    <rect x="118" y="76" width="20" height="24" rx="4" fill="#38bdf8"/>
+    <rect x="144" y="76" width="36" height="24" rx="4" fill="#fbbf24"/>
+    <rect x="76" y="116" width="20" height="24" rx="4" fill="#a78bfa"/>
+    <rect x="102" y="116" width="46" height="24" rx="4" fill="#2dd4bf"/>
+    <rect x="154" y="116" width="26" height="24" rx="4" fill="#fb7185"/>
+    <rect x="76" y="156" width="46" height="24" rx="4" fill="#38bdf8"/>
+    <rect x="128" y="156" width="22" height="24" rx="4" fill="#fbbf24"/>
+    <rect x="156" y="156" width="24" height="24" rx="4" fill="#a78bfa"/>
+  </g>
+  <!-- one routed net -->
+  <path d="M94 88V108H167V128" fill="none" stroke="#f8fafc" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="94" cy="88" r="6" fill="#f8fafc"/>
+  <circle cx="167" cy="128" r="6" fill="#f8fafc"/>
+</svg>

@@ -48,7 +48,7 @@ corresponding documentation in the same change:
   and multi-tool recipes).
 - `docs/cli.md` — command-line reference for all six `[project.scripts]` entry
   points.
-- `docs/{lef,def,sdc,pex,tools,installation}.md` — per-tool and setup guides.
+- `docs/{liberty,lef,def,sdc,pex,tools,installation}.md` — per-tool and setup guides.
 - `README.md` and `CLAUDE.md` — repository overview and architectural invariants.
 - `.pyi` type stubs (`liberty_tools/__init__.pyi`, `liberty_tools/_native.pyi`)
   and package docstrings.
