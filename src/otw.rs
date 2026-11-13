@@ -193,6 +193,12 @@ fn check_object_attrs(attrs: &Attrs<'_>, declared: usize) -> Result<(), String> 
                     ));
                 }
             }
+            "value" => {
+                if !matches!(*value, "0" | "1") {
+                    return Err(format!("value must be 0 or 1: `{value}`"));
+                }
+            }
+            "load" | "drive_rise" | "drive_fall" => check_range(key, value)?,
             _ => {}
         }
     }
@@ -883,6 +889,9 @@ p - clk c
         assert!(malformed("j.otw", "otw 1\nn a c stray\n").contains("key=value"));
         assert!(malformed("k.otw", "otw 1\nn a c clocks=0\n").contains("declared clocks"));
         assert!(malformed("l.otw", "otw 1\nn a c freq=-1\n").contains("non-negative"));
+        assert!(malformed("q.otw", "otw 1\nn a z value=x\n").contains("value must be 0 or 1"));
+        assert!(malformed("r.otw", "otw 1\np - a d drive_rise=fast\n").contains("drive_rise"));
+        assert!(summary_of("s.otw", "otw 1\nn a z value=0\np - o d load=0:0.2\n").is_ok());
         assert!(
             malformed("m.otw", "otw 1\nn a d\nw - r d 1 2 3 4 5 6 7 8\n")
                 .contains("takes edge `-`")

@@ -48,10 +48,12 @@ w 0 r c 0.582 0.598 0.313 0.344 0.045 0.064 0.063 0.064 rise_res=0.59:0.61
 n data_bus[3] d
 w 0 r d 1.20 3.75 1.18 3.80 0.05 0.11 0.05 0.12 rise_slack=0.31:0.37 fall_slack=0.29:0.36
 w - - u 0.40 0.90 - - 0.05 0.08 - -
-n tie_lo z
+n tie_lo z value=0
 p u_core/u_icg CK c clocks=0,1
 p u_core/u_icg E d
 p - clk c
+p - scan_in d drive_rise=1.833 drive_fall=2.084
+p - scan_out d load=0.0
 ```
 
 ## Grammar
@@ -106,8 +108,13 @@ Object attributes:
 | --- | --- |
 | `clocks=<i>[,<j>...]` | **Clock domains**: indices of the clocks that reach this object. When absent, the domains are the clocks of the object's windows. |
 | `freq=<hertz>` | Switching (toggle) frequency of the object. |
-| `load=<value>` | Capacitive load, in `cap_unit`. |
+| `load=<range>` | External capacitive load on a net or output port, in `cap_unit`. |
+| `value=0` or `value=1` | Logic value of a constant (`z`) object. |
+| `drive_rise=<range>`, `drive_fall=<range>` | Strength of whatever drives an input port for the rising / falling transition, as a resistance in `res_unit`. |
 | anything else | Kept verbatim. |
+
+A `<range>` is `min:max`, or one number for both. Where an analysis has an
+early (hold) and a late (setup) figure, they are the `min` and `max`.
 
 ### Roles
 
@@ -154,7 +161,7 @@ Window attributes; each value is a `min:max` range, or one number for both:
 Not starting with `otw <known version>`; a non-positive unit; thresholds not
 `0 <= low < high <= 100`; an unknown role; a duplicate object; a trailing token
 that is not `key=value`; `clocks=` naming an undeclared clock; a negative
-`freq`; a `w` line before any object, with an undeclared clock index, a bad
+`freq`; a `value` other than 0 or 1; a malformed `load` / `drive_*` range; a `w` line before any object, with an undeclared clock index, a bad
 edge, fewer than eight values, or a malformed range attribute; a clock window
 on a non-clock object; a header line after the first object. Errors name the
 file and line.
@@ -182,8 +189,12 @@ What timing-window files in the field carry, and where it lives in OTW:
 | Absent transition / value | `-`, or the attribute is omitted |
 | Clock vs data flag per record | window `<role>` |
 | Clock vs data per object (and constant / unconstrained) | object `<role>`, with the precedence rule |
+| Constant nets and their logic value | role `z` with `value=0` / `value=1` |
+| Input-port driver strength, per edge | `p - <port> ... drive_rise= drive_fall=` |
+| Virtual clocks (a waveform with no source) | `clock` with no `source=` |
 | Clock domain per object | `clocks=`, or derived from the windows |
-| Switching frequency, external load | `freq=`, `load=` |
+| Switching frequency | `freq=` |
+| External load on a port or net | `load=` |
 | Anything tool-specific (statistical sigma, derates, ...) | free `key=value` attributes and header keys |
 
 ## How `def-tools` uses OTW

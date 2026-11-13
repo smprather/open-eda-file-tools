@@ -414,7 +414,8 @@ otw.windows -> int                                            # count of w lines
 otw.nets -> dict[str, str]; otw.pins -> dict[tuple[str, str], str]   # object -> role
 otw.domains -> dict[str | tuple[str, str], tuple[int, ...]]   # clock indices: clocks= attr, else window clocks
 otw.domain_names(key) -> tuple[str, ...]
-otw.object_attributes -> dict[key, dict[str, str]]            # freq (Hz), load (cap_unit), free keys
+otw.object_attributes -> dict[key, dict[str, str]]            # freq (Hz), load (cap_unit range), value (0|1 for z),
+                                                              # drive_rise / drive_fall (res_unit range), free keys
 # OtwWindow(clock: int | None, edge: "r" | "f" | "-", role, values: 8-tuple of float | None,
 #           rise_res=None, rise_slack=None, fall_res=None, fall_slack=None,   # (min, max) ranges
 #           attributes=())    # values = rise_early, rise_late, fall_early, fall_late, then 4 slews
