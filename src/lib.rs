@@ -1,5 +1,6 @@
 pub mod def;
 pub mod lef;
+pub mod otw;
 pub mod pex;
 
 use flate2::read::GzDecoder;
@@ -2069,6 +2070,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     lef::register(m)?;
     def::register(m)?;
     pex::register(m)?;
+    otw::register(m)?;
     Ok(())
 }
 

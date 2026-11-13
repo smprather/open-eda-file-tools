@@ -187,11 +187,33 @@ def write_clock_instances_csv_from_cache(
     clock_cell_patterns: Sequence[str],
     output: _StrPath | None,
 ) -> None: ...
+_MacroRole = tuple[str, Sequence[str], Sequence[str], bool, Sequence[str]]
 def clock_tree_cells(
     def_path: _StrPath,
     roots: Sequence[str],
-    macros: Sequence[tuple[str, Sequence[str], Sequence[str], bool]],
+    macros: Sequence[_MacroRole],
+    prune: bool = True,
 ) -> list[str]: ...
+def clock_object_instances(
+    def_path: _StrPath,
+    nets: Sequence[str],
+    pins: Sequence[tuple[str, str]],
+    macros: Sequence[_MacroRole],
+) -> tuple[list[str], list[str], list[tuple[str, str]], list[str]]: ...
+@final
+class OtwSummary:
+    design: str
+    time_unit: float | None
+    cap_unit: float | None
+    res_unit: float | None
+    slew_thresholds: tuple[float, float] | None
+    clocks: list[tuple[str, float, float, float, list[tuple[str, str]]]]
+    attributes: list[tuple[str, str]]
+    nets: list[tuple[str, str, list[int], list[tuple[str, str]]]]
+    pins: list[tuple[str, str, str, list[int], list[tuple[str, str]]]]
+    windows: int
+def read_otw(path: _StrPath) -> OtwSummary: ...
+def write_otw_windows_csv(path: _StrPath, output: _StrPath | None = None) -> int: ...
 @final
 class PexHeader:
     standard: str

@@ -19,11 +19,13 @@ entry points (`liberty-tools`, `liberty-format`, `liberty-view`, `lef-tools`,
 | Compare two Liberty libraries | `liberty_tools.compare(a, b, ...)` | Aligns grids by axis role, never guesses | `Comparison` |
 | Format a Liberty file transparently | `liberty-tools format FILE` (or `liberty-format FILE`) | `--in-place`, `--check`, `-o PATH` | Formatted `.lib` |
 | Parse cell LEF macros, pins, ports, rects | `lef_tools.parse_lef(paths, macros=...)` | Coordinates always in **LEF microns** | `LefLibrary` |
-| Dump placed DEF instances + bboxes (CSV, Parquet, table) | `def-tools instances --lef ... --def ...` | `--format csv\|parquet\|table`, `--lib`, `--clock-cells`, `--columns` | Coordinates in **microns** (`DBU / UNITS DISTANCE MICRONS`) |
+| Dump placed DEF instances + bboxes (CSV, Parquet, table) | `def-tools instances --lef ... --def ...` | `--format csv\|parquet\|table`, `--lib`, `--clock-cells` / `--clock-data` / `--twf`, `--columns` | Coordinates in **microns** (`DBU / UNITS DISTANCE MICRONS`) |
 | Stream placed DEF instance bboxes in Python | `def_tools.instance_bboxes(lefs, def_path)` | Streaming Rust iterator | `InstanceBBoxIter` (coordinates in **DEF DBU**) |
 | Query routed net shapes for one net + layer | `def-tools net-shapes --def ... --net VDD --layer met1` | `--cache-dir` for repeated queries | CSV in **DEF DBU** |
 | Extract SDC clocks (`create_clock` / `create_generated_clock`) | `sdc_tools.clocks(sdc_path)` or `sdc-tools clocks` | Evaluates in safe `tclsh` >= 8.6 with stubs | `list[Clock]` / TSV / JSON |
-| Positively identify clock-tree cells from SDC + DEF + Liberty | `sdc_tools.clock_cells(def_path, libs, sdc_path)` or `sdc-tools clock-cells` | Forward trace from clock roots; stops at `ff`/`latch` | `ClockCells` / instance list |
+| Positively identify clock-tree cells from SDC + DEF + Liberty | `sdc_tools.clock_cells(def_path, libs, sdc_path)` or `sdc-tools clock-cells` | Forward trace from clock roots; through ICGs, stops at `ff`/`latch`/memory, pruned to cells that reach a clock pin | `ClockCells` / instance list |
+| Identify clock-tree cells from STA clock/data roles (OTW or plug-in backend) + DEF + Liberty | `def_tools.clock_data.clock_instances(spec, def_path, roles)` or `def-tools instances --clock-data [BACKEND:]PATH` | Net- and pin-based; exit 3 = backend missing, 4 = malformed | `ClockInstances` / `is_clock` column |
+| Read / write OTW (open timing windows) | `def_tools.otw.read_otw(path)` / `write_otw(path, ...)` | Spec: `docs/otw.md`; no vendor TWF reader ships | `OtwFile` |
 | Summarize SPEF/DSPF parasitics or build capacitance histogram | `pex_tools.summaries(path)` / `pex_tools.histogram(path)` / `pex-tools` | `mode="auto"` (parallel Rayon) or `mode="stream"` (low-memory) | `list[PexSummary]` / `PexHistogram` |
 | Parse full SPEF/DSPF conns, caps, resistors, and `$` extensions | `pex_tools.parse(path)` | Preserves `$layer=`, `$x=`, `$y=`, and DSPF `*C x y` | `PexFile` |
 
@@ -81,6 +83,18 @@ rows, row_groups = def_tools.write_instance_parquet(
     sequential=seq_macros,
     clock=clk_cells,
 )
+```
+
+### `is_clock` from STA clock/data roles instead of an SDC trace
+
+```bash
+# design.otw.gz: OTW (docs/otw.md), net-based or pin-based. --lib is required for net/pin sources.
+uv run def-tools instances --lef "pdk/*.lef" --def design.def.gz \
+  --lib stdcell.lib --clock-data design.otw.gz --output instances.csv
+# Vendor TWF: only through a plug-in backend named `twf` (none ships here):
+OPEN_EDA_CLOCK_DATA_BACKENDS="twf=my_pkg.twf_reader:read" \
+  uv run def-tools instances ... --lib stdcell.lib --twf design.twf.gz
+# Exit codes: 3 = backend not installed, 4 = source malformed, 1 = other error.
 ```
 
 ---
@@ -343,6 +357,72 @@ def_tools.write_instance_parquet(
     columns=None, sequential=None, clock=None,
 ) -> tuple[int, int]   # (rows_written, row_groups)
 
+# One-call resolution of the is_seq / is_clock inputs (what the CLI does):
+from def_tools.instances import instance_flag_inputs
+sequential, clock, warnings = instance_flag_inputs(
+    def_path, libs,                 # libs parsed once (skip_tables=True) for both columns
+    clock_cells=None,               # Path: instance-name list            } alternatives;
+    clock_data=None,                # "[BACKEND:]PATH", e.g. "x.otw.gz"   } more than one
+    twf=None,                       # Path: shorthand for "twf:PATH"      } -> ValueError
+) -> tuple[list[str] | None, list[str] | None, list[str]]   # None = input not supplied
+
+# Liberty clock roles (shared by sdc_tools.clock_cells and clock-data resolution):
+from def_tools.clock_roles import cell_clock_roles, CellClockRole
+roles = cell_clock_roles(libs) -> dict[str, CellClockRole]
+role.inputs -> tuple[str, ...]      # clock-through inputs (ICG: clock pin only)
+role.outputs -> tuple[str, ...]     # (ICG: clock_gate_out_pin if flagged)
+role.endpoint -> bool               # ff / latch / memory / clock:true pin, and not an ICG
+role.clock_pins -> tuple[str, ...]  # pins a clock is delivered to
+role.clock_gate -> bool             # clock_gating_integrated_cell present
+role.sequential -> bool             # ff or latch group (the is_seq definition; true for ICGs)
+
+# Clock/data classification backends (def_tools.clock_data):
+from def_tools.clock_data import (
+    ClockData, ClockInstances, read_clock_data, resolve_clock_instances, clock_instances,
+    register_backend, backends, parse_source,
+    ClockDataError, ClockDataBackendError, ClockDataFormatError,
+)
+data = read_clock_data("design.otw.gz" | "otw:PATH" | "names:PATH" | "<plugin>:PATH") -> ClockData
+data.backend -> str; data.source -> Path
+data.nets -> Mapping[str, str]                    # net -> role ("c" | "d" | "u" | "z")
+data.pins -> Mapping[tuple[str, str], str]        # (instance, pin) -> role; instance "-" = port
+data.instances -> Mapping[str, str]               # instance -> role
+data.domains -> Mapping[str | tuple[str, str], tuple[str, ...]]   # optional: object -> clock names (not used for is_clock)
+data.clock_nets() / data.clock_pins() / data.clock_instances()   # objects with role "c"
+result = resolve_clock_instances(data, def_path, roles) -> ClockInstances
+result = clock_instances(spec, def_path, roles)   # read + resolve
+result.cells -> tuple[str, ...]                   # sorted DEF instance names
+result.unmatched_nets / result.unmatched_pins     # clock objects absent from the DEF
+result.unclassified -> tuple[str, ...]            # on a clock object, macro not in Liberty: NOT in cells
+result.warnings() -> list[str]
+# Errors: ClockDataBackendError (.exit_code 3, backend not installed),
+#         ClockDataFormatError (.exit_code 4, malformed / empty source),
+#         ClockDataError (.exit_code 1: no --lib for nets/pins, or no clock object exists in the DEF).
+# Plug-in: reader(path: Path) -> ClockData, registered via register_backend(name, reader),
+#   entry-point group "open_eda_file_tools.clock_data", or env OPEN_EDA_CLOCK_DATA_BACKENDS
+#   ("name=pkg.module:reader,..."). Built-ins "otw" and "names" cannot be replaced.
+# Backend contract: one role per object; any clock record makes the object "c".
+
+# OTW (def_tools.otw), spec in docs/otw.md:
+from def_tools.otw import read_otw, write_otw, write_otw_windows_csv, OtwClock, OtwWindow
+otw = read_otw(path) -> OtwFile     # ValueError "file:line: ..." when malformed
+otw.design -> str; otw.clocks -> tuple[OtwClock, ...]   # OtwClock(name, period, rise_edge, fall_edge, attributes=())
+otw.time_unit / otw.cap_unit / otw.res_unit -> float | None   # seconds / farads / ohms per unit
+otw.slew_thresholds -> tuple[float, float] | None             # percent of swing
+otw.attributes -> tuple[tuple[str, str], ...]                 # other header lines (corner, program, ...)
+otw.windows -> int                                            # count of w lines
+otw.nets -> dict[str, str]; otw.pins -> dict[tuple[str, str], str]   # object -> role
+otw.domains -> dict[str | tuple[str, str], tuple[int, ...]]   # clock indices: clocks= attr, else window clocks
+otw.domain_names(key) -> tuple[str, ...]
+otw.object_attributes -> dict[key, dict[str, str]]            # freq (Hz), load (cap_unit), free keys
+# OtwWindow(clock: int | None, edge: "r" | "f" | "-", role, values: 8-tuple of float | None,
+#           rise_res=None, rise_slack=None, fall_res=None, fall_slack=None,   # (min, max) ranges
+#           attributes=())    # values = rise_early, rise_late, fall_early, fall_late, then 4 slews
+write_otw(path, *, design="", time_unit=None, cap_unit=None, res_unit=None, slew_thresholds=None,
+          clocks=(), attributes=(), nets=None, pins=None, windows=None,
+          domains=None, object_attributes=None) -> None    # ".gz" suffix gzips
+write_otw_windows_csv(path, output: str | None) -> int     # one CSV row per window
+
 # Binary DEF cache for repeated net/clock queries:
 def_tools.write_def_cache(def_path: str | Path, cache_dir: str | Path) -> None
 def_tools.write_net_shapes_csv(def_path, net, layer, output) -> None
@@ -373,11 +453,16 @@ for clk in sdc_tools.clocks(sdc_path: str | Path):
 
 # Forward-trace clock-tree distribution cells from SDC roots through DEF connectivity:
 # Uses Liberty (parsed concurrently with skip_tables=True) for pin directions and
-# ff/latch detection. Stops at sequential cells; never uses macro-name patterns.
+# ff/latch/memory endpoints and clock gates. Traces through integrated clock gates
+# (clock pin -> gated clock; never via the enable pin). Never uses macro-name patterns.
+# prune=True (default): report only cells from which a clock pin is reachable, so the
+# datapath cone of a divider flop's output is not reported. prune=False: every cell touched.
 result = sdc_tools.clock_cells(
     def_path: str | Path,
-    libs: list[Path],
+    libs: Sequence[Path | str],
     sdc_path: str | Path,
+    *,
+    prune: bool = True,
 ) -> sdc_tools.ClockCells
 result.clocks -> tuple[sdc_tools.Clock, ...]
 result.cells -> tuple[str, ...]             # sorted clock-tree instance names

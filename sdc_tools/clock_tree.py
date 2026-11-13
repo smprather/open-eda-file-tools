@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from liberty_tools import parse_file
+from def_tools.clock_roles import cell_clock_roles, native_macro_roles
 from liberty_tools._native import clock_tree_cells as _clock_tree_cells
 
 from .clocks import Clock, clocks
-
-MacroPins = tuple[list[str], list[str], bool]
 
 
 @dataclass(frozen=True)
@@ -22,50 +20,29 @@ class ClockCells:
     cells: tuple[str, ...]
 
 
-def _cell_pins(document) -> dict[str, MacroPins]:
-    result: dict[str, MacroPins] = {}
-    for name in document.cells():
-        cell = document.cell(name)
-        inputs: list[str] = []
-        outputs: list[str] = []
-        for pin_name in cell.pins():
-            direction = cell.pin(pin_name).direction
-            if direction == "input":
-                inputs.append(pin_name)
-            elif direction == "output":
-                outputs.append(pin_name)
-        sequential = cell.ff() is not None or cell.latch() is not None
-        result[name] = (inputs, outputs, sequential)
-    return result
+def clock_cells(
+    def_path: Path | str,
+    libs: Sequence[Path | str],
+    sdc_path: Path | str,
+    *,
+    prune: bool = True,
+) -> ClockCells:
+    """Return the clocks and the clock-tree instances reachable from them.
 
+    The trace follows clock-through pins from every clock root: all inputs of
+    a combinational cell, only the clock pin of an integrated clock gate. It
+    ends at flip-flops, latches and memories, which are not reported.
 
-def macro_pin_data(libs: list[Path]) -> dict[str, MacroPins]:
-    """Pin directions and sequential type for every cell, one thread per lib.
-
-    ``parse_file`` releases the GIL, so the libraries parse concurrently. Later
-    libraries override earlier ones for a duplicated cell name.
+    With ``prune`` (the default) a cell is reported only when a clock pin is
+    reachable from it, so the datapath logic a divider flop's output also
+    feeds is not mistaken for clock tree. ``prune=False`` reports every cell
+    the forward trace touches, including logic that only reaches data pins or
+    output ports.
     """
-    if not libs:
-        return {}
-    with ThreadPoolExecutor(max_workers=len(libs)) as pool:
-        documents = list(
-            pool.map(lambda path: parse_file(str(path), skip_tables=True), libs)
-        )
-    merged: dict[str, MacroPins] = {}
-    for document in documents:
-        merged.update(_cell_pins(document))
-    return merged
-
-
-def clock_cells(def_path: Path | str, libs: list[Path], sdc_path: Path | str) -> ClockCells:
-    """Return the clocks and the clock-tree instances reachable from them."""
     found = clocks(sdc_path)
     roots = sorted({source for clock in found for source in clock.sources})
     if not roots:
         return ClockCells(clocks=tuple(found), cells=())
-    macros = [
-        (name, inputs, outputs, sequential)
-        for name, (inputs, outputs, sequential) in sorted(macro_pin_data(libs).items())
-    ]
-    cells = _clock_tree_cells(str(def_path), roots, macros)
+    macros = native_macro_roles(cell_clock_roles(list(libs)))
+    cells = _clock_tree_cells(str(def_path), roots, macros, prune)
     return ClockCells(clocks=tuple(found), cells=tuple(cells))

@@ -25,12 +25,17 @@ from .instances import (
     parse_column_spec,
     parse_size,
     peak_rss_bytes,
-    read_clock_cells,
+    instance_flag_inputs,
     read_header,
     rss_bytes,
     run_instances,
-    sequential_macros,
 )
+from .clock_data import (
+    ClockDataError,
+    read_clock_data,
+    resolve_clock_instances,
+)
+from .clock_roles import cell_clock_roles
 from .io_config import DEFAULT_PROBE_MIB, write_io_config
 from .sdc import clock_roots_from_sdc
 from .version import get_version
@@ -132,6 +137,24 @@ def main() -> None:
     ),
 )
 @click.option(
+    "--clock-data",
+    metavar="[BACKEND:]PATH",
+    help=(
+        "Clock/data classification source for is_clock, e.g. design.otw.gz or "
+        "otw:design.otw.gz. Backends: otw (open timing windows), names, and any "
+        "installed plug-in. Net/pin sources need --lib. Exit code 3 means the "
+        "backend is not installed, 4 that the source is malformed."
+    ),
+)
+@click.option(
+    "--twf",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help=(
+        "Shorthand for --clock-data twf:PATH. Vendor TWF needs a plug-in `twf` "
+        "backend; none ships with this project."
+    ),
+)
+@click.option(
     "--format",
     "fmt",
     type=click.Choice(FORMATS),
@@ -155,7 +178,7 @@ def main() -> None:
         "for example instance=instance_name,base_cell,llx=llx_um. "
         f"Sources: {','.join(AVAILABLE_COLUMNS)}. "
         "Defaults to the canonical six, plus is_seq with --lib and is_clock "
-        "with --clock-cells."
+        "with --clock-cells, --clock-data or --twf."
     ),
 )
 @click.option(
@@ -186,6 +209,8 @@ def instances(
     def_path: Path,
     libs: tuple[Path, ...],
     clock_cells: Path | None,
+    clock_data: str | None,
+    twf: Path | None,
     fmt: str,
     output: Path | None,
     columns: list[tuple[str, str]] | None,
@@ -195,12 +220,15 @@ def instances(
 ) -> None:
     """Dump placed instance bounding boxes (in microns) as CSV, Parquet, or table."""
     try:
-        sequential = sorted(sequential_macros(list(libs))) if libs else None
-        clock = (
-            sorted(read_clock_cells(clock_cells)) if clock_cells is not None else None
+        sequential, clock, warnings = instance_flag_inputs(
+            def_path, list(libs), clock_cells, clock_data, twf
         )
+    except ClockDataError as exc:
+        raise _clock_data_failure(exc) from exc
     except (OSError, ValueError, RuntimeError) as exc:
         raise click.ClickException(str(exc)) from exc
+    for warning in warnings:
+        click.echo(f"warning: {warning}", err=True)
     if columns is None:
         columns = default_instance_columns(sequential is not None, clock is not None)
     rc = run_instances(
@@ -217,6 +245,103 @@ def instances(
     )
     if rc != 0:
         raise SystemExit(rc)
+
+
+def _clock_data_failure(exc: ClockDataError) -> click.ClickException:
+    """A click error carrying the clock-data exit code (3 backend, 4 format)."""
+    failure = click.ClickException(str(exc))
+    failure.exit_code = exc.exit_code
+    return failure
+
+
+@main.command(name="clock-data")
+@click.option(
+    "--source",
+    required=True,
+    metavar="[BACKEND:]PATH",
+    help="Clock/data source, e.g. design.otw.gz, otw:PATH, names:PATH or a plug-in backend.",
+)
+@click.option(
+    "--report",
+    type=click.Choice(["objects", "windows", "instances"]),
+    default="objects",
+    show_default=True,
+    help=(
+        "objects: kind,instance,name,role per net/pin/instance. windows: every "
+        "OTW timing window as CSV. instances: clock-tree instance names, one per "
+        "line (needs --def; net/pin sources also need --lib)."
+    ),
+)
+@click.option(
+    "--def",
+    "def_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="DEF design, for --report instances.",
+)
+@click.option(
+    "--lib",
+    "libs",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    multiple=True,
+    help="Liberty library, for --report instances.",
+)
+@click.option(
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write here instead of stdout.",
+)
+def clock_data_command(
+    source: str,
+    report: str,
+    def_path: Path | None,
+    libs: tuple[Path, ...],
+    output: Path | None,
+) -> None:
+    """Inspect a clock/data source, or resolve it to clock-tree instances."""
+    import csv
+    import io
+
+    from .otw import write_otw_windows_csv
+
+    try:
+        data = read_clock_data(source)
+        if report == "windows":
+            if data.backend != "otw":
+                raise click.UsageError("--report windows needs an OTW source")
+            write_otw_windows_csv(
+                str(data.source), None if output is None else str(output)
+            )
+            rendered = None
+        elif report == "instances":
+            if def_path is None:
+                raise click.UsageError("--report instances needs --def")
+            roles = cell_clock_roles(list(libs)) if libs else None
+            resolved = resolve_clock_instances(data, def_path, roles)
+            for warning in resolved.warnings():
+                click.echo(f"warning: {warning}", err=True)
+            rendered = "".join(f"{name}\n" for name in resolved.cells)
+        else:
+            buffer = io.StringIO()
+            writer = csv.writer(buffer, lineterminator="\n")
+            writer.writerow(["kind", "instance", "name", "role"])
+            writer.writerows(["net", "", name, role] for name, role in data.nets.items())
+            writer.writerows(
+                ["pin", instance, pin, role] for (instance, pin), role in data.pins.items()
+            )
+            writer.writerows(
+                ["instance", name, "", role] for name, role in data.instances.items()
+            )
+            rendered = buffer.getvalue()
+    except ClockDataError as exc:
+        raise _clock_data_failure(exc) from exc
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if rendered is None:
+        return
+    if output is None:
+        click.echo(rendered, nl=False)
+    else:
+        output.write_text(rendered, encoding="utf-8")
 
 
 @main.command(name="net-shapes")

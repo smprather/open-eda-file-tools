@@ -541,33 +541,73 @@ fn write_clock_instances_csv_from_cache(
     })
 }
 
+/// `(name, clock-through input pins, output pins, endpoint, clock pins)` for one
+/// Liberty cell, as built by `def_tools.clock_roles`.
+///
+/// * An *endpoint* (flip-flop, latch, memory) ends a clock trace.
+/// * An integrated clock gate is not an endpoint: its only clock-through input
+///   is its clock pin, so an enable pin never carries a clock into it.
+/// * *Clock pins* are the pins a clock is delivered to (`clock : true`,
+///   `clocked_on`, latch `enable`, `clock_gate_clock_pin`).
+type MacroRole = (String, Vec<String>, Vec<String>, bool, Vec<String>);
+
+struct RoleRef<'a> {
+    inputs: &'a [String],
+    outputs: &'a [String],
+    endpoint: bool,
+    clock_pins: &'a [String],
+}
+
+fn role_map(macros: &[MacroRole]) -> HashMap<&str, RoleRef<'_>> {
+    macros
+        .iter()
+        .map(|(name, inputs, outputs, endpoint, clock_pins)| {
+            (
+                name.as_str(),
+                RoleRef {
+                    inputs,
+                    outputs,
+                    endpoint: *endpoint,
+                    clock_pins,
+                },
+            )
+        })
+        .collect()
+}
+
+fn has_pin(pins: &[String], pin: &str) -> bool {
+    pins.iter().any(|candidate| candidate == pin)
+}
+
 #[pyfunction]
-#[pyo3(signature = (def_path, roots, macros))]
+#[pyo3(signature = (def_path, roots, macros, prune = true))]
 fn clock_tree_cells(
     py: Python<'_>,
     def_path: PathBuf,
     roots: Vec<String>,
-    macros: Vec<(String, Vec<String>, Vec<String>, bool)>,
+    macros: Vec<MacroRole>,
+    prune: bool,
 ) -> PyResult<Vec<String>> {
-    py.detach(|| clock_tree_cells_impl(&def_path, &roots, &macros).map_err(to_py_err))
+    py.detach(|| clock_tree_cells_impl(&def_path, &roots, &macros, prune).map_err(to_py_err))
 }
 
 /// Forward trace from symbolic clock roots through DEF connectivity.
 ///
-/// `macros` carries `(name, input pins, output pins, sequential)` per Liberty
-/// cell. A combinational cell whose input pin sits on a clock net is a clock
-/// tree cell; its output nets are followed. Sequential cells end the trace and
-/// are not reported as tree cells.
+/// A non-endpoint cell with a clock-through input on a clock net is a
+/// candidate; its output nets are followed. Endpoints end the trace and are
+/// never reported.
+///
+/// With `prune`, a candidate is kept only when a clock pin is reachable from
+/// it: a generated clock on a divider flop's `Q` also fans out into ordinary
+/// datapath logic, and that cone ends at data pins, not at clock pins.
 fn clock_tree_cells_impl(
     def_path: &Path,
     roots: &[String],
-    macros: &[(String, Vec<String>, Vec<String>, bool)],
+    macros: &[MacroRole],
+    prune: bool,
 ) -> Result<Vec<String>, String> {
     let (components, nets) = collect_def_connectivity(def_path)?;
-    let macro_map: HashMap<&str, (&Vec<String>, &Vec<String>, bool)> = macros
-        .iter()
-        .map(|(name, inputs, outputs, sequential)| (name.as_str(), (inputs, outputs, *sequential)))
-        .collect();
+    let macro_map = role_map(macros);
 
     let mut instance_nets: HashMap<&str, Vec<(usize, &str)>> = HashMap::new();
     let mut net_by_name: HashMap<&str, usize> = HashMap::new();
@@ -600,47 +640,218 @@ fn clock_tree_cells_impl(
 
     let mut queue: VecDeque<usize> = seeds.into_iter().collect();
     let mut seen_nets = vec![false; nets.len()];
-    let mut expanded: HashSet<String> = HashSet::new();
-    let mut cells: HashSet<String> = HashSet::new();
+    // Nets a clock pin hangs on, and the candidates fed by / driving each net.
+    let mut sink_nets: Vec<usize> = Vec::new();
+    let mut live: HashSet<&str> = HashSet::new();
+    let mut reached_from: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut drivers: HashMap<usize, Vec<&str>> = HashMap::new();
 
     while let Some(net_index) = queue.pop_front() {
-        if net_index >= nets.len() || seen_nets[net_index] {
+        if seen_nets[net_index] {
             continue;
         }
         seen_nets[net_index] = true;
+        let mut is_sink = false;
         for conn in &nets[net_index].conns {
-            let Some(instance) = conn.instance.as_ref() else {
+            let Some(instance) = conn.instance.as_deref() else {
                 continue;
             };
-            let Some(macro_name) = components.get(instance) else {
+            let Some(role) = components
+                .get(instance)
+                .and_then(|macro_name| macro_map.get(macro_name.as_str()))
+            else {
                 continue;
             };
-            let Some((inputs, outputs, sequential)) = macro_map.get(macro_name.as_str()) else {
-                continue;
-            };
-            if *sequential || outputs.is_empty() {
+            if role.endpoint {
+                is_sink |= has_pin(role.clock_pins, &conn.pin);
                 continue;
             }
-            if !inputs.iter().any(|pin| pin == &conn.pin) {
+            if role.outputs.is_empty() || !has_pin(role.inputs, &conn.pin) {
                 continue;
             }
-            if !expanded.insert(instance.clone()) {
+            // A clock gate reached on its clock pin is on the tree by itself.
+            if has_pin(role.clock_pins, &conn.pin) {
+                live.insert(instance);
+            }
+            let reached = reached_from.entry(instance).or_default();
+            let first_visit = reached.is_empty();
+            reached.push(net_index);
+            if !first_visit {
                 continue;
             }
-            cells.insert(instance.clone());
-            if let Some(connections) = instance_nets.get(instance.as_str()) {
-                for (next_net, pin) in connections {
-                    if outputs.iter().any(|output| output == pin) && !seen_nets[*next_net] {
+            for (next_net, pin) in instance_nets.get(instance).into_iter().flatten() {
+                if has_pin(role.outputs, pin) {
+                    drivers.entry(*next_net).or_default().push(instance);
+                    if !seen_nets[*next_net] {
                         queue.push_back(*next_net);
+                    }
+                }
+            }
+        }
+        if is_sink {
+            sink_nets.push(net_index);
+        }
+    }
+
+    let mut result: Vec<String> = if prune {
+        // Walk back from every clock pin: a net is live when a clock pin or a
+        // live candidate reads it, a candidate when it drives a live net.
+        let mut live_nets = vec![false; nets.len()];
+        let mut pending: Vec<usize> = sink_nets;
+        for instance in &live {
+            pending.extend(reached_from.get(instance).into_iter().flatten());
+        }
+        while let Some(net_index) = pending.pop() {
+            if live_nets[net_index] {
+                continue;
+            }
+            live_nets[net_index] = true;
+            for instance in drivers.get(&net_index).into_iter().flatten() {
+                if live.insert(instance) {
+                    pending.extend(reached_from.get(instance).into_iter().flatten());
+                }
+            }
+        }
+        live.into_iter().map(str::to_string).collect()
+    } else {
+        reached_from.into_keys().map(str::to_string).collect()
+    };
+    result.sort();
+    Ok(result)
+}
+
+/// DEF escapes `[`, `]` and `/` inside names; other files usually do not.
+fn unescaped(name: &str) -> String {
+    name.replace('\\', "")
+}
+
+type ClockObjectInstances = (Vec<String>, Vec<String>, Vec<(String, String)>, Vec<String>);
+
+#[pyfunction]
+#[pyo3(signature = (def_path, nets, pins, macros))]
+fn clock_object_instances(
+    py: Python<'_>,
+    def_path: PathBuf,
+    nets: Vec<String>,
+    pins: Vec<(String, String)>,
+    macros: Vec<MacroRole>,
+) -> PyResult<ClockObjectInstances> {
+    py.detach(|| clock_object_instances_impl(&def_path, &nets, &pins, &macros).map_err(to_py_err))
+}
+
+/// Map clock nets and clock pins to the clock-tree instances behind them.
+///
+/// * A clock **net** marks the non-endpoint instances that drive it (an
+///   output pin on the net). A divider flop driving a generated clock is an
+///   endpoint and stays unmarked.
+/// * A clock **pin** marks its instance when that instance is not an endpoint
+///   and the pin is one of its clock-through inputs or outputs. Instance `-`
+///   names a top-level port, which marks nothing.
+///
+/// Returns `(cells, unmatched nets, unmatched pins, unclassified instances)`.
+/// Unmatched names are absent from the DEF; an unclassified instance sits on a
+/// clock object but its macro has no Liberty cell, so its role is unknown and
+/// it is reported instead of being guessed.
+fn clock_object_instances_impl(
+    def_path: &Path,
+    clock_nets: &[String],
+    clock_pins: &[(String, String)],
+    macros: &[MacroRole],
+) -> Result<ClockObjectInstances, String> {
+    let (components, nets) = collect_def_connectivity(def_path)?;
+    let macro_map = role_map(macros);
+    let mut cells: HashSet<&str> = HashSet::new();
+    let mut unclassified: HashSet<&str> = HashSet::new();
+
+    let mut unmatched_nets = Vec::new();
+    if !clock_nets.is_empty() {
+        let net_by_name: HashMap<String, usize> = nets
+            .iter()
+            .enumerate()
+            .map(|(index, net)| (unescaped(&net.name), index))
+            .collect();
+        for name in clock_nets {
+            let Some(&index) = net_by_name.get(&unescaped(name)) else {
+                unmatched_nets.push(name.clone());
+                continue;
+            };
+            for conn in &nets[index].conns {
+                let Some(instance) = conn.instance.as_deref() else {
+                    continue;
+                };
+                let Some(macro_name) = components.get(instance) else {
+                    continue;
+                };
+                match macro_map.get(macro_name.as_str()) {
+                    None => {
+                        unclassified.insert(instance);
+                    }
+                    Some(role) => {
+                        if !role.endpoint && has_pin(role.outputs, &conn.pin) {
+                            cells.insert(instance);
+                        }
                     }
                 }
             }
         }
     }
 
-    let mut result: Vec<String> = cells.into_iter().collect();
-    result.sort();
-    Ok(result)
+    let mut unmatched_pins = Vec::new();
+    if !clock_pins.is_empty() {
+        let instance_by_name: HashMap<String, (&str, &str)> = components
+            .iter()
+            .map(|(instance, macro_name)| {
+                (
+                    unescaped(instance),
+                    (instance.as_str(), macro_name.as_str()),
+                )
+            })
+            .collect();
+        let ports: HashSet<String> = nets
+            .iter()
+            .flat_map(|net| net.conns.iter())
+            .filter(|conn| conn.instance.is_none())
+            .map(|conn| unescaped(&conn.pin))
+            .collect();
+        for (instance, pin) in clock_pins {
+            let pin_name = unescaped(pin);
+            if instance == "-" {
+                if !ports.contains(&pin_name) {
+                    unmatched_pins.push((instance.clone(), pin.clone()));
+                }
+                continue;
+            }
+            let Some(&(def_instance, macro_name)) = instance_by_name.get(&unescaped(instance))
+            else {
+                unmatched_pins.push((instance.clone(), pin.clone()));
+                continue;
+            };
+            match macro_map.get(macro_name) {
+                None => {
+                    unclassified.insert(def_instance);
+                }
+                Some(role) => {
+                    if !role.endpoint
+                        && (has_pin(role.inputs, &pin_name) || has_pin(role.outputs, &pin_name))
+                    {
+                        cells.insert(def_instance);
+                    }
+                }
+            }
+        }
+    }
+
+    let sorted = |set: HashSet<&str>| {
+        let mut values: Vec<String> = set.into_iter().map(str::to_string).collect();
+        values.sort();
+        values
+    };
+    Ok((
+        sorted(cells),
+        unmatched_nets,
+        unmatched_pins,
+        sorted(unclassified),
+    ))
 }
 
 fn collect_root_nets(
@@ -648,7 +859,7 @@ fn collect_root_nets(
     nets: &[NetInfo],
     net_by_name: &HashMap<&str, usize>,
     instance_nets: &HashMap<&str, Vec<(usize, &str)>>,
-    macros: &HashMap<&str, (&Vec<String>, &Vec<String>, bool)>,
+    macros: &HashMap<&str, RoleRef<'_>>,
     components: &HashMap<String, String>,
     seeds: &mut Vec<usize>,
 ) {
@@ -684,12 +895,12 @@ fn collect_root_nets(
         let Some(macro_name) = components.get(instance) else {
             return;
         };
-        let Some((_, outputs, _)) = macros.get(macro_name.as_str()) else {
+        let Some(role) = macros.get(macro_name.as_str()) else {
             return;
         };
         if let Some(connections) = instance_nets.get(instance) {
             for (index, pin) in connections {
-                if outputs.iter().any(|output| output == pin) {
+                if has_pin(role.outputs, pin) {
                     seeds.push(*index);
                 }
             }
@@ -717,6 +928,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(write_clock_instances_csv, m)?)?;
     m.add_function(wrap_pyfunction!(write_clock_instances_csv_from_cache, m)?)?;
     m.add_function(wrap_pyfunction!(clock_tree_cells, m)?)?;
+    m.add_function(wrap_pyfunction!(clock_object_instances, m)?)?;
     Ok(())
 }
 

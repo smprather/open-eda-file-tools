@@ -91,7 +91,16 @@ def clocks_command(sdc_path: Path, fmt: str, output: Path | None) -> None:
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     multiple=True,
     required=True,
-    help="Liberty library for pin directions and sequential types.",
+    help="Liberty library for pin directions, sequential cells and clock gates.",
+)
+@click.option(
+    "--prune/--no-prune",
+    default=True,
+    show_default=True,
+    help=(
+        "Report only cells from which a clock pin is reachable. --no-prune "
+        "reports every cell the forward trace touches."
+    ),
 )
 @click.option(
     "--format",
@@ -107,10 +116,15 @@ def clocks_command(sdc_path: Path, fmt: str, output: Path | None) -> None:
     help="Write here instead of stdout.",
 )
 def clock_cells_command(
-    sdc_path: Path, def_path: Path, libs: tuple[Path, ...], fmt: str, output: Path | None
+    sdc_path: Path,
+    def_path: Path,
+    libs: tuple[Path, ...],
+    prune: bool,
+    fmt: str,
+    output: Path | None,
 ) -> None:
     """List the clock-tree instances reachable from the SDC clock roots."""
-    result = find_clock_cells(def_path, list(libs), sdc_path)
+    result = find_clock_cells(def_path, list(libs), sdc_path, prune=prune)
     if fmt == "json":
         rendered = json.dumps(list(result.cells), indent=2) + "\n"
     else:

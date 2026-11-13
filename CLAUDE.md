@@ -32,6 +32,7 @@ def_tools/                  DEF Python package, `def-tools` CLI, SDC reader, IO 
 sdc_tools/                  SDC clock extraction, `sdc-tools` CLI (Tcl stub evaluator)
 pex_tools/                  SPEF/DSPF parser, `pex-tools` CLI
 src/pex.rs                  SPEF/DSPF parser (parallel + streaming modes)
+src/otw.rs                  OTW (Open Timing Windows) line-oriented reader and CSV dump
 tests/                      Unified pytest suite (Liberty, LEF, DEF, SDC, PEX, and `tests/gen/design_gen.py`)
 docs/                       AI-agent and per-tool Markdown documentation (`docs/ai-api.md`, `docs/cli.md`, `docs/*.md`)
 ```
@@ -48,7 +49,7 @@ corresponding documentation in the same change:
   and multi-tool recipes).
 - `docs/cli.md` — command-line reference for all six `[project.scripts]` entry
   points.
-- `docs/{liberty,lef,def,sdc,pex,tools,installation}.md` — per-tool and setup guides.
+- `docs/{liberty,lef,def,sdc,pex,otw,tools,installation}.md` — per-tool and setup guides.
 - `README.md` and `CLAUDE.md` — repository overview and architectural invariants.
 - `.pyi` type stubs (`liberty_tools/__init__.pyi`, `liberty_tools/_native.pyi`)
   and package docstrings.
@@ -86,7 +87,7 @@ uv run pytest -q tests/test_symbol_render.py
 
 ## Screen grabs
 
-When the user says "look at the grab" or references a current screen grab, view the most recently modified image file in `/mnt/c/Users/myles/Pictures/Screenshots`.
+When the user says "look at the grab" or references a current screen grab, view the most recently modified image file in `~/Pictures/Screenshots`.
 
 ## Architecture
 
@@ -211,7 +212,10 @@ lef_tools/           Python wrapper and `lef-tools` CLI
 src/def.rs                DEF parser, streaming reads, binary cache, Parquet/CSV/table writers
 def_tools/cli.py          click CLI (`def-tools <command>`)
 def_tools/instances.py    instance bbox dumper (`def-tools instances`, CSV/Parquet/table in microns)
-def_tools/sdc.py          SDC `create_clock` / generated-clock reader
+def_tools/sdc.py          clock roots for `clock-instances` (adapter over `sdc_tools.clocks`)
+def_tools/clock_roles.py  Liberty cell clock roles (through pins, endpoints, clock gates)
+def_tools/clock_data.py   clock/data classification backends and net/pin -> instance resolution
+def_tools/otw.py          OTW (Open Timing Windows) reader/writer; parser in `src/otw.rs`
 def_tools/io_config.py    storage benchmark / IO policy config
 tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
 ```
@@ -234,10 +238,39 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
 - **Instance columns are conditional on their inputs.** The canonical six
   (`instance,base_cell,llx,lly,urx,ury`) need only DEF+LEF; `is_seq` exists
   only when a Liberty library is supplied (`ff`/`latch` groups) and `is_clock`
-  only when a clock-cell set is supplied. Selecting a column whose input is
-  absent is an error, never a silent false column. `is_seq` parses each
+  only when a clock source is supplied (`--clock-cells`, `--clock-data`,
+  `--twf`). Selecting a column whose input is absent is an error, never a
+  silent false column. `is_seq` parses each
   library with `skip_tables=True`, one thread per library; only structural
   fields are needed.
+- **`is_clock` sources are backends that answer, not formats.**
+  `def_tools/clock_data.py` defines the seam: a backend maps one file to a
+  role (`c`/`d`/`u`/`z`) per net, pin or instance (`ClockData`), and this repo
+  resolves clock objects to instances. Built-ins are `otw` and `names`; any
+  other name (`twf` included) is a plug-in via the
+  `open_eda_file_tools.clock_data` entry-point group, the
+  `OPEN_EDA_CLOCK_DATA_BACKENDS` env var, or `register_backend`. Built-in
+  names cannot be replaced.
+- **No vendor TWF reader lives in this repo.** There is no open TWF format;
+  vendor readers are plugged in from outside. `--twf PATH` is only shorthand
+  for `--clock-data twf:PATH`. The open format here is OTW (`docs/otw.md`,
+  `src/otw.rs`), designed from scratch — do not shape it after a vendor file.
+- **An OTW file is one analysis corner.** Header values (`corner`, `process`,
+  `voltage`, `temperature`) are single-valued; multi-corner data is one file
+  per corner, never best/typ/worst triples in one file.
+- **Backend missing and source malformed are distinct, and neither yields a
+  column.** `ClockDataBackendError` exits 3, `ClockDataFormatError` exits 4;
+  `is_clock` is never written as all-false for an unreadable source. Clock
+  objects absent from the DEF and instances whose macro has no Liberty cell
+  are reported (`ClockInstances.unmatched_*`, `.unclassified`), never guessed.
+- **One role per object; clock dominates.** An OTW object is declared once.
+  A backend whose source has several records per object must report `c` when
+  any record is a clock record (real per-edge files tag every clock net as
+  data too).
+- **Clock net -> its drivers; clock pin -> its instance; endpoints excluded.**
+  `clock_object_instances` (`src/def.rs`) marks non-endpoint instances with an
+  output on a clock net, or with a clock pin that is an output or
+  clock-through input. Names compare with DEF backslash escapes removed.
 - **The binary cache is versioned.** Magic headers and `CACHE_VERSION` guard
   the on-disk format; components, raw net records, a fixed-offset net index, a
   name index and connectivity live in separate files so single-net queries read
@@ -275,9 +308,21 @@ sdc_tools/cli.py     `sdc-tools clocks` / `sdc-tools clock-cells`
   parsed with `json.loads`; the prelude must stay Tcl 8.6-compatible.
 - **Clock-tree cells come from connectivity, never names.** `clock_tree_cells`
   (`src/def.rs`) seeds nets from the SDC roots and follows input→output through
-  combinational cells; sequential cells end the trace and are not reported.
-  Liberty supplies pin directions and `ff`/`latch`; LEF is not needed.
-- **Liberty metadata parses one thread per library.** `clock_tree.py` parses
+  combinational cells; endpoints end the trace and are not reported. LEF is
+  not needed.
+- **One Liberty clock-role model, shared.** `def_tools/clock_roles.py`
+  (`CellClockRole`) feeds both the SDC trace and clock-data resolution. An
+  endpoint is a non-ICG cell with `ff`/`latch` or a `clock : true` pin
+  (memories). An integrated clock gate (`clock_gating_integrated_cell`) is
+  *not* an endpoint: its only clock-through input is its clock pin, so the
+  trace passes CK→GCK and a clock on the enable/test pin never marks it.
+  `is_seq` is unchanged (ICGs have a latch, so they are `is_seq`).
+- **The trace is pruned to clock pins by default.** A candidate is reported
+  only if a clock pin is reachable from it (backward pass in
+  `clock_tree_cells_impl`); otherwise a generated clock on a divider flop's
+  `Q` leaks into its whole datapath cone. `prune=False` / `--no-prune` keeps
+  every touched cell.
+- **Liberty metadata parses one thread per library.** `cell_clock_roles` parses
   each library with `ThreadPoolExecutor`; `parse_file` releases the GIL, so the
   set parses concurrently. Later libraries win for duplicate cell names.
 - **The safe interpreter hides `exec`, `open`, `source`, and `load`.**

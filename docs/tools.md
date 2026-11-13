@@ -9,6 +9,7 @@ command-line front ends:
 | Liberty (`.lib`, `.lib.gz`) | `liberty_tools`, `liberty_format`, `viewer` | `liberty-tools format`, `liberty-format`, `liberty-view` | [`docs/liberty.md`](liberty.md), [`docs/ai-api.md`](ai-api.md), [`docs/cli.md`](cli.md) |
 | Cell LEF (`.lef`, `.lef.gz`) | `lef_tools` | `lef-tools` | [`docs/lef.md`](lef.md) |
 | DEF (`.def`, `.def.gz`) | `def_tools` | `def-tools` | [`docs/def.md`](def.md) |
+| OTW (`.otw`, `.otw.gz`) — open timing windows, clock/data roles | `def_tools.otw`, `def_tools.clock_data` | `def-tools` | [`docs/otw.md`](otw.md) |
 | SDC (`.sdc`) | `sdc_tools` | `sdc-tools` | [`docs/sdc.md`](sdc.md) |
 | SPEF / DSPF (`.spef`, `.dspf`, `.gz`) | `pex_tools` | `pex-tools` | [`docs/pex.md`](pex.md) |
 

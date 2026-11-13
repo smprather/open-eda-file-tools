@@ -5,14 +5,12 @@ from __future__ import annotations
 import argparse
 import glob
 import gzip
-import json
 import os
 import re
 import resource
 import sys
 import time
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from liberty_tools._native import (
@@ -20,6 +18,14 @@ from liberty_tools._native import (
     write_instance_parquet,
     write_instance_table,
 )
+
+from .clock_data import (
+    ClockDataError,
+    read_clock_cells,
+    read_clock_data,
+    resolve_clock_instances,
+)
+from .clock_roles import cell_clock_roles
 
 FORMATS = ("csv", "parquet", "table")
 CANONICAL_COLUMNS = ("instance", "base_cell", "llx", "lly", "urx", "ury")
@@ -56,34 +62,53 @@ def sequential_macros(libs: Sequence[Path]) -> set[str]:
     ``skip_tables=True`` and one thread per library (``parse_file`` releases
     the GIL).
     """
-    from liberty_tools import parse_file
+    return {name for name, role in cell_clock_roles(libs).items() if role.sequential}
 
-    if not libs:
-        return set()
-    with ThreadPoolExecutor(max_workers=len(libs)) as pool:
-        documents = list(
-            pool.map(lambda path: parse_file(str(path), skip_tables=True), libs)
+
+def instance_flag_inputs(
+    def_path: Path,
+    libs: Sequence[Path],
+    clock_cells: Path | None = None,
+    clock_data: str | None = None,
+    twf: Path | None = None,
+) -> tuple[list[str] | None, list[str] | None, list[str]]:
+    """Resolve the ``is_seq`` / ``is_clock`` inputs of an instance dump.
+
+    Returns ``(sequential macros, clock instances, warnings)``; an input that
+    was not supplied is ``None``, never an empty list. ``clock_cells``,
+    ``clock_data`` (``[BACKEND:]PATH``) and ``twf`` (shorthand for
+    ``twf:PATH``) are alternatives. The libraries are parsed once for both
+    columns.
+
+    Raises ``ClockDataError`` (its ``exit_code`` tells a missing backend from
+    a malformed source), ``ValueError`` for conflicting options, and
+    ``OSError`` for unreadable files.
+    """
+    given = [
+        option
+        for option, value in (
+            ("--clock-cells", clock_cells),
+            ("--clock-data", clock_data),
+            ("--twf", twf),
         )
-    names: set[str] = set()
-    for document in documents:
-        for cell_name in document.cells():
-            cell = document.cell(cell_name)
-            if cell.ff() is not None or cell.latch() is not None:
-                names.add(cell_name)
-    return names
+        if value is not None
+    ]
+    if len(given) > 1:
+        raise ValueError(f"{' and '.join(given)} are alternatives; supply one")
+    roles = cell_clock_roles(libs) if libs else None
+    sequential = (
+        sorted(name for name, role in roles.items() if role.sequential)
+        if roles is not None
+        else None
+    )
+    if clock_cells is not None:
+        return sequential, sorted(read_clock_cells(clock_cells)), []
+    spec = f"twf:{twf}" if twf is not None else clock_data
+    if spec is None:
+        return sequential, None, []
+    resolved = resolve_clock_instances(read_clock_data(spec), def_path, roles)
+    return sequential, list(resolved.cells), resolved.warnings()
 
-
-def read_clock_cells(path: Path) -> set[str]:
-    """Read clock-tree instance names: a JSON list or one name per line."""
-    text = path.read_text(encoding="utf-8")
-    stripped = text.lstrip()
-    if stripped.startswith("["):
-        return {str(value) for value in json.loads(stripped)}
-    return {
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
 
 # Conservative sizing for --max-memory. The native Parquet batch costs much
 # less than this per row; 4 KiB/row leaves ample room for the Arrow arrays.
@@ -411,6 +436,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--def", dest="def_path", type=Path, required=True)
     parser.add_argument("--lib", type=Path, action="append", default=[])
     parser.add_argument("--clock-cells", type=Path, default=None)
+    parser.add_argument("--clock-data", default=None, metavar="[BACKEND:]PATH")
+    parser.add_argument("--twf", type=Path, default=None)
     parser.add_argument("--format", dest="fmt", choices=FORMATS, default="csv")
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--columns", type=parse_column_spec, default=None)
@@ -421,11 +448,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.batch_size < 1:
         parser.error("--batch-size must be at least 1")
     try:
-        sequential = sorted(sequential_macros(args.lib)) if args.lib else None
-        clock = sorted(read_clock_cells(args.clock_cells)) if args.clock_cells else None
+        sequential, clock, warnings = instance_flag_inputs(
+            args.def_path, args.lib, args.clock_cells, args.clock_data, args.twf
+        )
+    except ClockDataError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return exc.exit_code
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
     columns = args.columns
     if columns is None:
         columns = default_instance_columns(sequential is not None, clock is not None)

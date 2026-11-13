@@ -14,6 +14,7 @@ tool for each. One package, one version, one install.
 | Cell LEF `.lef` | `lef_tools` | `lef-tools` | [docs/lef.md](docs/lef.md) |
 | DEF `.def` | `def_tools` | `def-tools` | [docs/def.md](docs/def.md) |
 | SDC `.sdc` | `sdc_tools` | `sdc-tools` | [docs/sdc.md](docs/sdc.md) |
+| OTW `.otw` (open timing windows) | `def_tools.otw` | `def-tools` | [docs/otw.md](docs/otw.md) |
 | SPEF / DSPF `.spef`, `.dspf` | `pex_tools` | `pex-tools` | [docs/pex.md](docs/pex.md) |
 
 Liberty, LEF, DEF and SPEF/DSPF inputs are read plain or gzipped.
@@ -154,7 +155,12 @@ def-tools instances --lef "pdk/*.lef" --def design.def.gz \
     --format parquet --output instances.parquet
 ```
 
-Clock membership comes from connectivity, never from cell-name patterns.
+Clock membership comes from connectivity, never from cell-name patterns. When
+an STA run has already classified nets or pins as clock or data, skip the trace
+and pass that instead: `--clock-data design.otw.gz` reads
+[OTW](docs/otw.md), an open timing-window format defined by this project.
+Vendor timing-window files are not read here; a reader for one plugs in as a
+named backend (`--twf design.twf.gz` uses the backend called `twf`).
 
 ## Things worth knowing before you trust a number
 
@@ -170,7 +176,9 @@ Clock membership comes from connectivity, never from cell-name patterns.
   Python iterators return integer database units; `def-tools instances` and the
   instance writers convert to microns.
 - **Optional columns are never faked.** `is_seq` needs `--lib` and `is_clock`
-  needs `--clock-cells`; asking for either without its input is an error.
+  needs a clock source (`--clock-cells`, `--clock-data` or `--twf`); asking for
+  either without its input is an error, and a clock source that cannot be read
+  is a non-zero exit, never a column of `false`.
 - **The Liberty writer only touches what you changed.** Everything else in the
   file, comments and unmodelled groups included, is kept byte for byte.
 - **Comparison reports what it cannot compare.** Tables with mismatched units,
@@ -196,7 +204,7 @@ Python threads. DEF, SPEF and DSPF work is batched and parallelized in Rust.
 | [docs/ai-api.md](docs/ai-api.md) | Single-page reference for agents: decision table, typed signatures, invariants, recipes |
 | [docs/cli.md](docs/cli.md) | Every command and option |
 | [docs/liberty.md](docs/liberty.md) | Liberty tables, units, writer, comparison, `when` filtering, viewer |
-| [docs/lef.md](docs/lef.md), [docs/def.md](docs/def.md), [docs/sdc.md](docs/sdc.md), [docs/pex.md](docs/pex.md) | Per-tool guides |
+| [docs/lef.md](docs/lef.md), [docs/def.md](docs/def.md), [docs/sdc.md](docs/sdc.md), [docs/pex.md](docs/pex.md), [docs/otw.md](docs/otw.md) | Per-tool guides and the OTW format spec |
 | [docs/installation.md](docs/installation.md) | Prerequisites and install options |
 | [docs/tools.md](docs/tools.md) | How the project is organized and how to add a tool |
 | [BUILD.md](BUILD.md), [VERSIONING_PLAN.md](VERSIONING_PLAN.md) | Building wheels and the release scheme |
