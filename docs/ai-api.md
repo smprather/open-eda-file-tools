@@ -403,7 +403,7 @@ result.warnings() -> list[str]
 #   ("name=pkg.module:reader,..."). Built-ins "otw" and "names" cannot be replaced.
 # Backend contract: one role per object; any clock record makes the object "c".
 
-# OTW (def_tools.otw), spec in docs/otw.md:
+# OTW (def_tools.otw), formal spec in docs/otw.md:
 from def_tools.otw import read_otw, write_otw, write_otw_windows_csv, OtwClock, OtwWindow
 otw = read_otw(path) -> OtwFile     # ValueError "file:line: ..." when malformed
 otw.design -> str; otw.clocks -> tuple[OtwClock, ...]   # OtwClock(name, period, rise_edge, fall_edge, attributes=())
@@ -421,7 +421,11 @@ otw.object_attributes -> dict[key, dict[str, str]]            # freq (Hz), load 
 #           attributes=())    # values = rise_early, rise_late, fall_early, fall_late, then 4 slews
 write_otw(path, *, design="", time_unit=None, cap_unit=None, res_unit=None, slew_thresholds=None,
           clocks=(), attributes=(), nets=None, pins=None, windows=None,
-          domains=None, object_attributes=None) -> None    # ".gz" suffix gzips
+          domains=None, object_attributes=None, precision=6) -> None   # ".gz" suffix gzips
+# Text grammar (docs/otw.md): `n <net> <role>`; `i <instance>` then `p <pin> <role>` (instance `-` = ports);
+#   `w <clock|-> <r|f|-> <role> <8 decimals or ->`; trailing key=value attrs; mandatory `end <nets> <pins> <windows>`.
+#   Body numbers are fixed-point decimals (no exponent); precision = max fractional digits written.
+# Native reader parses group-aligned blocks in parallel (rayon); honors RAYON_NUM_THREADS.
 write_otw_windows_csv(path, output: str | None) -> int     # one CSV row per window
 
 # Binary DEF cache for repeated net/clock queries:

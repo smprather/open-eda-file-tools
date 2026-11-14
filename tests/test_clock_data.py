@@ -127,25 +127,37 @@ n n[1] c
 n n_and d
 n n_en d
 n din u
+end 9 0 2
 """
 
 PIN_OTW = """\
 otw 1
 clock clk 10 0 5
-p - clk c
-p u_buf A c
-p u_buf X c
-p u_icg CK c
-p u_icg GCK c
-p u_icg E d
-p u_icg2 E c
-p u_ff1 CK c
-p u_div CK c
-p u_div Q c
-p u_gbuf A c
-p u_mem CLK c
-p u_b[1] X c
-p u_and A d
+i -
+p clk c
+i u_buf
+p A c
+p X c
+i u_icg
+p CK c
+p GCK c
+p E d
+i u_icg2
+p E c
+i u_ff1
+p CK c
+i u_div
+p CK c
+p Q c
+i u_gbuf
+p A c
+i u_mem
+p CLK c
+i u_b[1]
+p X c
+i u_and
+p A d
+end 0 14 0
 """
 
 
@@ -283,7 +295,7 @@ def test_pin_based_otw_gives_the_same_answer(design) -> None:
 
 def test_unmatched_objects_are_reported(design, tmp_path: Path) -> None:
     source = tmp_path / "extra.otw"
-    source.write_text("otw 1\nn n_buf c\nn gone c\np ghost A c\np - nope c\n", encoding="utf-8")
+    source.write_text("otw 1\nn n_buf c\nn gone c\ni ghost\np A c\ni -\np nope c\nend 2 2 0\n", encoding="utf-8")
 
     result = clock_instances(source, design["def"], cell_clock_roles([design["lib"]]))
 
@@ -295,7 +307,7 @@ def test_unmatched_objects_are_reported(design, tmp_path: Path) -> None:
 
 def test_source_for_another_design_is_an_error(design, tmp_path: Path) -> None:
     source = tmp_path / "other.otw"
-    source.write_text("otw 1\nn some_other_clk c\n", encoding="utf-8")
+    source.write_text("otw 1\nn some_other_clk c\nend 1 0 0\n", encoding="utf-8")
 
     with pytest.raises(ClockDataError, match="does not describe this design"):
         clock_instances(source, design["def"], cell_clock_roles([design["lib"]]))
@@ -347,7 +359,7 @@ def test_otw_carries_domains_frequency_slack_and_free_attributes(tmp_path: Path)
         nets={"gated": "c", "async_in": "u"},
         pins={("u_icg", "CK"): "c"},
         domains={"gated": [1, 0], ("u_icg", "CK"): [0]},
-        object_attributes={"gated": {"freq": "5e7", "load": "3.2e-15"}},
+        object_attributes={"gated": {"freq": "5e7", "load": "0.0032"}},
         windows={
             "gated": [
                 OtwWindow(
@@ -362,7 +374,7 @@ def test_otw_carries_domains_frequency_slack_and_free_attributes(tmp_path: Path)
     parsed = read_otw(path)
     data = read_clock_data(path)
 
-    assert "n gated c clocks=0,1 freq=5e7 load=3.2e-15" in text
+    assert "n gated c clocks=0,1 freq=5e7 load=0.0032" in text
     assert (
         "w 0 r c 0.1 0.2 0.1 0.2 0.01 0.02 0.01 0.02 "
         "rise_res=0.59:0.61 rise_slack=0.31:0.37 k=2"
@@ -370,11 +382,40 @@ def test_otw_carries_domains_frequency_slack_and_free_attributes(tmp_path: Path)
     assert (parsed.cap_unit, parsed.res_unit, parsed.slew_thresholds) == (1e-12, 1e3, (10.0, 90.0))
     assert ("corner", "ss_125c") in parsed.attributes
     assert "w - - u 0.1 0.2 0.1 0.2 0.01 0.02 0.01 0.02" in text
+    assert text[-3:] == ["i u_icg", "p CK c clocks=0", "end 2 1 2"]
     assert parsed.clocks == tuple(clocks)
     assert parsed.domains == {"gated": (0, 1), ("u_icg", "CK"): (0,)}
     assert parsed.domain_names("gated") == ("clk", "div2")
-    assert parsed.object_attributes == {"gated": {"freq": "5e7", "load": "3.2e-15"}}
+    assert parsed.object_attributes == {"gated": {"freq": "5e7", "load": "0.0032"}}
     assert data.domains == {"gated": ("clk", "div2"), ("u_icg", "CK"): ("clk",)}
+
+
+def test_write_otw_numbers_are_fixed_point_without_exponent(tmp_path: Path) -> None:
+    path = tmp_path / "small.otw"
+    values = (1e-5, 2.5, None, None, 1e-9, 0.0, None, None)
+
+    write_otw(
+        path,
+        clocks=[OtwClock("clk", 10.0, 0.0, 5.0)],
+        nets={"n": "d"},
+        windows={"n": [OtwWindow(0, "r", "d", values, rise_slack=(-0.25, 1e-7))]},
+        precision=7,
+    )
+
+    assert "w 0 r d 0.00001 2.5 - - 0 0 - - rise_slack=-0.25:0.0000001" in path.read_text()
+    assert read_otw(path).windows == 1
+
+
+def test_gzip_members_may_be_concatenated(tmp_path: Path) -> None:
+    # A writer may compress groups independently and append the members.
+    path = tmp_path / "members.otw.gz"
+    parts = [b"otw 1\nn a c\n", b"i u\np Z c\n", b"n b d\nend 2 1 0\n"]
+    path.write_bytes(b"".join(gzip.compress(part) for part in parts))
+
+    parsed = read_otw(path)
+
+    assert parsed.nets == {"a": "c", "b": "d"}
+    assert parsed.pins == {("u", "Z"): "c"}
 
 
 def test_write_otw_refuses_what_the_reader_would_reject(tmp_path: Path) -> None:
@@ -404,9 +445,9 @@ def test_missing_backend_and_malformed_source_are_distinct_errors(tmp_path: Path
     twf = tmp_path / "design.twf"
     twf.write_text("(TIMING_WINDOWS)\n", encoding="utf-8")
     bad = tmp_path / "bad.otw"
-    bad.write_text("otw 1\nn clk q\n", encoding="utf-8")
+    bad.write_text("otw 1\nn clk q\nend 1 0 0\n", encoding="utf-8")
     empty = tmp_path / "empty.otw"
-    empty.write_text("otw 1\n", encoding="utf-8")
+    empty.write_text("otw 1\nend 0 0 0\n", encoding="utf-8")
 
     with pytest.raises(ClockDataBackendError, match="no `twf` clock-data backend"):
         read_clock_data(twf)
@@ -499,7 +540,7 @@ def test_instances_cli_twf_uses_a_plugged_in_backend(
 
 def test_instances_cli_malformed_source_exits_4(design, tmp_path: Path) -> None:
     bad = tmp_path / "bad.otw"
-    bad.write_text("otw 1\nn clk c\nn clk d\n", encoding="utf-8")
+    bad.write_text("otw 1\nn clk c\nn clk d\nend 2 0 0\n", encoding="utf-8")
 
     result, _rows = instances_cli(design, "--clock-data", str(bad))
 

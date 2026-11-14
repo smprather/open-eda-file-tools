@@ -154,12 +154,14 @@ def _role(value: str, what: str) -> str:
     return value
 
 
-def _number(value: float | None) -> str:
-    if value is None:
-        return "-"
+def _decimal(value: float, precision: int) -> str:
+    """``value`` as an OTW decimal: fixed point, no exponent, no padding."""
     if not math.isfinite(value):
-        raise ValueError(f"window value {value!r} is not finite")
-    return f"{value:g}"
+        raise ValueError(f"value {value!r} is not finite")
+    text = f"{value:.{precision}f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text in ("-0", "") else text
 
 
 def _attributes(pairs, reserved: tuple[str, ...], what: str) -> str:
@@ -186,6 +188,7 @@ def write_otw(
     windows: Mapping[ObjectKey, Sequence[OtwWindow]] | None = None,
     domains: Mapping[ObjectKey, Sequence[int]] | None = None,
     object_attributes: Mapping[ObjectKey, Mapping[str, str]] | None = None,
+    precision: int = 6,
 ) -> None:
     """Write an OTW file; a ``.gz`` suffix gzips it.
 
@@ -196,6 +199,15 @@ def write_otw(
     ``key=value`` pairs such as ``freq`` (hertz). An object with a clock window
     must have role ``c``; anything the reader would reject raises
     ``ValueError`` here.
+
+    Window values and ranges are written as fixed-point decimals with at most
+    ``precision`` fractional digits (OTW body numbers carry no exponent), so
+    pick ``time_unit`` to suit: with ``1e-9`` the default keeps femtoseconds.
+
+    This writer is a convenience for tests and converters of modest size; it
+    builds the file in memory. Each net and each instance is an independent
+    group, so a high-volume writer can format groups on many threads and
+    append them in any order.
     """
     nets = nets or {}
     pins = pins or {}
@@ -225,7 +237,7 @@ def write_otw(
         lines.append(f"slew_thresholds {low:g} {high:g}")
     reserved = {
         "otw", "design", "time_unit", "cap_unit", "res_unit", "slew_thresholds",
-        "clock", "n", "p", "w",
+        "clock", "n", "i", "p", "w", "end",
     }
     for key, value in attributes:
         if key in reserved or "\n" in value:
@@ -263,9 +275,11 @@ def write_otw(
                 raise ValueError(f"{key!r}: an object with a clock window must have role 'c'")
             if len(window.values) != len(WINDOW_FIELDS):
                 raise ValueError(f"{key!r}: a window carries {len(WINDOW_FIELDS)} values")
-            values = " ".join(_number(value) for value in window.values)
+            values = " ".join(
+                "-" if value is None else _decimal(value, precision) for value in window.values
+            )
             slack = [
-                (name, f"{_number(value[0])}:{_number(value[1])}")
+                (name, f"{_decimal(value[0], precision)}:{_decimal(value[1], precision)}")
                 for name, value in (
                     ("rise_res", window.rise_res),
                     ("rise_slack", window.rise_slack),
@@ -288,12 +302,20 @@ def write_otw(
     for name, role in nets.items():
         lines.append(f"n {_token(name, 'net')} {_role(role, name)}" + object_suffix(name))
         emit_windows(name, role)
+    # All pins of an instance form one `i` group.
+    by_instance: dict[str, list[tuple[str, str]]] = {}
     for (instance, pin), role in pins.items():
-        lines.append(
-            f"p {_token(instance, 'instance')} {_token(pin, 'pin')} "
-            f"{_role(role, f'{instance} {pin}')}" + object_suffix((instance, pin))
-        )
-        emit_windows((instance, pin), role)
+        by_instance.setdefault(instance, []).append((pin, role))
+    for instance, members in by_instance.items():
+        lines.append(f"i {_token(instance, 'instance')}")
+        for pin, role in members:
+            lines.append(
+                f"p {_token(pin, 'pin')} {_role(role, f'{instance} {pin}')}"
+                + object_suffix((instance, pin))
+            )
+            emit_windows((instance, pin), role)
+    window_count = sum(len(windows.get(key, ())) for key in (*nets, *pins))
+    lines.append(f"end {len(nets)} {len(pins)} {window_count}")
 
     text = "\n".join(lines) + "\n"
     target = Path(path)

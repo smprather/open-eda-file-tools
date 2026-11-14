@@ -1,34 +1,44 @@
 //! OTW (Open Timing Windows) reader.
 //!
 //! OTW is this project's own open, line-oriented timing-window format; it is
-//! not a dialect of any vendor's TWF. The full specification is `docs/otw.md`.
+//! not a dialect of any vendor's TWF. The normative specification is
+//! `docs/otw.md`.
 //!
 //! ```text
 //! otw 1
 //! design top
 //! time_unit 1e-9
 //! clock clk 10 0 5
-//! n clk_leaf_3 c clocks=0 freq=1e8
-//! w 0 r c 0.10 0.14 - - 0.02 0.03 - - rise_res=0.59:0.61 rise_slack=0.31:0.37
-//! p u_gate CK c
-//! p - clk c
+//! n clk_leaf_3 c clocks=0
+//! w 0 r c 0.10 0.14 - - 0.02 0.03 - - rise_res=0.59:0.61
+//! i u_gate
+//! p CK c
+//! p E d
+//! i -
+//! p clk c
+//! end 1 3 1
 //! ```
 //!
-//! An object (`n` net, `p` pin) is declared exactly once and states its own
-//! role, so there is never a per-record conflict to arbitrate. `w` lines are
-//! the timing windows of the object declared above them. `clock`, `n`, `p` and
-//! `w` lines may end with `key=value` attributes; unknown keys are preserved.
+//! The body is a sequence of independent *groups*: an `n` line with its `w`
+//! lines, or an `i` line with its `p` lines (each with its `w` lines). No group
+//! refers to another, so the reader cuts the input into blocks at group
+//! boundaries and parses the blocks in parallel.
 
 use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
-use std::collections::HashSet;
+use rayon::prelude::*;
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::hash::{Hash, Hasher};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::lef::open_input;
 
 pub const OTW_VERSION: &str = "1";
+/// Target size of one parallel parse block.
+const BLOCK_BYTES: usize = 4 << 20;
 const ROLES: &[u8] = b"cduz";
 const WINDOW_VALUES: usize = 8;
 const WINDOW_COLUMNS: [&str; WINDOW_VALUES] = [
@@ -41,6 +51,8 @@ const WINDOW_COLUMNS: [&str; WINDOW_VALUES] = [
     "fall_slew_min",
     "fall_slew_max",
 ];
+/// Window attributes that hold a `min:max` range (or one number for both).
+const RANGE_ATTRS: [&str; 4] = ["rise_res", "rise_slack", "fall_res", "fall_slack"];
 
 #[derive(Debug)]
 pub enum OtwError {
@@ -57,12 +69,6 @@ impl OtwError {
     }
 }
 
-/// The object a run of `w` lines belongs to.
-pub enum Object<'a> {
-    Net { name: &'a str },
-    Pin { instance: &'a str, pin: &'a str },
-}
-
 /// Trailing `key=value` tokens of a line, in file order.
 pub type Attrs<'a> = [(&'a str, &'a str)];
 
@@ -76,14 +82,19 @@ pub struct Window<'a> {
     pub attrs: &'a Attrs<'a>,
 }
 
-pub trait Visitor {
-    fn object(
+/// Receives the records of one block. Blocks are parsed concurrently, each
+/// into its own sink, and the sinks are then merged in file order.
+pub trait Sink: Default + Send {
+    fn net(&mut self, name: &str, role: &str, attrs: &Attrs<'_>);
+    fn pin(
         &mut self,
-        object: &Object<'_>,
+        instance: &str,
+        first_of_instance: bool,
+        pin: &str,
         role: &str,
         attrs: &Attrs<'_>,
-    ) -> Result<(), OtwError>;
-    fn window(&mut self, window: &Window<'_>) -> Result<(), OtwError>;
+    );
+    fn window(&mut self, window: &Window<'_>);
 }
 
 /// `(name, period, rise_edge, fall_edge, attributes)`.
@@ -104,6 +115,8 @@ pub struct Header {
     pub attributes: Vec<(String, String)>,
 }
 
+type Tokens<'a> = std::str::SplitAsciiWhitespace<'a>;
+
 fn role_token<'a>(token: Option<&'a str>, what: &str) -> Result<&'a str, String> {
     match token {
         Some(role) if role.len() == 1 && ROLES.contains(&role.as_bytes()[0]) => Ok(role),
@@ -114,34 +127,44 @@ fn role_token<'a>(token: Option<&'a str>, what: &str) -> Result<&'a str, String>
     }
 }
 
-fn number(token: Option<&str>, what: &str) -> Result<f64, String> {
+/// A header or attribute number: any finite real, exponent allowed.
+fn real(token: Option<&str>, what: &str) -> Result<f64, String> {
     let text = token.ok_or_else(|| format!("missing {what}"))?;
     text.parse::<f64>()
-        .map_err(|_| format!("{what} is not a number: `{text}`"))
+        .ok()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| format!("{what} is not a number: `{text}`"))
 }
 
-fn no_more(tokens: &mut std::str::SplitAsciiWhitespace<'_>, what: &str) -> Result<(), String> {
+/// A body number: `[-]digits[.digits]`, no exponent. Checked without
+/// converting, so a reader that only needs roles never parses a float.
+fn is_decimal(text: &str) -> bool {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, "0"));
+    let all_digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    all_digits(whole) && all_digits(fraction)
+}
+
+fn check_range(key: &str, value: &str) -> Result<(), String> {
+    let (low, high) = value.split_once(':').unwrap_or((value, value));
+    if is_decimal(low) && is_decimal(high) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{key} must be a decimal or a min:max pair of decimals: `{value}`"
+        ))
+    }
+}
+
+fn no_more(tokens: &mut Tokens<'_>, what: &str) -> Result<(), String> {
     match tokens.next() {
         Some(extra) => Err(format!("unexpected token `{extra}` after {what}")),
         None => Ok(()),
     }
 }
 
-/// Window attributes that hold a `min:max` range (or one number for both).
-const RANGE_ATTRS: [&str; 4] = ["rise_res", "rise_slack", "fall_res", "fall_slack"];
-
-fn check_range(key: &str, value: &str) -> Result<(), String> {
-    let (low, high) = value.split_once(':').unwrap_or((value, value));
-    number(Some(low), key)?;
-    number(Some(high), key)?;
-    Ok(())
-}
-
 /// The rest of a line must be `key=value` attributes.
-fn attributes<'a>(
-    tokens: &mut std::str::SplitAsciiWhitespace<'a>,
-    what: &str,
-) -> Result<Vec<(&'a str, &'a str)>, String> {
+fn attributes<'a>(tokens: &mut Tokens<'a>, what: &str) -> Result<Vec<(&'a str, &'a str)>, String> {
     let mut attrs = Vec::new();
     for token in tokens {
         match token.split_once('=') {
@@ -186,8 +209,7 @@ fn check_object_attrs(attrs: &Attrs<'_>, declared: usize) -> Result<(), String> 
                 clock_indices(value, declared)?;
             }
             "freq" => {
-                let hertz = number(Some(value), "freq")?;
-                if !(hertz.is_finite() && hertz >= 0.0) {
+                if real(Some(value), "freq")? < 0.0 {
                     return Err(format!(
                         "freq must be a non-negative number of hertz: `{value}`"
                     ));
@@ -205,36 +227,51 @@ fn check_object_attrs(attrs: &Attrs<'_>, declared: usize) -> Result<(), String> 
     Ok(())
 }
 
-/// Parse `path`, feeding objects and windows to `visitor` in file order.
-pub fn parse_otw<V: Visitor>(path: &Path, visitor: &mut V) -> Result<Header, OtwError> {
-    let io_err = |err: io::Error| OtwError::Io(format!("{}: {err}", path.display()));
-    let mut reader = BufReader::with_capacity(1 << 20, open_input(path).map_err(io_err)?);
-    let mut header = Header::default();
-    let mut raw = Vec::with_capacity(256);
-    let mut line_no = 0u64;
-    let mut versioned = false;
-    let mut in_body = false;
-    // Role of the object the following `w` lines belong to.
-    let mut object_role: Option<u8> = None;
+/// A line as ASCII text, without its line ending or surrounding blanks.
+fn ascii_line(raw: &[u8]) -> Result<&str, String> {
+    if !raw.is_ascii() {
+        return Err("line contains a non-ASCII byte".to_string());
+    }
+    // ASCII is valid UTF-8, so this cannot fail.
+    Ok(std::str::from_utf8(raw).unwrap_or_default().trim())
+}
 
-    loop {
-        raw.clear();
-        if reader.read_until(b'\n', &mut raw).map_err(io_err)? == 0 {
-            break;
-        }
-        line_no += 1;
-        let fail = |message: String| {
-            OtwError::Malformed(format!("{}:{line_no}: {message}", path.display()))
+/// `true` when a line starts the body (`n`, `i`) or ends the file (`end`).
+fn starts_body(keyword: &str) -> bool {
+    matches!(keyword, "n" | "i" | "end")
+}
+
+/// The header, the offset of the first body line, and the lines before it.
+type ParsedHeader = (Header, usize, u64);
+/// `(line, message)`.
+type LineError = (u64, String);
+
+/// Parse the header at the start of `data`.
+///
+/// Returns the header, the offset of the first body line and the number of
+/// lines before it; `Ok(None)` when `data` ends inside the header and more
+/// input exists. Errors are `(line, message)`.
+fn parse_header(data: &[u8], at_eof: bool) -> Result<Option<ParsedHeader>, LineError> {
+    let mut header = Header::default();
+    let mut versioned = false;
+    let mut offset = 0usize;
+    let mut line_no = 0u64;
+    while offset < data.len() {
+        let end = match data[offset..].iter().position(|byte| *byte == b'\n') {
+            Some(length) => offset + length,
+            None if at_eof => data.len(),
+            None => return Ok(None),
         };
-        let line = std::str::from_utf8(&raw)
-            .map_err(|_| fail("line is not valid UTF-8".to_string()))?
-            .trim();
+        let fail = |message: String| (line_no + 1, message);
+        let line = ascii_line(&data[offset..end]).map_err(fail)?;
+        let next = (end + 1).min(data.len());
         if line.is_empty() || line.starts_with('#') {
+            offset = next;
+            line_no += 1;
             continue;
         }
         let mut tokens = line.split_ascii_whitespace();
         let keyword = tokens.next().unwrap_or_default();
-
         if !versioned {
             if keyword != "otw" {
                 return Err(fail(
@@ -250,185 +287,411 @@ pub fn parse_otw<V: Visitor>(path: &Path, visitor: &mut V) -> Result<Header, Otw
                 }
                 None => return Err(fail("`otw` line has no version".to_string())),
             }
+            no_more(&mut tokens, "the version").map_err(fail)?;
             versioned = true;
-            continue;
-        }
-
-        match keyword {
-            "w" => {
-                let Some(owner) = object_role else {
-                    return Err(fail("`w` line before any `n` or `p` object".to_string()));
-                };
-                let clock_text = tokens
-                    .next()
-                    .ok_or_else(|| fail("`w` line has no clock index".to_string()))?;
-                let clock = if clock_text == "-" {
-                    None
-                } else {
-                    Some(
-                        clock_text
-                            .parse::<usize>()
-                            .ok()
-                            .filter(|index| *index < header.clocks.len())
-                            .ok_or_else(|| {
-                                fail(format!(
-                                    "`w` clock index `{clock_text}` does not name one of the {} declared clocks",
-                                    header.clocks.len()
-                                ))
-                            })?,
-                    )
-                };
-                let edge = match (tokens.next(), clock) {
-                    (Some(edge @ ("r" | "f")), Some(_)) => edge,
-                    (Some(edge @ "-"), None) => edge,
-                    (other, Some(_)) => {
-                        return Err(fail(format!(
-                            "`w` launch edge must be r or f; found `{}`",
-                            other.unwrap_or("")
-                        )));
-                    }
-                    (other, None) => {
-                        return Err(fail(format!(
-                            "`w` with no launching clock (`-`) takes edge `-`; found `{}`",
-                            other.unwrap_or("")
-                        )));
-                    }
-                };
-                let role = role_token(tokens.next(), "`w`").map_err(fail)?;
-                if role == "c" && owner != b'c' {
-                    return Err(fail(format!(
-                        "clock window on an object declared `{}`: an object with any clock window must be declared `c`",
-                        owner as char
-                    )));
+        } else if starts_body(keyword) {
+            return Ok(Some((header, offset, line_no)));
+        } else {
+            match keyword {
+                "p" | "w" => {
+                    return Err(fail(format!("`{keyword}` line before any `n` or `i` line")));
                 }
-                let mut values = [""; WINDOW_VALUES];
-                for (slot, column) in values.iter_mut().zip(WINDOW_COLUMNS) {
-                    *slot = tokens
+                "design" => {
+                    header.design = tokens
                         .next()
-                        .ok_or_else(|| fail(format!("`w` line is missing {column}")))?;
+                        .ok_or_else(|| fail("`design` line has no name".to_string()))?
+                        .to_string();
+                    no_more(&mut tokens, "the design name").map_err(fail)?;
                 }
-                let attrs = attributes(&mut tokens, "the eight window values").map_err(fail)?;
-                for (key, value) in &attrs {
-                    if RANGE_ATTRS.contains(key) {
-                        check_range(key, value).map_err(fail)?;
+                "time_unit" | "cap_unit" | "res_unit" => {
+                    let value = real(tokens.next(), keyword).map_err(fail)?;
+                    if value <= 0.0 {
+                        return Err(fail(format!("{keyword} must be a positive number")));
+                    }
+                    no_more(&mut tokens, keyword).map_err(fail)?;
+                    match keyword {
+                        "time_unit" => header.time_unit = Some(value),
+                        "cap_unit" => header.cap_unit = Some(value),
+                        _ => header.res_unit = Some(value),
                     }
                 }
-                visitor.window(&Window {
-                    clock,
-                    edge,
-                    role,
-                    values,
-                    attrs: &attrs,
-                })?;
-            }
-            "n" => {
-                in_body = true;
-                let name = tokens
-                    .next()
-                    .ok_or_else(|| fail("`n` line has no net name".to_string()))?;
-                let role = role_token(tokens.next(), "`n`").map_err(fail)?;
-                let attrs = attributes(&mut tokens, "the role").map_err(fail)?;
-                check_object_attrs(&attrs, header.clocks.len()).map_err(fail)?;
-                object_role = Some(role.as_bytes()[0]);
-                visitor
-                    .object(&Object::Net { name }, role, &attrs)
-                    .map_err(|err| relabel(err, path, line_no))?;
-            }
-            "p" => {
-                in_body = true;
-                let instance = tokens
-                    .next()
-                    .ok_or_else(|| fail("`p` line has no instance".to_string()))?;
-                let pin = tokens
-                    .next()
-                    .ok_or_else(|| fail("`p` line has no pin name".to_string()))?;
-                let role = role_token(tokens.next(), "`p`").map_err(fail)?;
-                let attrs = attributes(&mut tokens, "the role").map_err(fail)?;
-                check_object_attrs(&attrs, header.clocks.len()).map_err(fail)?;
-                object_role = Some(role.as_bytes()[0]);
-                visitor
-                    .object(&Object::Pin { instance, pin }, role, &attrs)
-                    .map_err(|err| relabel(err, path, line_no))?;
-            }
-            _ if in_body => {
-                return Err(fail(format!(
-                    "unknown record `{keyword}`; header lines must come before the first object"
-                )));
-            }
-            "design" => {
-                header.design = tokens
-                    .next()
-                    .ok_or_else(|| fail("`design` line has no name".to_string()))?
-                    .to_string();
-            }
-            "time_unit" | "cap_unit" | "res_unit" => {
-                let value = number(tokens.next(), keyword).map_err(fail)?;
-                if !(value.is_finite() && value > 0.0) {
-                    return Err(fail(format!("{keyword} must be a positive number")));
+                "slew_thresholds" => {
+                    let low = real(tokens.next(), "lower slew threshold").map_err(fail)?;
+                    let high = real(tokens.next(), "upper slew threshold").map_err(fail)?;
+                    no_more(&mut tokens, "the slew thresholds").map_err(fail)?;
+                    if !(0.0 <= low && low < high && high <= 100.0) {
+                        return Err(fail(
+                            "slew_thresholds must be two percentages with 0 <= low < high <= 100"
+                                .to_string(),
+                        ));
+                    }
+                    header.slew_thresholds = Some((low, high));
                 }
-                no_more(&mut tokens, keyword).map_err(fail)?;
-                match keyword {
-                    "time_unit" => header.time_unit = Some(value),
-                    "cap_unit" => header.cap_unit = Some(value),
-                    _ => header.res_unit = Some(value),
+                "clock" => {
+                    let name = tokens
+                        .next()
+                        .ok_or_else(|| fail("`clock` line has no name".to_string()))?
+                        .to_string();
+                    let period = real(tokens.next(), "clock period").map_err(fail)?;
+                    let rise = real(tokens.next(), "clock rise edge").map_err(fail)?;
+                    let fall = real(tokens.next(), "clock fall edge").map_err(fail)?;
+                    let attrs = attributes(&mut tokens, "the clock fall edge")
+                        .map_err(fail)?
+                        .into_iter()
+                        .map(|(key, value)| (key.to_string(), value.to_string()))
+                        .collect();
+                    if header.clocks.iter().any(|clock| clock.0 == name) {
+                        return Err(fail(format!("clock `{name}` is declared more than once")));
+                    }
+                    header.clocks.push((name, period, rise, fall, attrs));
+                }
+                _ => {
+                    let rest = line[keyword.len()..].trim().to_string();
+                    header.attributes.push((keyword.to_string(), rest));
                 }
             }
-            "slew_thresholds" => {
-                let low = number(tokens.next(), "lower slew threshold").map_err(fail)?;
-                let high = number(tokens.next(), "upper slew threshold").map_err(fail)?;
-                no_more(&mut tokens, "the slew thresholds").map_err(fail)?;
-                if !(0.0 <= low && low < high && high <= 100.0) {
-                    return Err(fail(
-                        "slew_thresholds must be two percentages with 0 <= low < high <= 100"
-                            .to_string(),
+        }
+        offset = next;
+        line_no += 1;
+    }
+    if !at_eof {
+        return Ok(None);
+    }
+    if !versioned {
+        return Err((
+            line_no.max(1),
+            "not an OTW file: the first line must be `otw <version>`".to_string(),
+        ));
+    }
+    Ok(Some((header, data.len(), line_no)))
+}
+
+/// What one block contained.
+struct BlockOut<S> {
+    sink: S,
+    lines: u64,
+    nets: u64,
+    pins: u64,
+    windows: u64,
+    /// The block holds at least one record line (comments and blanks excluded).
+    has_records: bool,
+    /// Counts on the `end` line, when the block holds it.
+    end: Option<(u64, u64, u64)>,
+    /// First error: line within the block (1-based) and message.
+    error: Option<(u64, String)>,
+}
+
+fn count(token: Option<&str>, what: &str) -> Result<u64, String> {
+    let text = token.ok_or_else(|| format!("`end` line is missing the {what} count"))?;
+    text.parse::<u64>()
+        .map_err(|_| format!("`end` {what} count is not a number: `{text}`"))
+}
+
+fn parse_block<S: Sink>(data: &[u8], declared_clocks: usize) -> BlockOut<S> {
+    let mut out = BlockOut {
+        sink: S::default(),
+        lines: 0,
+        nets: 0,
+        pins: 0,
+        windows: 0,
+        has_records: false,
+        end: None,
+        error: None,
+    };
+    // Role of the object the following `w` lines belong to.
+    let mut owner: Option<u8> = None;
+    // The open `i` group: its instance and the pins seen so far.
+    let mut instance: Option<&str> = None;
+    let mut group_pins: Vec<&str> = Vec::new();
+
+    for raw in data.split(|byte| *byte == b'\n') {
+        out.lines += 1;
+        let mut step = || -> Result<(), String> {
+            let line = ascii_line(raw)?;
+            if line.is_empty() || line.starts_with('#') {
+                return Ok(());
+            }
+            if out.end.is_some() {
+                return Err("content after the `end` line".to_string());
+            }
+            out.has_records = true;
+            let mut tokens = line.split_ascii_whitespace();
+            match tokens.next().unwrap_or_default() {
+                "w" => {
+                    let Some(owner_role) = owner else {
+                        return Err("`w` line with no `n` or `p` object above it".to_string());
+                    };
+                    let clock_text = tokens
+                        .next()
+                        .ok_or_else(|| "`w` line has no clock index".to_string())?;
+                    let clock = if clock_text == "-" {
+                        None
+                    } else {
+                        Some(
+                            clock_text
+                                .parse::<usize>()
+                                .ok()
+                                .filter(|index| *index < declared_clocks)
+                                .ok_or_else(|| {
+                                    format!(
+                                        "`w` clock index `{clock_text}` does not name one of the {declared_clocks} declared clocks"
+                                    )
+                                })?,
+                        )
+                    };
+                    let edge = match (tokens.next(), clock) {
+                        (Some(edge @ ("r" | "f")), Some(_)) => edge,
+                        (Some(edge @ "-"), None) => edge,
+                        (other, Some(_)) => {
+                            return Err(format!(
+                                "`w` launch edge must be r or f; found `{}`",
+                                other.unwrap_or("")
+                            ));
+                        }
+                        (other, None) => {
+                            return Err(format!(
+                                "`w` with no launching clock (`-`) takes edge `-`; found `{}`",
+                                other.unwrap_or("")
+                            ));
+                        }
+                    };
+                    let role = role_token(tokens.next(), "`w`")?;
+                    if role == "c" && owner_role != b'c' {
+                        return Err(format!(
+                            "clock window on an object declared `{}`: an object with any clock window must be declared `c`",
+                            owner_role as char
+                        ));
+                    }
+                    let mut values = [""; WINDOW_VALUES];
+                    for (slot, column) in values.iter_mut().zip(WINDOW_COLUMNS) {
+                        let value = tokens
+                            .next()
+                            .ok_or_else(|| format!("`w` line is missing {column}"))?;
+                        if value != "-" && !is_decimal(value) {
+                            return Err(format!(
+                                "{column} must be a decimal without exponent, or `-`: `{value}`"
+                            ));
+                        }
+                        *slot = value;
+                    }
+                    let attrs = attributes(&mut tokens, "the eight window values")?;
+                    for (key, value) in &attrs {
+                        if RANGE_ATTRS.contains(key) {
+                            check_range(key, value)?;
+                        }
+                    }
+                    out.windows += 1;
+                    out.sink.window(&Window {
+                        clock,
+                        edge,
+                        role,
+                        values,
+                        attrs: &attrs,
+                    });
+                }
+                "p" => {
+                    let Some(owner_instance) = instance else {
+                        return Err("`p` line outside an `i` group".to_string());
+                    };
+                    let pin = tokens
+                        .next()
+                        .ok_or_else(|| "`p` line has no pin name".to_string())?;
+                    let role = role_token(tokens.next(), "`p`")?;
+                    let attrs = attributes(&mut tokens, "the role")?;
+                    check_object_attrs(&attrs, declared_clocks)?;
+                    if group_pins.contains(&pin) {
+                        return Err(format!(
+                            "pin `{owner_instance} {pin}` is declared more than once"
+                        ));
+                    }
+                    out.sink
+                        .pin(owner_instance, group_pins.is_empty(), pin, role, &attrs);
+                    group_pins.push(pin);
+                    owner = Some(role.as_bytes()[0]);
+                    out.pins += 1;
+                }
+                "n" => {
+                    let name = tokens
+                        .next()
+                        .ok_or_else(|| "`n` line has no net name".to_string())?;
+                    let role = role_token(tokens.next(), "`n`")?;
+                    let attrs = attributes(&mut tokens, "the role")?;
+                    check_object_attrs(&attrs, declared_clocks)?;
+                    instance = None;
+                    owner = Some(role.as_bytes()[0]);
+                    out.nets += 1;
+                    out.sink.net(name, role, &attrs);
+                }
+                "i" => {
+                    let name = tokens
+                        .next()
+                        .ok_or_else(|| "`i` line has no instance name".to_string())?;
+                    no_more(&mut tokens, "the instance name")?;
+                    instance = Some(name);
+                    group_pins.clear();
+                    owner = None;
+                }
+                "end" => {
+                    let nets = count(tokens.next(), "net")?;
+                    let pins = count(tokens.next(), "pin")?;
+                    let windows = count(tokens.next(), "window")?;
+                    no_more(&mut tokens, "the `end` counts")?;
+                    out.end = Some((nets, pins, windows));
+                }
+                keyword => {
+                    return Err(format!(
+                        "unknown record `{keyword}`; header lines must come before the first object"
                     ));
                 }
-                header.slew_thresholds = Some((low, high));
             }
-            "clock" => {
-                let name = tokens
-                    .next()
-                    .ok_or_else(|| fail("`clock` line has no name".to_string()))?
-                    .to_string();
-                let period = number(tokens.next(), "clock period").map_err(fail)?;
-                let rise = number(tokens.next(), "clock rise edge").map_err(fail)?;
-                let fall = number(tokens.next(), "clock fall edge").map_err(fail)?;
-                let attrs = attributes(&mut tokens, "the clock fall edge")
-                    .map_err(fail)?
-                    .into_iter()
-                    .map(|(key, value)| (key.to_string(), value.to_string()))
-                    .collect();
-                header.clocks.push((name, period, rise, fall, attrs));
+            Ok(())
+        };
+        if let Err(message) = step() {
+            out.error = Some((out.lines, message));
+            break;
+        }
+    }
+    out
+}
+
+/// Hands out the input in blocks that end at a group boundary.
+struct Blocks<R: Read> {
+    reader: R,
+    buffer: Vec<u8>,
+    at_eof: bool,
+}
+
+impl<R: Read> Blocks<R> {
+    /// Read until the buffer holds `target` bytes or the input ends.
+    fn fill(&mut self, target: usize) -> io::Result<()> {
+        while !self.at_eof && self.buffer.len() < target {
+            let start = self.buffer.len();
+            self.buffer.resize(target, 0);
+            let mut filled = start;
+            while filled < target {
+                match self.reader.read(&mut self.buffer[filled..]) {
+                    Ok(0) => {
+                        self.at_eof = true;
+                        break;
+                    }
+                    Ok(read) => filled += read,
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                    Err(err) => return Err(err),
+                }
             }
-            _ => {
-                let rest = line[keyword.len()..].trim().to_string();
-                header.attributes.push((keyword.to_string(), rest));
+            self.buffer.truncate(filled);
+        }
+        Ok(())
+    }
+
+    /// The next block of body lines, cut just before an `n`, `i` or `end` line.
+    fn next_block(&mut self) -> io::Result<Option<Vec<u8>>> {
+        let mut target = BLOCK_BYTES;
+        loop {
+            self.fill(target)?;
+            if self.at_eof {
+                if self.buffer.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(std::mem::take(&mut self.buffer)));
             }
+            let cut = self
+                .buffer
+                .windows(2)
+                .rposition(|pair| pair[0] == b'\n' && matches!(pair[1], b'n' | b'i' | b'e'));
+            if let Some(newline) = cut {
+                let rest = self.buffer.split_off(newline + 1);
+                return Ok(Some(std::mem::replace(&mut self.buffer, rest)));
+            }
+            target *= 2;
+        }
+    }
+}
+
+/// Parse `path`: the header sequentially, then the body block by block in
+/// parallel. `merge` receives each block's sink in file order. Returns the
+/// header and the number of `w` lines.
+pub fn parse_otw<S: Sink>(
+    path: &Path,
+    mut merge: impl FnMut(S) -> Result<(), OtwError>,
+) -> Result<(Header, u64), OtwError> {
+    let io_err = |err: io::Error| OtwError::Io(format!("{}: {err}", path.display()));
+    let malformed = |line: u64, message: String| {
+        OtwError::Malformed(format!("{}:{line}: {message}", path.display()))
+    };
+    let mut blocks = Blocks {
+        reader: open_input(path).map_err(io_err)?,
+        buffer: Vec::new(),
+        at_eof: false,
+    };
+
+    let mut target = BLOCK_BYTES;
+    let (header, mut line_base) = loop {
+        blocks.fill(target).map_err(io_err)?;
+        match parse_header(&blocks.buffer, blocks.at_eof) {
+            Ok(Some((header, body_start, lines))) => {
+                blocks.buffer.drain(..body_start);
+                break (header, lines);
+            }
+            Ok(None) => target *= 2,
+            Err((line, message)) => return Err(malformed(line, message)),
+        }
+    };
+
+    let declared_clocks = header.clocks.len();
+    let batch_size = rayon::current_num_threads().max(1);
+    let (mut nets, mut pins, mut windows) = (0u64, 0u64, 0u64);
+    let mut end: Option<(u64, u64, u64)> = None;
+    loop {
+        let mut batch = Vec::with_capacity(batch_size);
+        while batch.len() < batch_size {
+            match blocks.next_block().map_err(io_err)? {
+                Some(block) => batch.push(block),
+                None => break,
+            }
+        }
+        if batch.is_empty() {
+            break;
+        }
+        let parsed: Vec<BlockOut<S>> = batch
+            .par_iter()
+            .map(|block| parse_block(block, declared_clocks))
+            .collect();
+        for (block, out) in batch.iter().zip(parsed) {
+            if end.is_some() && out.has_records {
+                return Err(malformed(
+                    line_base + 1,
+                    "content after the `end` line".to_string(),
+                ));
+            }
+            if let Some((line, message)) = out.error {
+                return Err(malformed(line_base + line, message));
+            }
+            // A block that ends with a newline splits into one empty tail.
+            line_base += out.lines - u64::from(block.ends_with(b"\n"));
+            nets += out.nets;
+            pins += out.pins;
+            windows += out.windows;
+            end = end.or(out.end);
+            merge(out.sink)?;
         }
     }
 
-    if !versioned {
-        return Err(OtwError::Malformed(format!(
-            "{}: not an OTW file: the first line must be `otw <version>`",
+    match end {
+        None => Err(OtwError::Malformed(format!(
+            "{}: no `end` line: the file is truncated",
             path.display()
-        )));
-    }
-    Ok(header)
-}
-
-/// Visitors report problems without knowing where they are; add the location.
-fn relabel(err: OtwError, path: &Path, line_no: u64) -> OtwError {
-    match err {
-        OtwError::Malformed(message) => {
-            OtwError::Malformed(format!("{}:{line_no}: {message}", path.display()))
-        }
-        other => other,
+        ))),
+        Some(declared) if declared != (nets, pins, windows) => Err(OtwError::Malformed(format!(
+            "{}: `end {} {} {}` does not match the file, which holds {nets} nets, {pins} pins and {windows} windows",
+            path.display(),
+            declared.0,
+            declared.1,
+            declared.2
+        ))),
+        Some(_) => Ok((header, windows)),
     }
 }
-
-/// `(role, clock domains, other attributes)` of one object. The domains are
-/// the object's `clocks=` attribute, or failing that the clocks of its windows.
-type ObjectInfo = (String, Vec<usize>, Vec<(String, String)>);
 
 type NetRow = (String, String, Vec<usize>, Vec<(String, String)>);
 type PinRow = (String, String, String, Vec<usize>, Vec<(String, String)>);
@@ -443,7 +706,8 @@ pub struct OtwSummary {
     slew_thresholds: Option<(f64, f64)>,
     clocks: Vec<ClockDecl>,
     attributes: Vec<(String, String)>,
-    /// `(net, role, clock domains, attributes)` in file order.
+    /// `(net, role, clock domains, attributes)` in file order. The domains are
+    /// the `clocks=` attribute, or failing that the clocks of the windows.
     nets: Vec<NetRow>,
     /// `(instance, pin, role, clock domains, attributes)` in file order;
     /// instance `-` is a top-level port.
@@ -452,78 +716,79 @@ pub struct OtwSummary {
     windows: u64,
 }
 
+fn name_hash(name: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    hasher.finish()
+}
+
 #[derive(Default)]
 struct Collector {
-    nets: Vec<(String, ObjectInfo)>,
-    pins: Vec<(String, String, ObjectInfo)>,
-    seen_nets: HashSet<String>,
-    seen_pins: HashSet<(String, String)>,
-    windows: u64,
+    nets: Vec<NetRow>,
+    pins: Vec<PinRow>,
+    net_hashes: Vec<u64>,
+    /// `(hash of the instance name, index of its first pin)` per `i` group.
+    instances: Vec<(u64, usize)>,
     /// The current object is a net (else a pin), and has no `clocks=`.
     current_is_net: bool,
     derive_domains: bool,
 }
 
 impl Collector {
-    fn info(&mut self, role: &str, attrs: &Attrs<'_>) -> Result<ObjectInfo, OtwError> {
+    fn split(&mut self, attrs: &Attrs<'_>) -> (Vec<usize>, Vec<(String, String)>) {
         let mut domains = Vec::new();
         let mut others = Vec::new();
         self.derive_domains = true;
         for (key, value) in attrs {
             if *key == "clocks" {
                 // Already validated by the parser against the declared clocks.
-                domains = clock_indices(value, usize::MAX).map_err(OtwError::Malformed)?;
+                domains = clock_indices(value, usize::MAX).unwrap_or_default();
                 self.derive_domains = false;
             } else {
                 others.push(((*key).to_string(), (*value).to_string()));
             }
         }
-        Ok((role.to_string(), domains, others))
+        (domains, others)
     }
 }
 
-impl Visitor for Collector {
-    fn object(
-        &mut self,
-        object: &Object<'_>,
-        role: &str,
-        attrs: &Attrs<'_>,
-    ) -> Result<(), OtwError> {
-        let info = self.info(role, attrs)?;
-        match object {
-            Object::Net { name } => {
-                if !self.seen_nets.insert((*name).to_string()) {
-                    return Err(OtwError::Malformed(format!(
-                        "net `{name}` is declared more than once"
-                    )));
-                }
-                self.current_is_net = true;
-                self.nets.push(((*name).to_string(), info));
-            }
-            Object::Pin { instance, pin } => {
-                if !self
-                    .seen_pins
-                    .insert(((*instance).to_string(), (*pin).to_string()))
-                {
-                    return Err(OtwError::Malformed(format!(
-                        "pin `{instance} {pin}` is declared more than once"
-                    )));
-                }
-                self.current_is_net = false;
-                self.pins
-                    .push(((*instance).to_string(), (*pin).to_string(), info));
-            }
-        }
-        Ok(())
+impl Sink for Collector {
+    fn net(&mut self, name: &str, role: &str, attrs: &Attrs<'_>) {
+        let (domains, others) = self.split(attrs);
+        self.current_is_net = true;
+        self.net_hashes.push(name_hash(name));
+        self.nets
+            .push((name.to_string(), role.to_string(), domains, others));
     }
 
-    fn window(&mut self, window: &Window<'_>) -> Result<(), OtwError> {
-        self.windows += 1;
+    fn pin(
+        &mut self,
+        instance: &str,
+        first_of_instance: bool,
+        pin: &str,
+        role: &str,
+        attrs: &Attrs<'_>,
+    ) {
+        let (domains, others) = self.split(attrs);
+        self.current_is_net = false;
+        if first_of_instance {
+            self.instances.push((name_hash(instance), self.pins.len()));
+        }
+        self.pins.push((
+            instance.to_string(),
+            pin.to_string(),
+            role.to_string(),
+            domains,
+            others,
+        ));
+    }
+
+    fn window(&mut self, window: &Window<'_>) {
         if let (true, Some(clock)) = (self.derive_domains, window.clock) {
             let domains = if self.current_is_net {
-                self.nets.last_mut().map(|(_, info)| &mut info.1)
+                self.nets.last_mut().map(|row| &mut row.2)
             } else {
-                self.pins.last_mut().map(|(_, _, info)| &mut info.1)
+                self.pins.last_mut().map(|row| &mut row.3)
             };
             if let Some(domains) = domains
                 && let Err(position) = domains.binary_search(&clock)
@@ -531,13 +796,51 @@ impl Visitor for Collector {
                 domains.insert(position, clock);
             }
         }
-        Ok(())
     }
 }
 
 pub fn summarize(path: &Path) -> Result<OtwSummary, OtwError> {
-    let mut collector = Collector::default();
-    let header = parse_otw(path, &mut collector)?;
+    let mut nets: Vec<NetRow> = Vec::new();
+    let mut pins: Vec<PinRow> = Vec::new();
+    // Name hash -> index of the first object with it; a hit is confirmed by
+    // comparing the names, so a hash collision is never reported as a duplicate.
+    let mut seen_nets: HashMap<u64, usize> = HashMap::new();
+    let mut seen_instances: HashMap<u64, usize> = HashMap::new();
+    let (header, windows) = parse_otw(path, |block: Collector| {
+        let net_base = nets.len();
+        let pin_base = pins.len();
+        nets.extend(block.nets);
+        pins.extend(block.pins);
+        for (offset, hash) in block.net_hashes.into_iter().enumerate() {
+            let index = net_base + offset;
+            if let Some(&first) = seen_nets.get(&hash) {
+                if nets[first].0 == nets[index].0 {
+                    return Err(OtwError::Malformed(format!(
+                        "{}: net `{}` is declared more than once",
+                        path.display(),
+                        nets[index].0
+                    )));
+                }
+            } else {
+                seen_nets.insert(hash, index);
+            }
+        }
+        for (hash, offset) in block.instances {
+            let index = pin_base + offset;
+            if let Some(&first) = seen_instances.get(&hash) {
+                if pins[first].0 == pins[index].0 {
+                    return Err(OtwError::Malformed(format!(
+                        "{}: instance `{}` has more than one `i` group",
+                        path.display(),
+                        pins[index].0
+                    )));
+                }
+            } else {
+                seen_instances.insert(hash, index);
+            }
+        }
+        Ok(())
+    })?;
     Ok(OtwSummary {
         design: header.design,
         time_unit: header.time_unit,
@@ -546,17 +849,9 @@ pub fn summarize(path: &Path) -> Result<OtwSummary, OtwError> {
         slew_thresholds: header.slew_thresholds,
         clocks: header.clocks,
         attributes: header.attributes,
-        nets: collector
-            .nets
-            .into_iter()
-            .map(|(name, (role, domains, attrs))| (name, role, domains, attrs))
-            .collect(),
-        pins: collector
-            .pins
-            .into_iter()
-            .map(|(instance, pin, (role, domains, attrs))| (instance, pin, role, domains, attrs))
-            .collect(),
-        windows: collector.windows,
+        nets,
+        pins,
+        windows,
     })
 }
 
@@ -595,124 +890,103 @@ fn join_attrs(attrs: &Attrs<'_>, skip: &[&str]) -> String {
 /// values, the four range attributes, window_attrs.
 const WINDOW_CSV_COLUMNS: usize = 3 + WINDOW_VALUES + RANGE_ATTRS.len() + 1;
 
-/// Streams one CSV row per window; an object without windows gets one row.
-struct CsvDump<W: Write> {
-    out: W,
+/// Formats one CSV row per window; an object without windows gets one row.
+#[derive(Default)]
+struct CsvBlock {
+    text: String,
     prefix: String,
     pending: bool,
-    line: String,
     rows: u64,
+    windows: u64,
 }
 
-impl<W: Write> CsvDump<W> {
-    fn emit(&mut self, window: Option<&Window<'_>>) -> Result<(), OtwError> {
-        self.line.clear();
-        self.line.push_str(&self.prefix);
-        match window {
-            Some(window) => {
-                use std::fmt::Write as _;
-                self.line.push(',');
-                if let Some(clock) = window.clock {
-                    let _ = write!(self.line, "{clock}");
-                }
-                self.line.push(',');
-                if window.edge != "-" {
-                    self.line.push_str(window.edge);
-                }
-                self.line.push(',');
-                self.line.push_str(window.role);
-                for value in window.values {
-                    self.line.push(',');
-                    if value != "-" {
-                        self.line.push_str(value);
-                    }
-                }
-                for key in RANGE_ATTRS {
-                    self.line.push(',');
-                    if let Some((_, value)) = window.attrs.iter().find(|(name, _)| *name == key) {
-                        self.line.push_str(value);
-                    }
-                }
-                self.line.push(',');
-                csv_field(&mut self.line, &join_attrs(window.attrs, &RANGE_ATTRS));
-            }
-            None => self.line.push_str(&",".repeat(WINDOW_CSV_COLUMNS)),
-        }
-        self.line.push('\n');
-        self.rows += 1;
-        self.out
-            .write_all(self.line.as_bytes())
-            .map_err(|err| OtwError::Io(err.to_string()))
-    }
-
-    fn flush_pending(&mut self) -> Result<(), OtwError> {
+impl CsvBlock {
+    fn flush_pending(&mut self) {
         if self.pending {
             self.pending = false;
-            self.emit(None)?;
+            self.text.push_str(&self.prefix);
+            self.text.push_str(&",".repeat(WINDOW_CSV_COLUMNS));
+            self.text.push('\n');
+            self.rows += 1;
         }
-        Ok(())
     }
-}
 
-impl<W: Write> Visitor for CsvDump<W> {
-    fn object(
-        &mut self,
-        object: &Object<'_>,
-        role: &str,
-        attrs: &Attrs<'_>,
-    ) -> Result<(), OtwError> {
-        self.flush_pending()?;
+    fn start(&mut self, kind: &str, instance: &str, name: &str, role: &str, attrs: &Attrs<'_>) {
+        self.flush_pending();
         self.prefix.clear();
-        match object {
-            Object::Net { name } => {
-                self.prefix.push_str("net,,");
-                csv_field(&mut self.prefix, name);
-            }
-            Object::Pin { instance, pin } => {
-                self.prefix.push_str("pin,");
-                csv_field(&mut self.prefix, instance);
-                self.prefix.push(',');
-                csv_field(&mut self.prefix, pin);
-            }
-        }
+        self.prefix.push_str(kind);
+        self.prefix.push(',');
+        csv_field(&mut self.prefix, instance);
+        self.prefix.push(',');
+        csv_field(&mut self.prefix, name);
         self.prefix.push(',');
         self.prefix.push_str(role);
         self.prefix.push(',');
         csv_field(&mut self.prefix, &join_attrs(attrs, &[]));
         self.pending = true;
-        Ok(())
+    }
+}
+
+impl Sink for CsvBlock {
+    fn net(&mut self, name: &str, role: &str, attrs: &Attrs<'_>) {
+        self.start("net", "", name, role, attrs);
     }
 
-    fn window(&mut self, window: &Window<'_>) -> Result<(), OtwError> {
+    fn pin(&mut self, instance: &str, _first: bool, pin: &str, role: &str, attrs: &Attrs<'_>) {
+        self.start("pin", instance, pin, role, attrs);
+    }
+
+    fn window(&mut self, window: &Window<'_>) {
+        use std::fmt::Write as _;
         self.pending = false;
-        self.emit(Some(window))
+        self.windows += 1;
+        self.text.push_str(&self.prefix);
+        self.text.push(',');
+        if let Some(clock) = window.clock {
+            let _ = write!(self.text, "{clock}");
+        }
+        self.text.push(',');
+        if window.edge != "-" {
+            self.text.push_str(window.edge);
+        }
+        self.text.push(',');
+        self.text.push_str(window.role);
+        for value in window.values {
+            self.text.push(',');
+            if value != "-" {
+                self.text.push_str(value);
+            }
+        }
+        for key in RANGE_ATTRS {
+            self.text.push(',');
+            if let Some((_, value)) = window.attrs.iter().find(|(name, _)| *name == key) {
+                self.text.push_str(value);
+            }
+        }
+        self.text.push(',');
+        csv_field(&mut self.text, &join_attrs(window.attrs, &RANGE_ATTRS));
+        self.text.push('\n');
+        self.rows += 1;
     }
 }
 
 fn write_windows_csv<W: Write>(path: &Path, mut out: W) -> Result<u64, OtwError> {
     let io_err = |err: io::Error| OtwError::Io(err.to_string());
     let mut head = String::from("kind,instance,name,role,object_attrs,clock,edge,window_role");
-    for column in WINDOW_COLUMNS {
-        head.push(',');
-        head.push_str(column);
-    }
-    for column in RANGE_ATTRS {
+    for column in WINDOW_COLUMNS.iter().chain(&RANGE_ATTRS) {
         head.push(',');
         head.push_str(column);
     }
     head.push_str(",window_attrs\n");
     out.write_all(head.as_bytes()).map_err(io_err)?;
-    let mut dump = CsvDump {
-        out,
-        prefix: String::new(),
-        pending: false,
-        line: String::new(),
-        rows: 0,
-    };
-    parse_otw(path, &mut dump)?;
-    dump.flush_pending()?;
-    dump.out.flush().map_err(io_err)?;
-    Ok(dump.rows)
+    let mut rows = 0u64;
+    parse_otw(path, |mut block: CsvBlock| {
+        block.flush_pending();
+        rows += block.rows;
+        out.write_all(block.text.as_bytes()).map_err(io_err)
+    })?;
+    out.flush().map_err(io_err)?;
+    Ok(rows)
 }
 
 /// Read an OTW file (`.otw` or `.otw.gz`) into its per-object summary.
@@ -763,8 +1037,12 @@ mod tests {
     fn malformed(name: &str, text: &str) -> String {
         match summary_of(name, text) {
             Err(OtwError::Malformed(message)) => message,
-            _ => panic!("expected a malformed-file error"),
+            _ => panic!("expected a malformed-file error for {name}"),
         }
+    }
+
+    fn text(value: &str) -> String {
+        value.to_string()
     }
 
     const SAMPLE: &str = "\
@@ -784,14 +1062,15 @@ w 1 f d 0.50 0.90 0.55 0.95 0.04 0.06 0.04 0.07
 n data d
 w 1 r d 1 2 1 2 0.1 0.2 0.1 0.2
 w - - u 1 2 1 2 0.1 0.2 0.1 0.2
-n quiet z
-p u_gate CK c
-p - clk c
+n quiet z value=0
+i u_gate
+p CK c
+w 0 r c 0.2 0.3 - - 0.1 0.1 - -
+p E d
+i -
+p clk c
+end 3 3 5
 ";
-
-    fn text(value: &str) -> String {
-        value.to_string()
-    }
 
     #[test]
     fn summary_reads_header_nets_pins_domains_and_attributes() {
@@ -827,17 +1106,23 @@ p - clk c
                 ),
                 // No `clocks=`: the domains are the clocks of its windows.
                 (text("data"), text("d"), vec![1], vec![]),
-                (text("quiet"), text("z"), vec![], vec![]),
+                (
+                    text("quiet"),
+                    text("z"),
+                    vec![],
+                    vec![(text("value"), text("0"))]
+                ),
             ]
         );
+        assert_eq!(summary.windows, 5);
         assert_eq!(
             summary.pins,
             vec![
-                (text("u_gate"), text("CK"), text("c"), vec![], vec![]),
+                (text("u_gate"), text("CK"), text("c"), vec![0], vec![]),
+                (text("u_gate"), text("E"), text("d"), vec![], vec![]),
                 (text("-"), text("clk"), text("c"), vec![], vec![]),
             ]
         );
-        assert_eq!(summary.windows, 4);
     }
 
     #[test]
@@ -849,61 +1134,183 @@ p - clk c
         let text = String::from_utf8(out).unwrap();
         let lines: Vec<&str> = text.lines().collect();
 
-        assert_eq!(rows, 7);
+        assert_eq!(rows, 8);
         assert_eq!(
             lines[1],
-            "net,,clk,c,clocks=0,1 freq=1e8,0,r,c,0.10,0.14,,,0.02,0.03,,,0.59:0.61,0.37,,,x_k=2"
-                .replace("clocks=0,1 freq=1e8", "\"clocks=0,1 freq=1e8\"")
+            "net,,clk,c,\"clocks=0,1 freq=1e8\",0,r,c,0.10,0.14,,,0.02,0.03,,,0.59:0.61,0.37,,,x_k=2"
         );
         assert_eq!(lines[4], "net,,data,d,,,,u,1,2,1,2,0.1,0.2,0.1,0.2,,,,,");
         assert_eq!(
             lines[5],
-            format!("net,,quiet,z,{}", ",".repeat(WINDOW_CSV_COLUMNS))
+            format!("net,,quiet,z,value=0{}", ",".repeat(WINDOW_CSV_COLUMNS))
         );
-        assert_eq!(lines.iter().map(|l| l.split(',').count()).min(), Some(21));
+        assert_eq!(lines[6], "pin,u_gate,CK,c,,0,r,c,0.2,0.3,,,0.1,0.1,,,,,,,");
+        assert_eq!(
+            lines[8],
+            format!("pin,-,clk,c,{}", ",".repeat(WINDOW_CSV_COLUMNS))
+        );
+    }
+
+    #[test]
+    fn blocks_cut_at_group_boundaries_give_the_same_answer() {
+        // Enough groups to span many parallel blocks, with a mid-file error
+        // check below that depends on line numbers adding up across blocks.
+        let mut body = String::from("otw 1\nclock k 1 0 0.5\n");
+        let groups = 400_000u64;
+        for index in 0..groups {
+            body.push_str(&format!(
+                "n net_{index} d\nw 0 r d 1 2 1 2 0.1 0.2 0.1 0.2\n"
+            ));
+            body.push_str(&format!(
+                "i inst_{index}\np A d\np Z c\nw 0 f c 1 2 - - 0.1 0.2 - -\n"
+            ));
+        }
+        let good = format!("{body}end {groups} {} {}\n", groups * 2, groups * 2);
+        assert!(good.len() > 4 * BLOCK_BYTES);
+        let summary = summary_of("many.otw", &good).unwrap();
+        assert_eq!(summary.nets.len() as u64, groups);
+        assert_eq!(summary.pins.len() as u64, groups * 2);
+        assert_eq!(summary.nets[399_999].0, "net_399999");
+        assert_eq!(
+            summary.pins[799_999],
+            (text("inst_399999"), text("Z"), text("c"), vec![0], vec![])
+        );
+
+        let bad_line = 2 + 6 * 300_000 + 1;
+        let bad = good.replacen("n net_300000 d", "n net_300000 q", 1);
+        assert!(malformed("many_bad.otw", &bad).contains(&format!(":{bad_line}: `n` role")));
     }
 
     #[test]
     fn rejects_what_it_cannot_read_and_names_the_line() {
-        assert!(malformed("a.otw", "(TIMING_WINDOWS\n").contains("not an OTW file"));
-        assert!(malformed("b.otw", "otw 2\n").contains("unsupported OTW version"));
-        assert!(malformed("c.otw", "otw 1\nn a x\n").contains(":2: `n` role"));
-        assert!(malformed("d.otw", "otw 1\nn a d\nn a c\n").contains("more than once"));
-        assert!(malformed("e.otw", "otw 1\nw 0 r c 1 2 3 4 5 6 7 8\n").contains("before any"));
-        assert!(
-            malformed("f.otw", "otw 1\nn a c\nw 0 r c 1 2 3 4 5 6 7 8\n")
-                .contains("declared clocks")
-        );
+        let clock = "otw 1\nclock k 1 0 0.5\n";
+        let cases: [(&str, String, &str); 25] = [
+            ("a", text("(TIMING_WINDOWS\n"), "not an OTW file"),
+            ("b", text("otw 2\n"), "unsupported OTW version"),
+            ("c", text("otw 1\nn a x\nend 1 0 0\n"), ":2: `n` role"),
+            (
+                "d",
+                text("otw 1\nn a d\nn a c\nend 2 0 0\n"),
+                "more than once",
+            ),
+            (
+                "e",
+                text("otw 1\nw 0 r c 1 2 3 4 5 6 7 8\n"),
+                ":2: `w` line before any",
+            ),
+            (
+                "f",
+                text("otw 1\nn a c\nw 0 r c 1 2 3 4 5 6 7 8\nend 1 0 1\n"),
+                "declared clocks",
+            ),
+            (
+                "g",
+                format!("{clock}n a d\nw 0 r c 1 2 3 4 5 6 7 8\nend 1 0 1\n"),
+                "must be declared `c`",
+            ),
+            (
+                "h",
+                format!("{clock}n a c\nw 0 r c 1 2 3\nend 1 0 1\n"),
+                "missing fall_late",
+            ),
+            (
+                "i",
+                text("otw 1\nn a c\ndesign late\nend 1 0 0\n"),
+                ":3: unknown record",
+            ),
+            ("j", text("otw 1\nn a c stray\nend 1 0 0\n"), "key=value"),
+            (
+                "k",
+                text("otw 1\nn a c clocks=0\nend 1 0 0\n"),
+                "declared clocks",
+            ),
+            (
+                "l",
+                text("otw 1\nn a c freq=-1\nend 1 0 0\n"),
+                "non-negative",
+            ),
+            (
+                "m",
+                text("otw 1\nn a d\nw - r d 1 2 3 4 5 6 7 8\nend 1 0 1\n"),
+                "takes edge `-`",
+            ),
+            (
+                "n",
+                text("otw 1\nn a d\nw - - d 1 2 3 4 5 6 7 8 rise_slack=soon\nend 1 0 1\n"),
+                "rise_slack must be",
+            ),
+            (
+                "o",
+                text("otw 1\nslew_thresholds 90 10\n"),
+                "0 <= low < high",
+            ),
+            ("p", text("otw 1\nres_unit 0\n"), "res_unit must be"),
+            (
+                "q",
+                text("otw 1\nn a z value=x\nend 1 0 0\n"),
+                "value must be 0 or 1",
+            ),
+            (
+                "r",
+                text("otw 1\ni -\np a d drive_rise=fast\nend 0 1 0\n"),
+                "drive_rise",
+            ),
+            (
+                "s",
+                text("otw 1\nn a d\nw - - d 1e-3 2 3 4 5 6 7 8\nend 1 0 1\n"),
+                "decimal without exponent",
+            ),
+            ("t", text("otw 1\nn a d\n"), "no `end` line"),
+            (
+                "u",
+                text("otw 1\nn a d\nend 2 0 0\n"),
+                "does not match the file",
+            ),
+            (
+                "v",
+                text("otw 1\nn a d\nend 1 0 0\nn b d\n"),
+                ":4: content after the `end` line",
+            ),
+            (
+                "w",
+                text("otw 1\nn a d\np A d\nend 1 1 0\n"),
+                ":3: `p` line outside an `i` group",
+            ),
+            (
+                "x",
+                text("otw 1\ni u\np A d\np A c\nend 0 2 0\n"),
+                "pin `u A` is declared more than once",
+            ),
+            (
+                "ab",
+                text("otw 1\nclock k 1 0 0.5\nclock k 2 0 1\n"),
+                ":3: clock `k` is declared more than once",
+            ),
+        ];
+        for (name, content, expected) in cases {
+            let message = malformed(&format!("{name}.otw"), &content);
+            assert!(message.contains(expected), "{name}: {message}");
+        }
         assert!(
             malformed(
-                "g.otw",
-                "otw 1\nclock k 1 0 0.5\nn a d\nw 0 r c 1 2 3 4 5 6 7 8\n"
+                "y.otw",
+                "otw 1\ni u\np A d\ni v\np A d\ni u\np B d\nend 0 3 0\n"
             )
-            .contains("must be declared `c`")
+            .contains("instance `u` has more than one `i` group")
         );
         assert!(
-            malformed("h.otw", "otw 1\nclock k 1 0 0.5\nn a c\nw 0 r c 1 2 3\n")
-                .contains("missing fall_late")
+            malformed("z.otw", "otw 1\ni u\nw - - d 1 2 3 4 5 6 7 8\nend 0 0 1\n")
+                .contains("`w` line with no `n` or `p` object above it")
         );
-        assert!(malformed("i.otw", "otw 1\nn a c\ndesign late\n").contains("unknown record"));
-        assert!(malformed("j.otw", "otw 1\nn a c stray\n").contains("key=value"));
-        assert!(malformed("k.otw", "otw 1\nn a c clocks=0\n").contains("declared clocks"));
-        assert!(malformed("l.otw", "otw 1\nn a c freq=-1\n").contains("non-negative"));
-        assert!(malformed("q.otw", "otw 1\nn a z value=x\n").contains("value must be 0 or 1"));
-        assert!(malformed("r.otw", "otw 1\np - a d drive_rise=fast\n").contains("drive_rise"));
-        assert!(summary_of("s.otw", "otw 1\nn a z value=0\np - o d load=0:0.2\n").is_ok());
+        assert!(malformed("aa.otw", "otw 1\nn caf\u{e9} d\nend 1 0 0\n").contains("non-ASCII"));
         assert!(
-            malformed("m.otw", "otw 1\nn a d\nw - r d 1 2 3 4 5 6 7 8\n")
-                .contains("takes edge `-`")
-        );
-        assert!(
-            malformed(
-                "n.otw",
-                "otw 1\nn a d\nw - - d 1 2 3 4 5 6 7 8 rise_slack=soon\n"
+            summary_of(
+                "ok.otw",
+                "otw 1\nn a z value=0\ni -\np o d load=0:0.2\nend 1 1 0\n"
             )
-            .contains("rise_slack is not a number")
+            .is_ok()
         );
-        assert!(malformed("o.otw", "otw 1\nslew_thresholds 90 10\n").contains("0 <= low < high"));
-        assert!(malformed("p.otw", "otw 1\nres_unit 0\n").contains("res_unit must be"));
+        assert!(summary_of("empty.otw", "otw 1\nend 0 0 0\n").is_ok());
+        assert!(summary_of("crlf.otw", "otw 1\r\nn a d\r\nend 1 0 0\r\n").is_ok());
     }
 }

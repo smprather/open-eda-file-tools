@@ -34,6 +34,7 @@ pex_tools/                  SPEF/DSPF parser, `pex-tools` CLI
 src/pex.rs                  SPEF/DSPF parser (parallel + streaming modes)
 src/otw.rs                  OTW (Open Timing Windows) line-oriented reader and CSV dump
 tests/                      Unified pytest suite (Liberty, LEF, DEF, SDC, PEX, and `tests/gen/design_gen.py`)
+otw-design/                 Design workspace for the next OTW version (non-normative; `docs/otw.md` is the spec)
 docs/                       AI-agent and per-tool Markdown documentation (`docs/ai-api.md`, `docs/cli.md`, `docs/*.md`)
 ```
 
@@ -255,6 +256,19 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   vendor readers are plugged in from outside. `--twf PATH` is only shorthand
   for `--clock-data twf:PATH`. The open format here is OTW (`docs/otw.md`,
   `src/otw.rs`), designed from scratch — do not shape it after a vendor file.
+- **OTW groups are independent, and the reader depends on it.** The body is
+  `n` groups and `i` groups (`i <instance>` then its `p` lines); `w` lines
+  belong to the object above them. `parse_otw` (`src/otw.rs`) cuts the input
+  at lines starting with `n`/`i`/`e` and parses the blocks with rayon, one
+  `Sink` per block, merged in file order. Never add a record that refers to
+  another group or that makes group order significant — that needs a new
+  format version. `docs/otw.md` is the normative spec; change it with the
+  reader.
+- **OTW body numbers are fixed-point decimals** (no exponent); `real` with an
+  exponent is allowed only in the header and `freq`. The reader validates
+  decimals by byte scan and never converts window values.
+- **The OTW `end <nets> <pins> <windows>` trailer is mandatory** and checked:
+  no `end` means truncated, wrong counts or trailing records are errors.
 - **An OTW file is one analysis corner.** Header values (`corner`, `process`,
   `voltage`, `temperature`) are single-valued; multi-corner data is one file
   per corner, never best/typ/worst triples in one file.
