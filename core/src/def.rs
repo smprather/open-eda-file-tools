@@ -3,8 +3,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions, create_dir_all};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use crate::connectivity::{Conn, Connectivity, ConnectivityBuilder, NetConns, PORT};
 use crate::lef::{Lexer, open_input};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -288,7 +290,7 @@ pub fn clock_tree_cells_impl(
     macros: &[MacroRole],
     prune: bool,
 ) -> Result<Vec<String>, String> {
-    let (components, nets) = collect_def_connectivity(def_path)?;
+    let (components, nets) = legacy_tables(&collect_def_connectivity(def_path)?);
     let macro_map = role_map(macros);
 
     let mut instance_nets: HashMap<&str, Vec<(usize, &str)>> = HashMap::new();
@@ -417,7 +419,7 @@ pub fn clock_object_instances_impl(
     clock_pins: &[(String, String)],
     macros: &[MacroRole],
 ) -> Result<ClockObjectInstances, String> {
-    let (components, nets) = collect_def_connectivity(def_path)?;
+    let (components, nets) = legacy_tables(&collect_def_connectivity(def_path)?);
     let macro_map = role_map(macros);
     let mut cells: HashSet<&str> = HashSet::new();
     let mut unclassified: HashSet<&str> = HashSet::new();
@@ -1095,7 +1097,7 @@ pub fn write_clock_instances_csv_impl(
     clock_cell_patterns: &[String],
     output: Option<&Path>,
 ) -> Result<(), String> {
-    let (components, nets) = collect_def_connectivity(def_path)?;
+    let (components, nets) = legacy_tables(&collect_def_connectivity(def_path)?);
     let patterns: Vec<String> = if clock_cell_patterns.is_empty() {
         vec!["clk".to_string()]
     } else {
@@ -1138,8 +1140,7 @@ pub fn write_clock_instances_csv_from_cache_impl(
     output: Option<&Path>,
 ) -> Result<(), String> {
     read_manifest(cache_dir)?;
-    let components = load_components_bin(cache_dir)?;
-    let nets = load_connectivity_bin(cache_dir)?;
+    let (components, nets) = legacy_tables(&load_connectivity(cache_dir)?);
     let patterns: Vec<String> = if clock_cell_patterns.is_empty() {
         vec!["clk".to_string()]
     } else {
@@ -1845,17 +1846,17 @@ pub(crate) fn read_route_point(
 /// MB.
 pub(crate) const SPLIT_BYTES: usize = 1 << 20;
 
-pub(crate) fn parse_net_connections_record(record: &NetRecord) -> Result<NetInfo, String> {
+pub(crate) fn parse_net_connections_record(record: &NetRecord) -> Result<NetConns<'_>, String> {
     let mut tokens = ByteTokens::new(&record.bytes);
     tokens.expect(b"-", record.offset, "net record")?;
     let net = tokens
         .next()
         .ok_or_else(|| format!("expected net name near DEF byte {}", record.offset))?;
-    let net_name = token_to_str(net, record.offset, "net name")?.to_string();
+    let net_name = token_to_str(net, record.offset, "net name")?;
     let body = &record.bytes[tokens.pos..];
     let conns = match split_connection_list(body) {
         Some(pieces) => {
-            let parsed: Vec<Result<Vec<NetConn>, String>> = crate::threads::install(|| {
+            let parsed: Vec<Result<Vec<Conn<'_>>, String>> = crate::threads::install(|| {
                 pieces
                     .par_iter()
                     .map(|piece| parse_connection_list(piece, record.offset))
@@ -1869,7 +1870,7 @@ pub(crate) fn parse_net_connections_record(record: &NetRecord) -> Result<NetInfo
         }
         None => parse_connection_list(body, record.offset)?,
     };
-    Ok(NetInfo {
+    Ok(NetConns {
         name: net_name,
         conns,
     })
@@ -1877,7 +1878,10 @@ pub(crate) fn parse_net_connections_record(record: &NetRecord) -> Result<NetInfo
 
 /// `( instance pin )` / `( PIN port )` pairs up to the first `+` outside
 /// parentheses. A connection may carry `+ SYNTHESIZED` before its `)`.
-pub(crate) fn parse_connection_list(bytes: &[u8], offset: u64) -> Result<Vec<NetConn>, String> {
+pub(crate) fn parse_connection_list<'a>(
+    bytes: &'a [u8],
+    offset: u64,
+) -> Result<Vec<Conn<'a>>, String> {
     let mut tokens = ByteTokens::new(bytes);
     let mut conns = Vec::new();
     while let Some(token) = tokens.next() {
@@ -1908,14 +1912,11 @@ pub(crate) fn parse_connection_list(bytes: &[u8], offset: u64) -> Result<Vec<Net
             None => return Err(format!("expected net connection near DEF byte {offset}")),
         }
         if first == b"PIN" {
-            conns.push(NetConn {
-                instance: None,
-                pin: token_to_str(second, offset, "port name")?.to_string(),
-            });
+            conns.push(Conn::Port(token_to_str(second, offset, "port name")?));
         } else {
-            conns.push(NetConn {
-                instance: Some(token_to_str(first, offset, "component name")?.to_string()),
-                pin: token_to_str(second, offset, "pin name")?.to_string(),
+            conns.push(Conn::Pin {
+                instance: token_to_str(first, offset, "component name")?,
+                pin: token_to_str(second, offset, "pin name")?,
             });
         }
     }
@@ -2063,17 +2064,16 @@ fn make_net_shape(
     ))
 }
 
-/// Components (instance -> macro) and per-net connections of a DEF.
+/// Components and per-net connections of a DEF.
 ///
 /// Only each net's connection list is kept: the routing after the first
 /// `+` is skipped while scanning, never copied. Net records parse in
-/// parallel batches as the scan goes.
-pub(crate) fn collect_def_connectivity(
-    def_path: &Path,
-) -> Result<(HashMap<String, String>, Vec<NetInfo>), String> {
+/// parallel batches as the scan goes. Records of a NETS/SPECIALNETS section
+/// met before COMPONENTS are held until the components are known, so
+/// `add_component` never follows `add_nets`.
+pub(crate) fn collect_def_connectivity(def_path: &Path) -> Result<Connectivity, String> {
     let mut lexer = Lexer::new(open_input(def_path).map_err(|e| e.to_string())?);
-    let mut components = HashMap::new();
-    let mut nets = Vec::new();
+    let mut scan = ConnectivityScan::default();
 
     while let Some(token) = lexer.next_token().map_err(|e| e.to_string())? {
         if token.text == "-" {
@@ -2082,21 +2082,78 @@ pub(crate) fn collect_def_connectivity(
         } else if token.text.eq_ignore_ascii_case("COMPONENTS") {
             let _count = lexer.next_token().map_err(|e| e.to_string())?;
             expect_semicolon(&mut lexer).map_err(|e| e.to_string())?;
-            collect_component_section(&mut lexer, &mut components)?;
+            if scan.nets_added {
+                return Err("COMPONENTS section after NETS data was resolved".to_string());
+            }
+            collect_component_section(&mut lexer, &mut scan.builder)?;
+            scan.components_seen = true;
+            scan.release_held()?;
         } else if token.text.eq_ignore_ascii_case("NETS") {
             let _count = lexer.next_token().map_err(|e| e.to_string())?;
             expect_semicolon(&mut lexer).map_err(|e| e.to_string())?;
-            collect_net_connectivity(&mut lexer, "NETS", &mut nets)?;
+            collect_net_connectivity(&mut lexer, "NETS", &mut scan)?;
         } else if token.text.eq_ignore_ascii_case("SPECIALNETS") {
             let _count = lexer.next_token().map_err(|e| e.to_string())?;
             expect_semicolon(&mut lexer).map_err(|e| e.to_string())?;
-            collect_net_connectivity(&mut lexer, "SPECIALNETS", &mut nets)?;
+            collect_net_connectivity(&mut lexer, "SPECIALNETS", &mut scan)?;
         }
     }
-    Ok((components, nets))
+    scan.release_held()?;
+    Ok(scan.builder.finish())
 }
 
-pub(crate) fn parse_connectivity_records(records: &[NetRecord]) -> Result<Vec<NetInfo>, String> {
+/// The builder plus the net records waiting for COMPONENTS.
+#[derive(Default)]
+pub(crate) struct ConnectivityScan {
+    builder: ConnectivityBuilder,
+    held: Vec<NetRecord>,
+    components_seen: bool,
+    nets_added: bool,
+}
+
+impl ConnectivityScan {
+    /// Resolve `records` into the builder (bounded batches stay with the
+    /// caller; this takes one).
+    fn add_records(&mut self, records: &[NetRecord]) -> Result<(), String> {
+        let nets = parse_connectivity_records(records)?;
+        self.builder.add_nets(&nets);
+        self.nets_added = true;
+        Ok(())
+    }
+
+    /// Resolve a scanned batch now, or hold it until COMPONENTS ends.
+    fn take_batch(&mut self, batch: &mut Vec<NetRecord>) -> Result<(), String> {
+        if self.components_seen {
+            self.add_records(batch)?;
+            batch.clear();
+        } else {
+            self.held.append(batch);
+        }
+        Ok(())
+    }
+
+    /// Resolve the held records, in batches, once COMPONENTS is known.
+    fn release_held(&mut self) -> Result<(), String> {
+        let mut held = std::mem::take(&mut self.held);
+        let mut start = 0;
+        while start < held.len() {
+            let mut end = start;
+            let mut bytes = 0usize;
+            while end < held.len() && end - start < BATCH_SIZE && bytes < BATCH_BYTES {
+                bytes += held[end].bytes.len();
+                end += 1;
+            }
+            self.add_records(&held[start..end])?;
+            start = end;
+        }
+        held.clear();
+        Ok(())
+    }
+}
+
+pub(crate) fn parse_connectivity_records(
+    records: &[NetRecord],
+) -> Result<Vec<NetConns<'_>>, String> {
     crate::threads::install(|| {
         records
             .par_iter()
@@ -2107,7 +2164,7 @@ pub(crate) fn parse_connectivity_records(records: &[NetRecord]) -> Result<Vec<Ne
 
 pub(crate) fn collect_component_section<R: Read>(
     lexer: &mut Lexer<R>,
-    components: &mut HashMap<String, String>,
+    builder: &mut ConnectivityBuilder,
 ) -> Result<(), String> {
     let mut bytes = Vec::with_capacity(256);
     while let Some(token) = lexer.next_token().map_err(|e| e.to_string())? {
@@ -2124,7 +2181,7 @@ pub(crate) fn collect_component_section<R: Read>(
             .read_until_semicolon(&mut bytes)
             .map_err(|e| e.to_string())?;
         let (instance, macro_name) = parse_component_identity(&bytes, token.offset)?;
-        components.insert(instance, macro_name);
+        builder.add_component(&instance, &macro_name);
     }
     Ok(())
 }
@@ -2133,7 +2190,7 @@ pub(crate) fn collect_component_section<R: Read>(
 pub(crate) fn collect_net_connectivity<R: Read>(
     lexer: &mut Lexer<R>,
     section: &'static str,
-    nets: &mut Vec<NetInfo>,
+    scan: &mut ConnectivityScan,
 ) -> Result<(), String> {
     let mut batch: Vec<NetRecord> = Vec::new();
     let mut batch_bytes = 0usize;
@@ -2160,13 +2217,11 @@ pub(crate) fn collect_net_connectivity<R: Read>(
             section,
         });
         if batch.len() >= BATCH_SIZE || batch_bytes >= BATCH_BYTES {
-            nets.extend(parse_connectivity_records(&batch)?);
-            batch.clear();
+            scan.take_batch(&mut batch)?;
             batch_bytes = 0;
         }
     }
-    nets.extend(parse_connectivity_records(&batch)?);
-    Ok(())
+    scan.take_batch(&mut batch)
 }
 
 pub(crate) fn stream_components_to_cache<R: Read, W: Write>(
@@ -2235,6 +2290,7 @@ impl<W1: Write, W2: Write, W3: Write> NetCacheWriter<'_, W1, W2, W3> {
             *self.net_count += 1;
             *self.connectivity_count += 1;
         }
+        drop(infos);
         batch.clear();
         Ok(())
     }
@@ -2377,20 +2433,6 @@ pub(crate) fn read_manifest(cache_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn load_components_bin(cache_dir: &Path) -> Result<HashMap<String, String>, String> {
-    let file = File::open(cache_dir.join("components.bin"))
-        .map_err(|e| format!("{}: {e}", cache_dir.join("components.bin").display()))?;
-    let mut input = BufReader::new(file);
-    let count = read_header(&mut input, COMPONENTS_MAGIC)?;
-    let mut components = HashMap::with_capacity(count.min(usize::MAX as u64) as usize);
-    for _ in 0..count {
-        let instance = read_string(&mut input)?;
-        let macro_name = read_string(&mut input)?;
-        components.insert(instance, macro_name);
-    }
-    Ok(components)
-}
-
 pub(crate) fn write_net_map_bin_from_map(
     cache_dir: &Path,
     by_net: &HashMap<String, Vec<u64>>,
@@ -2475,47 +2517,144 @@ pub(crate) fn load_net_record_indices(cache_dir: &Path, net: &str) -> Result<Vec
     Ok(Vec::new())
 }
 
-pub(crate) fn write_net_info<W: Write>(out: &mut W, net: &NetInfo) -> Result<(), String> {
-    write_string(out, &net.name)?;
+pub(crate) fn write_net_info<W: Write>(out: &mut W, net: &NetConns<'_>) -> Result<(), String> {
+    write_string(out, net.name)?;
     write_u64(out, net.conns.len() as u64)?;
     for conn in &net.conns {
-        match &conn.instance {
-            Some(instance) => {
+        match *conn {
+            Conn::Pin { instance, pin } => {
                 write_u8(out, 1)?;
                 write_string(out, instance)?;
+                write_string(out, pin)?;
             }
-            None => {
+            Conn::Port(pin) => {
                 write_u8(out, 0)?;
+                write_string(out, pin)?;
             }
         }
-        write_string(out, &conn.pin)?;
     }
     Ok(())
 }
 
-pub(crate) fn load_connectivity_bin(cache_dir: &Path) -> Result<Vec<NetInfo>, String> {
-    let file = File::open(cache_dir.join("connectivity.bin"))
-        .map_err(|e| format!("{}: {e}", cache_dir.join("connectivity.bin").display()))?;
+/// Nets read per `add_nets` call when loading the cache.
+const LOAD_BATCH_NETS: usize = BATCH_SIZE;
+
+/// One cache batch: every name in one buffer, nets as ranges into it.
+#[derive(Default)]
+struct LoadArena {
+    text: String,
+    /// `(name, first conn, one past the last conn)` per net.
+    nets: Vec<(Range<usize>, usize, usize)>,
+    /// `(instance, pin)`; no instance for a port.
+    conns: Vec<(Option<Range<usize>>, Range<usize>)>,
+}
+
+impl LoadArena {
+    fn clear(&mut self) {
+        self.text.clear();
+        self.nets.clear();
+        self.conns.clear();
+    }
+
+    fn push(&mut self, name: &str) -> Range<usize> {
+        let start = self.text.len();
+        self.text.push_str(name);
+        start..self.text.len()
+    }
+
+    fn add_all(&self, builder: &mut ConnectivityBuilder) {
+        let nets: Vec<NetConns<'_>> = self
+            .nets
+            .iter()
+            .map(|(name, first, last)| NetConns {
+                name: &self.text[name.clone()],
+                conns: self.conns[*first..*last]
+                    .iter()
+                    .map(|(instance, pin)| match instance {
+                        Some(instance) => Conn::Pin {
+                            instance: &self.text[instance.clone()],
+                            pin: &self.text[pin.clone()],
+                        },
+                        None => Conn::Port(&self.text[pin.clone()]),
+                    })
+                    .collect(),
+            })
+            .collect();
+        builder.add_nets(&nets);
+    }
+}
+
+/// Components, then nets, from a cache directory. Names are read through
+/// one reused buffer; nets reach the builder in bounded batches.
+pub(crate) fn load_connectivity(cache_dir: &Path) -> Result<Connectivity, String> {
+    let mut builder = ConnectivityBuilder::new();
+    let mut buf = String::new();
+
+    let path = cache_dir.join("components.bin");
+    let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut input = BufReader::new(file);
+    let count = read_header(&mut input, COMPONENTS_MAGIC)?;
+    let mut macro_name = String::new();
+    for _ in 0..count {
+        read_string_into(&mut input, &mut buf)?;
+        read_string_into(&mut input, &mut macro_name)?;
+        builder.add_component(&buf, &macro_name);
+    }
+
+    let path = cache_dir.join("connectivity.bin");
+    let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut input = BufReader::new(file);
     let count = read_header(&mut input, CONNECTIVITY_MAGIC)?;
-    let mut nets = Vec::with_capacity(count.min(usize::MAX as u64) as usize);
+    let mut arena = LoadArena::default();
     for _ in 0..count {
-        let name = read_string(&mut input)?;
+        read_string_into(&mut input, &mut buf)?;
+        let name = arena.push(&buf);
         let conn_count = read_u64(&mut input)?;
-        let mut conns = Vec::with_capacity(conn_count.min(usize::MAX as u64) as usize);
+        let first = arena.conns.len();
         for _ in 0..conn_count {
-            let has_instance = read_u8(&mut input)?;
-            let instance = if has_instance == 1 {
-                Some(read_string(&mut input)?)
+            let instance = if read_u8(&mut input)? == 1 {
+                read_string_into(&mut input, &mut buf)?;
+                Some(arena.push(&buf))
             } else {
                 None
             };
-            let pin = read_string(&mut input)?;
-            conns.push(NetConn { instance, pin });
+            read_string_into(&mut input, &mut buf)?;
+            let pin = arena.push(&buf);
+            arena.conns.push((instance, pin));
         }
-        nets.push(NetInfo { name, conns });
+        arena.nets.push((name, first, arena.conns.len()));
+        if arena.nets.len() >= LOAD_BATCH_NETS || arena.text.len() >= BATCH_BYTES {
+            arena.add_all(&mut builder);
+            arena.clear();
+        }
     }
-    Ok(nets)
+    arena.add_all(&mut builder);
+    Ok(builder.finish())
+}
+
+/// Temporary adapter for the consumers still on the per-name tables.
+pub(crate) fn legacy_tables(c: &Connectivity) -> (HashMap<String, String>, Vec<NetInfo>) {
+    let components = (0..c.component_count)
+        .map(|id| {
+            (
+                c.instances.get(id).to_string(),
+                c.macro_of(id).unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    let nets = (0..c.nets.len() as u32)
+        .map(|net| NetInfo {
+            name: c.nets.get(net).to_string(),
+            conns: c
+                .conns(net)
+                .map(|(instance, pin)| NetConn {
+                    instance: (instance != PORT).then(|| c.instances.get(instance).to_string()),
+                    pin: c.pins.get(pin).to_string(),
+                })
+                .collect(),
+        })
+        .collect();
+    (components, nets)
 }
 
 pub(crate) fn write_header<W: Write>(
@@ -2561,6 +2700,17 @@ pub(crate) fn read_string<R: Read>(input: &mut R) -> Result<String, String> {
     let mut bytes = vec![0; len as usize];
     input.read_exact(&mut bytes).map_err(|e| e.to_string())?;
     String::from_utf8(bytes).map_err(|e| e.to_string())
+}
+
+/// Read a length-prefixed string into `buf`, replacing its contents.
+pub(crate) fn read_string_into<R: Read>(input: &mut R, buf: &mut String) -> Result<(), String> {
+    let len = read_u64(input)?;
+    let mut bytes = std::mem::take(buf).into_bytes();
+    bytes.clear();
+    bytes.resize(len as usize, 0);
+    input.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+    *buf = String::from_utf8(bytes).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub(crate) fn write_u8<W: Write>(out: &mut W, value: u8) -> Result<(), String> {

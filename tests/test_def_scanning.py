@@ -139,6 +139,22 @@ def test_records_named_like_section_keywords_are_skipped(tmp_path: Path) -> None
     assert def_tools.write_instance_bbox_csv([lef], design, tmp_path / "i.csv") == 3
 
 
+def test_nets_before_components(tmp_path: Path) -> None:
+    # Nets met before COMPONENTS are held until the components are known.
+    _lef, design = write_design(tmp_path, components=3)
+    text = design.read_text(encoding="utf-8")
+    end = "END COMPONENTS\n"
+    components = text[text.index("COMPONENTS") : text.index(end) + len(end)]
+    nets = text[text.index("NETS 3 ;") : text.index("END NETS") + len("END NETS\n")]
+    design.write_text(text.replace(components, "").replace(nets, nets + components), encoding="utf-8")
+
+    cells = _native.clock_tree_cells(
+        design, ["port:clk"], [("INV", ["A"], ["Y"], False, [])], False
+    )
+
+    assert cells == ["u0", "u1", "u2"]
+
+
 def test_long_connection_lists_parse_in_pieces(tmp_path: Path) -> None:
     # 80,000 connections is a ~1.4 MB list: split into pieces parsed in
     # parallel, and the record straddles the 1 MiB read buffer.

@@ -109,6 +109,8 @@ impl Connectivity {
             .then(|| self.macros.get(self.instance_macro[instance as usize]))
     }
 
+    // Used by the clock trace and instance scans in Tasks 4-6.
+    #[allow(dead_code)]
     /// Component name to id; the last definition of a duplicate wins.
     pub(crate) fn component_lookup(&self) -> HashMap<&str, u32> {
         (0..self.component_count)
@@ -116,6 +118,8 @@ impl Connectivity {
             .collect()
     }
 
+    // Used by the clock trace and instance scans in Tasks 4-6.
+    #[allow(dead_code)]
     /// Per-instance `(net, pin)` lists in net order, then connection order.
     pub(crate) fn adjacency(&self) -> Adjacency {
         let count = self.instances.len();
@@ -147,6 +151,8 @@ impl Connectivity {
     }
 }
 
+// Used by the clock trace and instance scans in Tasks 4-6.
+#[allow(dead_code)]
 /// Connections grouped by instance (CSR).
 #[derive(Debug)]
 pub(crate) struct Adjacency {
@@ -155,6 +161,8 @@ pub(crate) struct Adjacency {
     pin: Vec<u32>,
 }
 
+// Used by the clock trace and instance scans in Tasks 4-6.
+#[allow(dead_code)]
 impl Adjacency {
     /// `(net, pin)` of each connection of `instance`.
     pub(crate) fn of(&self, instance: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
@@ -236,6 +244,12 @@ pub(crate) struct ConnectivityBuilder {
     conn_start: Vec<usize>,
     conn_instance: Vec<u32>,
     conn_pin: Vec<u32>,
+}
+
+impl Default for ConnectivityBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConnectivityBuilder {
