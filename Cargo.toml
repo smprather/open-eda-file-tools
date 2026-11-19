@@ -17,6 +17,12 @@ crate-type = ["cdylib"]
 
 [profile.release]
 codegen-units = 1
+lto = "thin"
+
+# Distribution wheels (pyproject `[tool.maturin] profile`): fat LTO, a few percent
+# faster Liberty parsing, but ~3x slower to link than thin.
+[profile.dist]
+inherits = "release"
 lto = "fat"
 
 [dependencies]

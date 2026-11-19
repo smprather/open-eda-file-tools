@@ -43,6 +43,11 @@ uv run maturin develop --release
 
 Re-run `uv run maturin develop --release` after editing any Rust file under `src/`.
 
+`maturin develop --release` builds the `release` profile (thin LTO, fast
+rebuilds; Liberty parsing is about 5% slower). Wheel builds (`uv build --wheel`,
+`uv tool install .`, `pip install .`) set `profile = "dist"` in
+`[tool.maturin]` and build with fat LTO, which is slower to link.
+
 ## Verify
 
 ```bash

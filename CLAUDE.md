@@ -66,7 +66,7 @@ corresponding documentation in the same change:
 
 ```bash
 uv sync --dev
-uv run maturin develop --release   # required after any Rust change
+uv run maturin develop --release   # required after any Rust change (thin LTO; wheels use the fat-LTO `dist` profile)
 
 # Tests
 uv run pytest -q                   # Python tests across Liberty, LEF, and DEF (testpaths = tests/)
