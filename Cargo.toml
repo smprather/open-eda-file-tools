@@ -17,7 +17,7 @@ crate-type = ["cdylib"]
 
 [profile.release]
 codegen-units = 1
-lto = "thin"
+lto = "fat"
 
 [dependencies]
 open-eda-file-tools-core = { path = "core" }
