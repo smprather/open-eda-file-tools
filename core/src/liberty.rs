@@ -1,6 +1,7 @@
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
@@ -3610,7 +3611,35 @@ pub enum ParseLoadError {
     Parse(ParseError),
 }
 
-impl ParseLoadError {}
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Liberty parse error at line {}, column {}: {}",
+            self.line, self.column, self.message
+        )
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+impl fmt::Display for ParseLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseLoadError::Io(err) => write!(f, "{err}"),
+            ParseLoadError::Parse(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for ParseLoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ParseLoadError::Io(err) => Some(err),
+            ParseLoadError::Parse(err) => Some(err),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum CellLookupError {
@@ -3619,20 +3648,46 @@ pub enum CellLookupError {
     Empty(String),
 }
 
-impl CellLookupError {}
+impl fmt::Display for CellLookupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CellLookupError::Unknown(name) => write!(f, "unknown cell {name:?}"),
+            CellLookupError::Parse(err) => write!(f, "{err}"),
+            CellLookupError::Empty(name) => write!(f, "failed to parse cell {name:?}"),
+        }
+    }
+}
+
+impl std::error::Error for CellLookupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CellLookupError::Parse(err) => Some(err),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum CellSourceError {
     Unknown(String),
 }
 
-impl CellSourceError {}
+impl fmt::Display for CellSourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CellSourceError::Unknown(name) => write!(f, "unknown cell {name:?}"),
+        }
+    }
+}
+
+impl std::error::Error for CellSourceError {}
 
 /// Failure of the writer path.
 ///
 /// The writer runs with the GIL released, so it cannot build a `PyErr`
 /// itself: it reports the failure with this plain enum and the caller
 /// converts it to a `PyErr` outside the detached closure.
+#[derive(Debug)]
 pub enum WriteError {
     /// The document was not parsed from a file.
     NoSource,
@@ -3648,7 +3703,31 @@ pub enum WriteError {
     Parse(ParseError),
 }
 
-impl WriteError {}
+impl fmt::Display for WriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WriteError::NoSource => write!(
+                f,
+                "this document has no source file; only documents parsed from a \
+                 file can be written back"
+            ),
+            WriteError::Io(message)
+            | WriteError::Changed(message)
+            | WriteError::Invalid(message) => write!(f, "{message}"),
+            WriteError::Poisoned => write!(f, "document edit log is poisoned"),
+            WriteError::Parse(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for WriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            WriteError::Parse(err) => Some(err),
+            _ => None,
+        }
+    }
+}
 
 impl From<io::Error> for ParseError {
     fn from(value: io::Error) -> Self {

@@ -354,3 +354,81 @@ fn test_open_rejects_non_utf8_path() {
     assert!(format!("{err:?}").contains("not valid UTF-8"), "{err:?}");
     assert!(cell_attributes(&path).is_err());
 }
+
+fn open_index(path: &Path) -> Result<LibraryIndex, Box<dyn std::error::Error>> {
+    Ok(LibraryIndex::open(path)?)
+}
+
+fn cell_of(index: &LibraryIndex, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    index.cell(name)?;
+    Ok(())
+}
+
+fn source_of(index: &LibraryIndex, name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(index.cell_source(name)?)
+}
+
+fn dbu_of(path: &Path) -> Result<i64, Box<dyn std::error::Error>> {
+    Ok(dbu_per_micron(path)?)
+}
+
+#[test]
+fn test_errors_convert_to_box_dyn_error() {
+    let tmp = temp_dir("box_err");
+    let missing = tmp.join("missing");
+    let open_err = open_index(&missing).err().unwrap();
+    assert!(open_err.source().is_some());
+    let dbu_err = dbu_of(&missing).unwrap_err();
+    assert!(dbu_err.source().is_some());
+
+    let lib = write(&tmp, "tiny.lib", LIB);
+    let index = LibraryIndex::open(&lib).unwrap();
+    assert_eq!(
+        cell_of(&index, "NOPE").unwrap_err().to_string(),
+        "unknown cell \"NOPE\""
+    );
+    assert_eq!(
+        source_of(&index, "NOPE").unwrap_err().to_string(),
+        "unknown cell \"NOPE\""
+    );
+}
+
+#[test]
+fn test_missing_files_report_not_found() {
+    use open_eda_file_tools_core::Error;
+    use open_eda_file_tools_core::liberty::ParseLoadError;
+    use std::io::ErrorKind;
+
+    let tmp = temp_dir("not_found");
+    let missing = tmp.join("missing");
+    let lef = write_lef(&tmp);
+
+    fn kind(err: Error) -> ErrorKind {
+        match err {
+            Error::Io(e) => e.kind(),
+            Error::Message(m) => panic!("expected an io error, got message {m:?}"),
+        }
+    }
+    let err = scan_instance_bboxes(&missing, &[lef]).err().unwrap();
+    assert_eq!(kind(err), ErrorKind::NotFound);
+    assert_eq!(
+        kind(dbu_per_micron(&missing).unwrap_err()),
+        ErrorKind::NotFound
+    );
+    let err = scan_net_shapes(&missing, "n", "M1").err().unwrap();
+    assert_eq!(kind(err), ErrorKind::NotFound);
+    assert_eq!(
+        kind(macro_sizes(&[missing.clone()]).unwrap_err()),
+        ErrorKind::NotFound
+    );
+
+    for result in [
+        LibraryIndex::open(&missing).err().unwrap(),
+        cell_attributes(&missing).err().unwrap(),
+    ] {
+        match result {
+            ParseLoadError::Io(e) => assert_eq!(e.kind(), ErrorKind::NotFound),
+            ParseLoadError::Parse(e) => panic!("expected an io error, got {e}"),
+        }
+    }
+}

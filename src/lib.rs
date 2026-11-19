@@ -2288,33 +2288,22 @@ fn filter_timing_arcs(
 }
 
 fn parse_error_to_py(err: ParseError) -> PyErr {
-    PyValueError::new_err(format!(
-        "Liberty parse error at line {}, column {}: {}",
-        err.line, err.column, err.message
-    ))
+    PyValueError::new_err(err.to_string())
 }
 
 fn parse_load_error_to_py(err: ParseLoadError) -> PyErr {
-    match err {
-        ParseLoadError::Io(err) => PyValueError::new_err(err.to_string()),
-        ParseLoadError::Parse(err) => parse_error_to_py(err),
-    }
+    PyValueError::new_err(err.to_string())
 }
 
 fn cell_lookup_error_to_py(err: CellLookupError) -> PyErr {
     match err {
-        CellLookupError::Unknown(name) => PyKeyError::new_err(format!("unknown cell {name:?}")),
-        CellLookupError::Parse(err) => parse_error_to_py(err),
-        CellLookupError::Empty(name) => {
-            PyValueError::new_err(format!("failed to parse cell {name:?}"))
-        }
+        CellLookupError::Unknown(_) => PyKeyError::new_err(err.to_string()),
+        _ => PyValueError::new_err(err.to_string()),
     }
 }
 
 fn cell_source_error_to_py(err: CellSourceError) -> PyErr {
-    match err {
-        CellSourceError::Unknown(name) => PyKeyError::new_err(format!("unknown cell {name:?}")),
-    }
+    PyKeyError::new_err(err.to_string())
 }
 
 fn write_error_to_py(err: WriteError) -> PyErr {

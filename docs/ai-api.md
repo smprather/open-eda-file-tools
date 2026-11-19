@@ -599,7 +599,13 @@ index.attributes();                   // Vec<(String, String)>
 threads::set_threads(Some(4)).unwrap();
 ```
 
-All core errors are `core::Error(String)` (with `From<String>` and
-`From<io::Error>`); the indexed APIs use their own `ParseLoadError` /
-`CellLookupError` / `CellSourceError`. Python-side behavior is untouched:
-the extension wraps these same types.
+DEF and LEF errors are `core::Error`, an enum: `Error::Io(io::Error)` keeps
+the I/O error (match `e.kind()` for `NotFound` vs `PermissionDenied`; the
+message is unchanged) and `Error::Message(String)` carries every other
+failure; it has `From<String>` and `From<io::Error>`. The Liberty APIs use
+`ParseLoadError` (`Io` / `Parse`), `CellLookupError`, `CellSourceError`,
+`ParseError` and `WriteError`. Every error type implements `Debug`, `Display`
+and `std::error::Error` (`source()` is the inner `io::Error` / `ParseError`),
+so `?` into `Box<dyn std::error::Error>` works. `Display` is the text the
+Python bindings raise (for example `unknown cell "X"`). Python-side behavior
+is untouched: the extension wraps these same types.

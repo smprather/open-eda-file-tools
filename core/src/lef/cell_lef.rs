@@ -637,7 +637,10 @@ pub struct MacroSize {
 /// Parse `paths` in order and return every macro's size in microns. The last
 /// definition of a duplicated macro wins.
 pub fn macro_sizes(paths: &[PathBuf]) -> Result<HashMap<String, MacroSize>, crate::Error> {
-    let library = parse_library(paths, None, false).map_err(|err| crate::Error(err.to_string()))?;
+    let library = parse_library(paths, None, false).map_err(|err| match err {
+        LefError::Io(err) => crate::Error::Io(err),
+        LefError::Value(message) => crate::Error::Message(message),
+    })?;
     Ok(library
         .macros
         .iter()
