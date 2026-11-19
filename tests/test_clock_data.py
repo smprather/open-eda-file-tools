@@ -21,6 +21,7 @@ import pytest
 from click.testing import CliRunner
 
 from def_tools import cli
+from liberty_tools import _native
 from def_tools.clock_data import (
     ClockData,
     ClockDataBackendError,
@@ -604,4 +605,65 @@ def test_clock_data_command_reports(design, tmp_path: Path) -> None:
     assert windows.exit_code == 0, windows.output
     assert windows_csv.read_text(encoding="utf-8").splitlines()[2] == (
         "net,,n_buf,c,,0,r,c,0.10,0.14,,,0.02,0.03,,,,,,,"
+    )
+
+
+ESCAPED_DEF = r"""VERSION 5.8 ;
+DESIGN d ;
+UNITS DISTANCE MICRONS 1000 ;
+COMPONENTS 6 ;
+  - u\[0\] BUF + PLACED ( 0 0 ) N ;
+  - dup BUF + PLACED ( 0 0 ) N ;
+  - dup FF + PLACED ( 0 0 ) N ;
+  - bus\/x INV + PLACED ( 0 0 ) N ;
+  - nomacro NOPE + PLACED ( 0 0 ) N ;
+  - plain BUF + PLACED ( 0 0 ) N ;
+END COMPONENTS
+PINS 1 ;
+  - clk + NET clk + DIRECTION INPUT ;
+END PINS
+NETS 4 ;
+  - clk ( PIN clk ) ( u\[0\] A ) ( dup CK ) ( ghost Z ) ;
+  - n\/1 ( u\[0\] X ) ( bus\/x A ) ( nomacro Z ) ( dup A ) ( ghost A ) ;
+  - bus\[2\] ( bus\/x ZN ) ( plain A ) ( PIN pout ) ;
+  - n3 ( plain X ) ( dup Q ) ;
+END NETS
+END DESIGN
+"""
+
+
+def test_clock_object_instances_with_escaped_duplicate_and_net_only_names(
+    tmp_path: Path,
+) -> None:
+    # Escaped names, a duplicated component (the last definition, an
+    # endpoint FF, wins), a port, a macro without a role, and `ghost`, an
+    # instance that appears only in nets. The expected tuple is the output of
+    # the pre-flat-connectivity build (e98bd32), not recomputed here.
+    design = tmp_path / "e.def"
+    design.write_text(ESCAPED_DEF, encoding="utf-8")
+    macros = [
+        ("BUF", ["A"], ["X"], False, []),
+        ("INV", ["A"], ["ZN"], False, []),
+        ("FF", ["D", "CK"], ["Q"], True, ["CK"]),
+    ]
+    nets = ["clk", "n/1", "n\\/1", "bus[2]", "bus\\[2\\]", "n3", "missing"]
+    pins = [
+        ("u[0]", "A"),
+        ("u\\[0\\]", "X"),
+        ("dup", "CK"),
+        ("dup", "Q"),
+        ("bus/x", "ZN"),
+        ("nomacro", "Z"),
+        ("ghost", "A"),
+        ("plain", "A"),
+        ("plain", "Q"),
+        ("-", "clk"),
+        ("-", "pout"),
+        ("-", "nope"),
+    ]
+    assert _native.clock_object_instances(design, nets, pins, macros) == (
+        ["bus\\/x", "plain", "u\\[0\\]"],
+        ["missing"],
+        [("ghost", "A"), ("-", "nope")],
+        ["nomacro"],
     )

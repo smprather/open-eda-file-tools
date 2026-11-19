@@ -1,4 +1,5 @@
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions, create_dir_all};
@@ -419,8 +420,12 @@ pub fn clock_tree_cells_impl(
 }
 
 /// DEF escapes `[`, `]` and `/` inside names; other files usually do not.
-pub(crate) fn unescaped(name: &str) -> String {
-    name.replace('\\', "")
+pub(crate) fn unescaped(name: &str) -> Cow<'_, str> {
+    if name.contains('\\') {
+        Cow::Owned(name.replace('\\', ""))
+    } else {
+        Cow::Borrowed(name)
+    }
 }
 
 #[doc(hidden)]
@@ -433,36 +438,35 @@ pub fn clock_object_instances_impl(
     clock_pins: &[(String, String)],
     macros: &[MacroRole],
 ) -> Result<ClockObjectInstances, String> {
-    let (components, nets) = legacy_tables(&collect_def_connectivity(def_path)?);
+    let c = collect_def_connectivity(def_path)?;
     let macro_map = role_map(macros);
-    let mut cells: HashSet<&str> = HashSet::new();
-    let mut unclassified: HashSet<&str> = HashSet::new();
+    let mut cells: HashSet<u32> = HashSet::new();
+    let mut unclassified: HashSet<u32> = HashSet::new();
 
     let mut unmatched_nets = Vec::new();
     if !clock_nets.is_empty() {
-        let net_by_name: HashMap<String, usize> = nets
-            .iter()
-            .enumerate()
-            .map(|(index, net)| (unescaped(&net.name), index))
+        // Later nets win on a duplicated (unescaped) name.
+        let net_by_name: HashMap<Cow<'_, str>, u32> = (0..c.nets.len() as u32)
+            .map(|net| (unescaped(c.nets.get(net)), net))
             .collect();
         for name in clock_nets {
-            let Some(&index) = net_by_name.get(&unescaped(name)) else {
+            let Some(&net) = net_by_name.get(&unescaped(name)) else {
                 unmatched_nets.push(name.clone());
                 continue;
             };
-            for conn in &nets[index].conns {
-                let Some(instance) = conn.instance.as_deref() else {
+            for (instance, pin) in c.conns(net) {
+                if instance == PORT {
+                    continue;
+                }
+                let Some(macro_name) = c.macro_of(instance) else {
                     continue;
                 };
-                let Some(macro_name) = components.get(instance) else {
-                    continue;
-                };
-                match macro_map.get(macro_name.as_str()) {
+                match macro_map.get(macro_name) {
                     None => {
                         unclassified.insert(instance);
                     }
                     Some(role) => {
-                        if !role.endpoint && has_pin(role.outputs, &conn.pin) {
+                        if !role.endpoint && has_pin(role.outputs, c.pins.get(pin)) {
                             cells.insert(instance);
                         }
                     }
@@ -473,21 +477,18 @@ pub fn clock_object_instances_impl(
 
     let mut unmatched_pins = Vec::new();
     if !clock_pins.is_empty() {
-        let instance_by_name: HashMap<String, (&str, &str)> = components
-            .iter()
-            .map(|(instance, macro_name)| {
-                (
-                    unescaped(instance),
-                    (instance.as_str(), macro_name.as_str()),
-                )
-            })
+        // Ascending ids, so the last definition wins on a duplicated name.
+        let instance_by_name: HashMap<Cow<'_, str>, u32> = (0..c.component_count)
+            .map(|id| (unescaped(c.instances.get(id)), id))
             .collect();
-        let ports: HashSet<String> = nets
-            .iter()
-            .flat_map(|net| net.conns.iter())
-            .filter(|conn| conn.instance.is_none())
-            .map(|conn| unescaped(&conn.pin))
-            .collect();
+        let mut ports: HashSet<Cow<'_, str>> = HashSet::new();
+        for net in 0..c.nets.len() as u32 {
+            for (instance, pin) in c.conns(net) {
+                if instance == PORT {
+                    ports.insert(unescaped(c.pins.get(pin)));
+                }
+            }
+        }
         for (instance, pin) in clock_pins {
             let pin_name = unescaped(pin);
             if instance == "-" {
@@ -496,28 +497,31 @@ pub fn clock_object_instances_impl(
                 }
                 continue;
             }
-            let Some(&(def_instance, macro_name)) = instance_by_name.get(&unescaped(instance))
-            else {
+            let Some(&id) = instance_by_name.get(&unescaped(instance)) else {
                 unmatched_pins.push((instance.clone(), pin.clone()));
                 continue;
             };
+            let macro_name = c.macro_of(id).unwrap_or_default();
             match macro_map.get(macro_name) {
                 None => {
-                    unclassified.insert(def_instance);
+                    unclassified.insert(id);
                 }
                 Some(role) => {
                     if !role.endpoint
                         && (has_pin(role.inputs, &pin_name) || has_pin(role.outputs, &pin_name))
                     {
-                        cells.insert(def_instance);
+                        cells.insert(id);
                     }
                 }
             }
         }
     }
 
-    let sorted = |set: HashSet<&str>| {
-        let mut values: Vec<String> = set.into_iter().map(str::to_string).collect();
+    let sorted = |set: HashSet<u32>| {
+        let mut values: Vec<String> = set
+            .into_iter()
+            .map(|id| c.instances.get(id).to_string())
+            .collect();
         values.sort();
         values
     };
