@@ -4,11 +4,13 @@
 
 **Goal:** The clock trace, clock-object resolution and clock-instances report hold DEF connectivity in flat arrays, with no heap allocation per connection, and give identical results.
 
-**Architecture:** A new module `src/connectivity.rs` holds the model. Names live in append-only `NameTable`s (one `String` plus end offsets). Connections are two `u32` columns (instance id, pin id) in CSR form per net. A per-instance adjacency index is built on demand. Net records still parse in parallel, into views that borrow the record bytes; a builder resolves the names. The DEF scan and the cache loaders both feed the builder. The cache file formats do not change.
+**Architecture:** A new crate-internal module `core/src/connectivity.rs` holds the model. Names live in append-only `NameTable`s (one `String` plus end offsets). Connections are two `u32` columns (instance id, pin id) in CSR form per net. A per-instance adjacency index is built on demand. Net records still parse in parallel, into views that borrow the record bytes; a builder resolves the names. The DEF scan and the cache loaders both feed the builder. The cache file formats do not change.
 
-**Tech Stack:** Rust (PyO3 0.28, rayon, `hashbrown` 0.17 `HashTable`, already vendored), pytest.
+**Tech Stack:** Rust (the `open-eda-file-tools-core` crate: rayon, `hashbrown` 0.17 `HashTable`, already vendored), pytest.
 
 **Spec:** No spec document. Requirements come from the 2026-11-19 measurements below and from the existing behavior of the consumers, which `scripts/def_equivalence.py` pins.
+
+**Revised 2026-11-19 after issue #12:** the DEF code moved from `src/def.rs` to the plain-Rust core crate (`core/src/def.rs`, `core/src/lef/lexer.rs`); `src/def.rs` is now only the pyo3 bindings and the Parquet writer. Paths, gates and visibility below are updated for that layout; the design is unchanged.
 
 ## Background (2026-11-19, commit 0812a7d)
 
@@ -18,7 +20,7 @@
 - 1.02 s building the `HashMap<&str, Vec<(usize, &str)>>` instance index;
 - 0.63 s just freeing memory at the end.
 
-Each connection is a `NetConn { instance: Option<String>, pin: String }` and each component a `HashMap<String, String>` entry, about 20M small allocations. On the 118 MB routed cva6 DEF the same split is 0.15 / 0.03 / 0.03 s. Consumers:
+Each connection is a `NetConn { instance: Option<String>, pin: String }` and each component a `HashMap<String, String>` entry, about 20M small allocations. On the 118 MB routed cva6 DEF the same split is 0.15 / 0.03 / 0.03 s. Consumers (all in `core/src/def.rs`; the pyo3 bindings in `src/def.rs` call the `*_impl` entry points, whose signatures do not change):
 
 - `clock_tree_cells_impl`, `collect_root_nets`;
 - `clock_object_instances_impl`;
@@ -29,11 +31,13 @@ There is also a pre-existing defect. A connection `( u1 A + SYNTHESIZED )` (lega
 
 ## Global Constraints
 
-- Build with `uv run maturin develop --release` after any Rust change, then test with `uv run --no-sync pytest -q`. Plain `uv run` can reinstall a stale cached wheel.
-- Gates before every commit: `cargo test`, `cargo fmt --all --check`, `cargo clippy --release` (warning count must not rise above 26), `uv run --no-sync ruff check .`, `uv run --no-sync ty check`.
-- Output identity: after every task, `scripts/def_equivalence.py <ref .so> <dir>` reports `differences: 0`. Run it on a generated design (`-n 200000`) at default threads and at `--threads 1`, and on a routed DEF when one is available. The reference is built from the commit before Task 1 (Task 1 changes behavior only for DEFs containing `+ SYNTHESIZED`, which the generator does not write).
+- Build with `uv run --no-sync maturin develop --release` after any Rust change (thin LTO, ~20 s incremental), then test with `uv run --no-sync pytest -q`. Plain `uv run` can reinstall a stale cached wheel and triggers a slow fat-LTO `dist` build.
+- Gates before every commit: `cargo test --workspace`, `cargo fmt --all --check`, `cargo clippy --workspace --all-targets` (warning count must not rise above the baseline recorded at the start of the work), `uv run --no-sync ruff check .`, `uv run --no-sync ty check`.
+- Output identity: after every task, `uv run --no-sync python scripts/def_equivalence.py <ref .so> <dir>` reports `differences: 0`. Run it on a generated design (`-n 200000`) at default threads and at `--threads 1`, and on a routed DEF when one is available. The reference is built from the commit before Task 1 (Task 1 changes behavior only for DEFs containing `+ SYNTHESIZED`, which the generator does not write).
 - Cache format unchanged: `CACHE_VERSION` stays 1, and cache files are byte-identical (the equivalence script compares them).
-- Parallel work stays inside `crate::threads::install`.
+- Parallel work stays inside `crate::threads::install` (re-entrant: a nested install keeps the outer pool).
+- Visibility: everything this plan adds is crate-internal (`pub(crate)` or private), per the three tiers in `core/src/lib.rs`. The documented Rust API (`docs/ai-api.md` §8) and the bindings' entry points do not change.
+- New dependency: `hashbrown = { version = "0.17", default-features = false }` goes in `core/Cargo.toml` (it has no dependencies of its own with default features off). Update every place that lists the core crate's dependencies (`docs/ai-api.md` §8, `CLAUDE.md` if it lists them).
 - DEF names compare exactly as today: case-sensitive for instances and pins, with backslash escapes removed only in `clock_object_instances` lookups.
 - Documentation synchronization mandate (`CLAUDE.md`). This plan changes no public API; update `CLAUDE.md` (architecture invariants), `docs/def.md` (performance table) and `docs/sdc.md` if numbers move.
 - Indent with spaces only.
@@ -59,8 +63,8 @@ There is also a pre-existing defect. A connection `( u1 A + SYNTHESIZED )` (lega
 ### Task 1: `+ SYNTHESIZED` inside a connection
 
 **Files:**
-- Modify: `src/lef/lexer.rs` — `read_until_plus_or_semicolon`, `scan_record`
-- Modify: `src/def.rs` — `parse_connection_list` (around line 2095), `split_connection_list` (around line 2135)
+- Modify: `core/src/lef/lexer.rs` — `read_until_plus_or_semicolon`, `scan_record`
+- Modify: `core/src/def.rs` — `parse_connection_list`, `split_connection_list`
 - Test: `tests/test_def_scanning.py`
 
 **Interfaces:**
@@ -80,7 +84,7 @@ def test_synthesized_connections_are_kept(tmp_path):
 
   Add a Rust lexer test `connection_part_skips_plus_inside_parentheses`. Input `- n1 ( u1 A + SYNTHESIZED ) ( u2 B ) + ROUTED M1 ( 0 0 ) ;` must yield `- n1 ( u1 A + SYNTHESIZED ) ( u2 B ) ` and return `true`.
 
-- [ ] **Step 2: Run the tests and see them fail.** Run: `cargo test --lib lexer` and `uv run --no-sync pytest tests/test_def_scanning.py -q`. Expected: FAIL (`expected ')' for net connection, got '+'`).
+- [ ] **Step 2: Run the tests and see them fail.** Run: `cargo test -p open-eda-file-tools-core lexer` and `uv run --no-sync pytest tests/test_def_scanning.py -q`. Expected: FAIL (`expected ')' for net connection, got '+'`).
 
 - [ ] **Step 3: Implement.** In `scan_record` with `stop_at_plus`, track parenthesis depth outside quotes and comments, and stop at `+` only at depth 0. `parse_connection_list` accepts an optional `+ SYNTHESIZED` before the closing `)`. `split_connection_list` finds the list end with the same depth-0 rule instead of `memchr(b'+')`.
 
@@ -88,15 +92,16 @@ def test_synthesized_connections_are_kept(tmp_path):
 
 - [ ] **Step 5: Commit.** `git commit -m "DEF connectivity: keep + SYNTHESIZED connections"`
 
-### Task 2: `src/connectivity.rs` model and builder
+### Task 2: `core/src/connectivity.rs` model and builder
 
 **Files:**
-- Create: `src/connectivity.rs` (register with `pub mod connectivity;` in `src/lib.rs`)
-- Modify: `Cargo.toml` (add `hashbrown = { version = "0.17", default-features = false }`; run `cargo build --offline` to confirm the vendored crate resolves; then run `python scripts/check_vendored_crates.py`)
-- Test: unit tests in `src/connectivity.rs`
+- Create: `core/src/connectivity.rs` (register with `pub(crate) mod connectivity;` in `core/src/lib.rs`)
+- Modify: `core/Cargo.toml` (add `hashbrown = { version = "0.17", default-features = false }`; run `cargo build --offline -p open-eda-file-tools-core` to confirm the vendored crate resolves; then run `uv run --no-sync python scripts/check_vendored_crates.py`); the dependency lists in `docs/ai-api.md` §8 (and `CLAUDE.md` if it lists them)
+- Modify: `core/src/threads.rs` — hoist the `SERIAL` mutex of its test module to module level as `#[cfg(test)] pub(crate) static TEST_LIMIT_LOCK: Mutex<()>`, used by every unit test in the crate that writes the global limit
+- Test: unit tests in `core/src/connectivity.rs`
 
 **Interfaces:**
-- Produces (all `pub`, used by Tasks 3–7):
+- Produces (all `pub(crate)`, used by Tasks 3–7; the signatures below say `pub` for brevity):
 
 ```rust
 pub struct NameTable { /* text: String, ends: Vec<usize> */ }
@@ -151,20 +156,20 @@ impl ConnectivityBuilder {
   - `unknown_instances_get_ids_past_the_components`: components `u1`; nets `( * VDD ) ( u9 A ) ( * VSS )`. Expect ids `component_count` (for `*`) and `component_count + 1` (for `u9`); the second `*` reuses the first id; `macro_of` is `None` for both.
   - `ports_use_the_port_id`: `( PIN clk )` gives `(PORT, pin id of "clk")`.
   - `adjacency_keeps_net_then_connection_order`: nets `n0 ( u1 A ) ( u1 B )` and `n1 ( u1 Y )`. Expect `adjacency().of(u1)` to yield `[(0, A), (0, B), (1, Y)]`.
-  - `parallel_and_single_thread_builds_agree`: 10,000 random nets built under `threads::install` and under a 1-thread limit give equal `conn_instance`, `conn_pin` and `pins`.
+  - `parallel_and_single_thread_builds_agree`: 10,000 random nets (a fixed-seed generator in the test; no new dev-dependency) built with no limit and with `set_threads(Some(1))` give equal `conn_instance`, `conn_pin` and `pins`. Hold `threads::TEST_LIMIT_LOCK` for the whole test and restore `set_threads(None)` even on panic. (A test-local rayon pool does not work: `threads::install` only stays inside pools it created.)
 
-- [ ] **Step 2: Run the tests and see them fail.** Run: `cargo test --lib connectivity`. Expected: compile failure (module missing).
+- [ ] **Step 2: Run the tests and see them fail.** Run: `cargo test -p open-eda-file-tools-core connectivity`. Expected: compile failure (module missing).
 
 - [ ] **Step 3: Implement** the module to the interface above.
 
-- [ ] **Step 4: Run the tests and see them pass.** `cargo test --lib connectivity`, then the full gates.
+- [ ] **Step 4: Run the tests and see them pass.** `cargo test -p open-eda-file-tools-core connectivity`, then the full gates.
 
 - [ ] **Step 5: Commit.** `git commit -m "connectivity: flat name tables and CSR connections"`
 
 ### Task 3: Build `Connectivity` from the DEF and the cache
 
 **Files:**
-- Modify: `src/def.rs` — `parse_net_connections_record` (returns `NetConns<'_>`), `parse_connection_list`, `collect_def_connectivity`, `collect_component_section`, `collect_net_connectivity`, `NetCacheWriter::flush`, `write_net_info` (takes `&NetConns<'_>`), `load_components_bin` + `load_connectivity_bin` (replaced by `load_connectivity`)
+- Modify: `core/src/def.rs` — `parse_net_connections_record` (returns `NetConns<'_>`), `parse_connection_list`, `collect_def_connectivity`, `collect_component_section`, `collect_net_connectivity`, `NetCacheWriter::flush`, `write_net_info` (takes `&NetConns<'_>`), `load_components_bin` + `load_connectivity_bin` (replaced by `load_connectivity`)
 - Test: `tests/test_def_scanning.py`
 
 **Interfaces:**
@@ -198,7 +203,7 @@ def test_nets_before_components(tmp_path):
 ### Task 4: Clock trace on `Connectivity`
 
 **Files:**
-- Modify: `src/def.rs` — `clock_tree_cells_impl` (around line 630), `collect_root_nets`, `role_map`
+- Modify: `core/src/def.rs` — `clock_tree_cells_impl`, `collect_root_nets`, `role_map`
 
 **Interfaces:**
 - Consumes: `Connectivity`, `Adjacency`, `component_lookup` (Task 2); `collect_def_connectivity` (Task 3).
@@ -208,14 +213,14 @@ def test_nets_before_components(tmp_path):
 
 - [ ] **Step 2: Verify.** `uv run --no-sync pytest tests/test_sdc.py tests/test_clock_data.py tests/test_def_scanning.py -q`, then the equivalence script (its `clock_tree_cells prune=True/False` lines must be `ok`).
 
-- [ ] **Step 3: Measure.** Run `uv run --no-sync python scripts/def_bench.py <generated 2M dir>`. Record `clock trace`; expected well under 2.66 s (target ≤ 1.3 s once Task 7 removes the adapter).
+- [ ] **Step 3: Measure.** Run `uv run --no-sync python <clock_probe.py> <ref .so> <generated 2M design.def>` (a controller-provided scratch script, path given in the dispatch: old vs new `clock_tree_cells` time, each build in its own process). Record both; expected well under the reference (target ≤ 1.3 s once Task 7 removes the adapter).
 
 - [ ] **Step 4: Commit.** `git commit -m "clock trace: run on flat connectivity"`
 
 ### Task 5: Clock-object resolution on `Connectivity`
 
 **Files:**
-- Modify: `src/def.rs` — `clock_object_instances_impl` (around line 782), `unescaped` (Decision 5)
+- Modify: `core/src/def.rs` — `clock_object_instances_impl`, `unescaped` (Decision 5)
 
 **Interfaces:**
 - Consumes: Task 2/3 interfaces.
@@ -230,7 +235,7 @@ def test_nets_before_components(tmp_path):
 ### Task 6: `clock-instances` report on `Connectivity`
 
 **Files:**
-- Modify: `src/def.rs` — `write_clock_instances_csv_impl`, `write_clock_instances_csv_from_cache_impl`, `write_clock_instances_csv_stream`, `seed_clock_nets`, `traverse_clock_instances`
+- Modify: `core/src/def.rs` — `write_clock_instances_csv_impl`, `write_clock_instances_csv_from_cache_impl`, `write_clock_instances_csv_stream`, `seed_clock_nets`, `traverse_clock_instances`
 
 **Interfaces:**
 - Consumes: `collect_def_connectivity`, `load_connectivity` (Task 3); `Adjacency` (Task 2).
@@ -244,13 +249,13 @@ def test_nets_before_components(tmp_path):
 ### Task 7: Remove the old types; acceptance
 
 **Files:**
-- Modify: `src/def.rs` — delete `NetConn`, `NetInfo`, `legacy_tables` and every remaining use
-- Modify: `CLAUDE.md` (DEF invariants: connectivity lives in `src/connectivity.rs`; ids and adjacency order per Decisions 1 and 4), `docs/def.md` (performance table)
+- Modify: `core/src/def.rs` — delete `NetConn`, `NetInfo`, `legacy_tables` and every remaining use
+- Modify: `CLAUDE.md` (DEF invariants: connectivity lives in `core/src/connectivity.rs`; ids and adjacency order per Decisions 1 and 4), `docs/def.md` (performance table)
 
-- [ ] **Step 1: Delete and compile.** `cargo build --release` with no reference to the removed types; `cargo clippy --release` count ≤ 26.
+- [ ] **Step 1: Delete and compile.** `cargo build --workspace --release` with no reference to the removed types; `cargo clippy --workspace --all-targets` count not above the baseline.
 
 - [ ] **Step 2: Full gates and equivalence.** Run all gates, then `scripts/def_equivalence.py` on the generated design (default and `--threads 1`) and on a routed DEF if available. Expected: `differences: 0` everywhere.
 
-- [ ] **Step 3: Measure and record.** Run `scripts/def_bench.py` on the generated 2M design and on cva6. For peak memory, run each case in its own process: `uv run --no-sync python -c "import resource,sys; from liberty_tools import _native as n; n.clock_tree_cells(sys.argv[1], ['port:clk'], [], True); print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024, 'MB')" <def>`, before (at the commit before Task 1) and after. Expected: `clock trace` ≤ 1.3 s on the generated design, and lower peak RSS. Put the new numbers in `docs/def.md` and remove its sentence saying the memory layout is the clock trace's main cost.
+- [ ] **Step 3: Measure and record.** Run `scripts/def_bench.py` on the generated 2M design and on cva6 (paths given in the dispatch). For time and peak memory, old against new, run `<clock_probe.py> <ref .so> <def>` on both designs: it runs each build in its own process and prints `clock_tree_cells` seconds and peak RSS. Expected: `clock trace` ≤ 1.3 s on the generated design, and lower peak RSS. Put the new numbers in `docs/def.md` and remove its sentence saying the memory layout is the clock trace's main cost.
 
 - [ ] **Step 4: Commit.** `git commit -m "DEF connectivity: drop per-connection strings"`
