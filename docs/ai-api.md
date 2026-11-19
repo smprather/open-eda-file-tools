@@ -556,7 +556,7 @@ no C toolchain). Downstream Rust tools depend on it directly:
 
 ```toml
 [dependencies]
-open-eda-file-tools-core = { git = "https://github.com/smprather/open-eda-file-tools", branch = "rust-rlib-core" }
+open-eda-file-tools-core = { git = "https://github.com/smprather/open-eda-file-tools", branch = "main" }
 ```
 
 ```rust

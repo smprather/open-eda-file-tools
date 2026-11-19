@@ -2,7 +2,6 @@
 //! (issue #12): DEF instance bboxes, LEF macro sizes, and the Liberty
 //! attribute-only / LibraryIndex surface.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use open_eda_file_tools_core::def::{
@@ -10,7 +9,7 @@ use open_eda_file_tools_core::def::{
 };
 use open_eda_file_tools_core::lef::{MacroSize, macro_sizes};
 use open_eda_file_tools_core::liberty::{CellAttributes, LibraryIndex, cell_attributes};
-use open_eda_file_tools_core::threads::set_threads;
+use open_eda_file_tools_core::threads::{self, set_threads};
 
 /// A per-test scratch directory under the system temp dir (the core crate has
 /// no dev-dependencies by design; the existing unit tests do the same).
@@ -199,23 +198,68 @@ fn test_macro_sizes_microns() {
 
 #[test]
 fn test_scan_thread_count_does_not_change_output() {
+    // 10,000 components span several scan chunks, so the parallel path runs
+    // and a row-order or content bug under a different thread count shows.
+    const COMPONENTS: i64 = 10_000;
+    let mut text =
+        format!("VERSION 5.8 ;\nUNITS DISTANCE MICRONS 1000 ;\nCOMPONENTS {COMPONENTS} ;\n");
+    for i in 0..COMPONENTS {
+        let (macro_name, orient) = if i % 3 == 0 {
+            ("BUF", "FS")
+        } else {
+            ("INV", "N")
+        };
+        text.push_str(&format!(
+            "  - u{i} {macro_name} + PLACED ( {} {} ) {orient} ;\n",
+            i * 7,
+            (i % 97) * 13
+        ));
+    }
+    text.push_str("END COMPONENTS\n");
+
     let tmp = temp_dir("core_api");
-    let def = write_def(&tmp, DEF);
-    let lef = write_lef(&tmp);
-    let rows = |lefs: &[PathBuf]| -> Vec<(String, i64, i64)> {
-        scan_instance_bboxes(&def, lefs)
+    let def = write_def(&tmp, &text);
+    let lef = write(
+        &tmp,
+        "two_macros.lef",
+        "VERSION 5.8 ;\nMACRO INV\n  SIZE 1.2 BY 2.4 ;\nEND INV\n\
+MACRO BUF\n  SIZE 2.0 BY 2.4 ;\nEND BUF\n",
+    );
+    let rows = || -> Vec<(String, String, i64, i64, i64, i64)> {
+        scan_instance_bboxes(&def, &[lef.clone()])
             .unwrap()
             .map(|row| {
                 let row = row.unwrap();
-                (row.instance.clone(), row.llx, row.lly)
+                (
+                    row.instance.clone(),
+                    row.macro_name.clone(),
+                    row.llx,
+                    row.lly,
+                    row.urx,
+                    row.ury,
+                )
             })
             .collect()
     };
-    let default = rows(&[lef.clone()]);
-    set_threads(Some(1)).unwrap();
-    let limited = rows(&[lef.clone()]);
+
+    let default = rows();
+    assert_eq!(default.len(), COMPONENTS as usize);
+    assert_eq!(default[0].0, "u0");
+    assert_eq!(default[9_999].0, "u9999");
+
+    let outcome = std::panic::catch_unwind(|| {
+        set_threads(Some(1)).unwrap();
+        assert_eq!(threads::get_threads(), 1);
+        let one = rows();
+        set_threads(Some(3)).unwrap();
+        let three = rows();
+        (one, three)
+    });
     set_threads(None).unwrap();
-    assert_eq!(default, limited);
+    let (one, three) = outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    assert_eq!(default, one);
+    assert_eq!(default, three);
+    assert_eq!(default, rows());
 }
 
 #[test]
@@ -343,6 +387,7 @@ fn test_macro_sizes_respects_duplicate_last_wins() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_open_rejects_non_utf8_path() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;

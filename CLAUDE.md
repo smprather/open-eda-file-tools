@@ -21,9 +21,10 @@ libraries and command-line tools under the `open-eda-file-tools` umbrella:
 pyproject.toml, Cargo.toml  Single project manifest; Cargo.toml is a workspace root
                             (members = ["core"]) and the bindings crate
 core/                       Plain-Rust rlib `open-eda-file-tools-core` (issue #12):
-core/src/lib.rs             Liberty lexer/parser/evaluator/data model + LibraryIndex + public API
+core/src/lib.rs             Crate root: public re-exports and `Error`
+core/src/liberty.rs         Liberty lexer/parser/evaluator/data model + LibraryIndex + public API
 core/src/def.rs             DEF scanner, bbox/net-shape/clock logic, cache (no Arrow)
-core/src/lef/               Shared LEF/DEF tokenizer + cell LEF parser
+core/src/lef/               Shared LEF/DEF tokenizer (`lexer.rs`) + cell LEF parser (`cell_lef.rs`)
 core/src/threads.rs         Process-wide CPU limit (`set_threads`)
 src/                        The `_native` cdylib (pyo3 shell over core):
 src/lib.rs                  Liberty pyclasses/pyfunctions + pymodule registration
@@ -111,7 +112,7 @@ writer machinery (surgical attribute edits) is pure Rust in
 never hold a second copy of its logic.
 
 ```
-core/src/lib.rs            Rust: Liberty lexer, parser, boolean evaluator, data model, LibraryIndex
+core/src/liberty.rs        Rust: Liberty lexer, parser, boolean evaluator, data model, LibraryIndex
 src/lib.rs                 pyo3: pyclasses/pyfunctions wrapping core, module `_native`
 liberty_tools/__init__.py  Python wrapper classes (LibertyDocument, Cell, Pin, …)
 liberty_tools/comparison.py  Python library comparison (arc matching, grid alignment)
@@ -119,7 +120,7 @@ liberty_tools/__init__.pyi Type stubs
 tests/                     Pytest integration tests (inline fixture strings, no large files)
 ```
 
-### Rust layer (`core/src/lib.rs`)
+### Rust layer (`core/src/liberty.rs`)
 
 The Liberty machinery is a single core file (the pyo3 shell in `src/lib.rs`
 wraps it); it contains:
@@ -200,8 +201,8 @@ Logic-symbol rendering lessons learned:
 `lef_tools` owns the cell LEF parser and the shared tokenizer:
 
 ```
-src/lef/lexer.rs     streaming LEF/DEF tokenizer (also used by `src/def.rs`)
-src/lef/cell_lef.rs  MACRO / PIN / PORT / RECT model in microns
+core/src/lef/lexer.rs     streaming LEF/DEF tokenizer (also used by `core/src/def.rs`)
+core/src/lef/cell_lef.rs  MACRO / PIN / PORT / RECT model in microns
 lef_tools/           Python wrapper and `lef-tools` CLI
 ```
 ### Key behaviors to preserve
@@ -228,7 +229,8 @@ lef_tools/           Python wrapper and `lef-tools` CLI
 `def_tools` owns the DEF pipeline and uses `crate::lef` for macro sizes:
 
 ```
-src/def.rs                DEF parser, streaming reads, binary cache, Parquet/CSV/table writers
+core/src/def.rs           DEF parser, streaming reads, binary cache
+src/def.rs                DEF pyclasses/pyfunctions, Parquet/CSV/table writers
 def_tools/cli.py          click CLI (`def-tools <command>`)
 def_tools/instances.py    instance bbox dumper (`def-tools instances`, CSV/Parquet/table in microns)
 def_tools/sdc.py          clock roots for `clock-instances` (adapter over `sdc_tools.clocks`)
@@ -300,7 +302,7 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   any record is a clock record (real per-edge files tag every clock net as
   data too).
 - **Clock net -> its drivers; clock pin -> its instance; endpoints excluded.**
-  `clock_object_instances` (`src/def.rs`) marks non-endpoint instances with an
+  `clock_object_instances` (`core/src/def.rs`) marks non-endpoint instances with an
   output on a clock net, or with a clock pin that is an output or
   clock-through input. Names compare with DEF backslash escapes removed.
 - **The binary cache is versioned.** Magic headers and `CACHE_VERSION` guard
@@ -327,13 +329,13 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   tier; promote it only when the bindings or the documented API need it, and
   a type that appears in a documented signature or field is documented too.
 - **Scan and parse overlap only within the limit.** `for_each_batch`
-  (`src/def.rs`) runs the sequential scanner on its own thread one batch ahead
+  (`core/src/def.rs`) runs the sequential scanner on its own thread one batch ahead
   and gives the parallel part `n - 1` workers; with `n = 1` nothing overlaps.
 - **Output never depends on batching or thread count.** Batches parse in
   parallel chunks and are reassembled in record order; the first error in
   record order is the one reported. Long connection lists split only at a
   `(` that follows `)` (`split_connection_list`), never inside quotes.
-- **The tokenizer scans slices, not bytes.** `src/lef/lexer.rs` finds record
+- **The tokenizer scans slices, not bytes.** `core/src/lef/lexer.rs` finds record
   ends with memchr and word ends with a byte-class table; records the caller
   does not need are consumed with `skip_until_semicolon` (no copy), and a
   `-` record outside the sections a pass reads is skipped whole, so names
@@ -341,7 +343,7 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   The connectivity pass keeps only a net's connection list
   (`read_until_plus_or_semicolon`), never its routing.
 - **All route geometry comes from one state machine.** `parse_net_shapes_record`
-  (`src/def.rs`) drives the direct scan, the Python iterator and the cache
+  (`core/src/def.rs`) drives the direct scan, the Python iterator and the cache
   query. `read_route_point` resolves `*` against the previous point (an error
   when there is none), optional extension values, `VIRTUAL` (previous point
   updated, no shape) and `MASK`; `RECT ( dx dy dx dy )` deltas and net-level
@@ -389,7 +391,7 @@ sdc_tools/cli.py     `sdc-tools clocks` / `sdc-tools clock-cells`
 - **Records cross the process boundary as JSON** emitted by the prelude and
   parsed with `json.loads`; the prelude must stay Tcl 8.6-compatible.
 - **Clock-tree cells come from connectivity, never names.** `clock_tree_cells`
-  (`src/def.rs`) seeds nets from the SDC roots and follows input→output through
+  (`clock_tree_cells_impl` in `core/src/def.rs`) seeds nets from the SDC roots and follows input→output through
   combinational cells; endpoints end the trace and are not reported. LEF is
   not needed.
 - **One Liberty clock-role model, shared.** `def_tools/clock_roles.py`

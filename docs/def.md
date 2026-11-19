@@ -201,7 +201,7 @@ The same readers are also available as a plain Rust rlib with no Python
 dependency: `open-eda-file-tools-core` — `def::scan_instance_bboxes`,
 `def::dbu_per_micron`, `def::scan_net_shapes`, `lef::macro_sizes`,
 `liberty::cell_attributes` / `liberty::LibraryIndex`. See
-[docs/ai-api.md §8](../ai-api.md).
+[docs/ai-api.md §8](ai-api.md#8-rust-core-open-eda-file-tools-core--plain-rust-no-python).
 
 ```python
 import def_tools
