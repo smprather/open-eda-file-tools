@@ -118,16 +118,18 @@ pub fn set_threads(threads: Option<usize>) -> Result<(), crate::Error> {
     Ok(())
 }
 
+/// Every unit test in the crate that writes the process-wide `LIMIT` holds
+/// this for its whole body, so tests never see each other's limit.
+#[cfg(test)]
+pub(crate) static TEST_LIMIT_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Both tests write the process-wide `LIMIT`; run them one at a time.
-    static SERIAL: Mutex<()> = Mutex::new(());
-
     #[test]
     fn limit_controls_the_pool_size() {
-        let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        let _serial = TEST_LIMIT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         LIMIT.store(3, Ordering::Relaxed);
         assert_eq!(budget(), 3);
         assert_eq!(install(rayon::current_num_threads), 3);
@@ -149,7 +151,7 @@ mod tests {
 
     #[test]
     fn nested_install_keeps_the_outer_pool() {
-        let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        let _serial = TEST_LIMIT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         LIMIT.store(3, Ordering::Relaxed);
         let nested = install_beside_scanner(|| install(rayon::current_num_threads));
         let nested_for = install_for(true, || install_for(false, rayon::current_num_threads));

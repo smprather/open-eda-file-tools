@@ -10,6 +10,9 @@
 //! else is crate-private. Every public entry point that runs parallel work
 //! does so inside the [`threads`] CPU limit.
 
+// Task 3 wires the module into the DEF scan and removes the allowance.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod connectivity;
 pub mod def;
 pub mod lef;
 pub mod liberty;

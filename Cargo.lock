@@ -650,6 +650,7 @@ name = "open-eda-file-tools-core"
 version = "2026.11.13"
 dependencies = [
  "flate2",
+ "hashbrown",
  "memchr",
  "quine-mc_cluskey",
  "rayon",

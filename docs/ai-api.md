@@ -552,7 +552,7 @@ for net in pex.nets:
 
 The repo is a Cargo workspace: the root `Cargo.toml` is the Python extension
 (`_native`), and `core/` is `open-eda-file-tools-core`, an **rlib** with no
-pyo3, Arrow or Parquet in its dependency graph (flate2/zlib-rs, memchr,
+pyo3, Arrow or Parquet in its dependency graph (flate2/zlib-rs, hashbrown, memchr,
 rayon, quine-mc_cluskey only — builds fully offline from a vendored mirror,
 no C toolchain). Downstream Rust tools depend on it directly:
 
