@@ -90,3 +90,31 @@ def test_openroad_route_from_the_failing_design(tmp_path):
 """)
     assert rows(design, "n0", "Metal2") == [("", 0, 824640, 895020, 824640, 897960, 824640, 895020, 824640, 897960)]
     assert rows(design, "n0", "Metal3") == [("", 0, 824640, 895020, 830400, 895020, 824640, 895020, 830400, 895020)]
+
+
+VIAS = """
+  - b ( u1 Y ) ( u2 A )
+    + ROUTED met2 TAPER ( 0 0 ) ( 100 * ) via12 ( 100 50 ) ( 200 * )
+    NEW met1 TAPERRULE rule1 ( 0 0 ) RECT ( 30 40 -10 -20 )
+    NEW met1 STYLE 2 ( 5 5 ) ( 5 15 ) via23 N ;
+"""
+
+
+def test_segments_after_a_via_are_skipped_and_counted(tmp_path):
+    design = write_def(tmp_path, VIAS)
+    assert rows(design, "b", "met2") == [("", 0, 0, 0, 100, 0, 0, 0, 100, 0)]
+
+
+def test_rect_patch_rows(tmp_path):
+    design = write_def(tmp_path, VIAS)
+    assert rows(design, "b", "met1") == [
+        ("RECT", 0, -10, -20, 30, 40, -10, -20, 30, 40),
+        ("", 0, 5, 5, 5, 15, 5, 5, 5, 15),
+    ]
+
+
+def test_rect_without_previous_point_is_an_error(tmp_path):
+    design = write_def(tmp_path, "  - c ( u1 Y ) + ROUTED met1 RECT ( 0 0 1 1 ) ;\n")
+    with pytest.raises(RuntimeError, match="RECT with no previous point"):
+        list(def_tools.net_shapes(design, "c", "met1"))
+

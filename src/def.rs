@@ -388,6 +388,7 @@ impl NetShapeIter {
             }
             self.pending = process_net_record_batch(&batch, &self.net, &self.layer)
                 .map_err(to_py_err)?
+                .0
                 .into();
         }
     }
@@ -1756,7 +1757,7 @@ fn write_net_shapes_csv_stream<W: Write>(
         if batch.is_empty() {
             break;
         }
-        let shapes = process_net_record_batch(&batch, net, layer)?;
+        let (shapes, _) = process_net_record_batch(&batch, net, layer)?;
         let mut buffer = String::with_capacity(shapes.len() * 128);
         for shape in shapes {
             append_net_shape_csv_row(&mut buffer, &shape);
@@ -1778,7 +1779,7 @@ fn write_net_shapes_records_csv<W: Write>(
         "net,section,route_status,shape_type,layer,width,x1,y1,x2,y2,llx,lly,urx,ury"
     )
     .map_err(|e| e.to_string())?;
-    let shapes = process_net_record_batch(records, net, layer)?;
+    let (shapes, _) = process_net_record_batch(records, net, layer)?;
     let mut buffer = String::with_capacity(shapes.len() * 128);
     for shape in shapes {
         append_net_shape_csv_row(&mut buffer, &shape);
@@ -1846,12 +1847,18 @@ fn process_net_record_batch(
     batch: &[NetRecord],
     net: &[u8],
     layer: &[u8],
-) -> Result<Vec<NetShape>, String> {
-    let nested: Result<Vec<Vec<NetShape>>, String> = batch
+) -> Result<(Vec<NetShape>, SkippedRoutes), String> {
+    let nested: Result<Vec<(Vec<NetShape>, SkippedRoutes)>, String> = batch
         .par_iter()
         .map(|record| parse_net_shapes_record(record, net, layer))
         .collect();
-    Ok(nested?.into_iter().flatten().collect())
+    let mut shapes = Vec::new();
+    let mut skipped = SkippedRoutes::default();
+    for (mut record_shapes, record_skipped) in nested? {
+        shapes.append(&mut record_shapes);
+        skipped.add(record_skipped);
+    }
+    Ok((shapes, skipped))
 }
 
 fn parse_component_record<'a>(
@@ -1963,19 +1970,23 @@ fn parse_net_shapes_record(
     record: &NetRecord,
     target_net: &[u8],
     target_layer: &[u8],
-) -> Result<Vec<NetShape>, String> {
+) -> Result<(Vec<NetShape>, SkippedRoutes), String> {
     let mut tokens = ByteTokens::new(&record.bytes);
     tokens.expect(b"-", record.offset, "net record")?;
     let net = tokens
         .next()
         .ok_or_else(|| format!("expected net name near DEF byte {}", record.offset))?;
     if !eq_token(net, target_net) {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), SkippedRoutes::default()));
     }
     let net_str = token_to_str(net, record.offset, "net name")?;
 
     let mut shapes = Vec::new();
+    let mut skipped = SkippedRoutes::default();
     let mut current_status: Option<&'static str> = None;
+    // `None` means the layer cannot be known: either no path has started or
+    // the coordinates sit after a via, whose other routing layer is unknown
+    // without via definitions.
     let mut current_layer: Option<&[u8]> = None;
     let mut current_width = 0i64;
     let mut current_shape = "";
@@ -2033,35 +2044,138 @@ fn parse_net_shapes_record(
             continue;
         }
 
+        if token == b"TAPER" {
+            continue;
+        }
+
+        if token == b"TAPERRULE" || token == b"STYLE" {
+            let _rule = tokens.next();
+            continue;
+        }
+
+        if token == b"RECT" {
+            tokens.expect(b"(", record.offset, "RECT deltas")?;
+            let dx1 = tokens
+                .next_i64(record.offset, "RECT delta")?
+                .ok_or_else(|| format!("expected RECT delta near DEF byte {}", record.offset))?;
+            let dy1 = tokens
+                .next_i64(record.offset, "RECT delta")?
+                .ok_or_else(|| format!("expected RECT delta near DEF byte {}", record.offset))?;
+            let dx2 = tokens
+                .next_i64(record.offset, "RECT delta")?
+                .ok_or_else(|| format!("expected RECT delta near DEF byte {}", record.offset))?;
+            let dy2 = tokens
+                .next_i64(record.offset, "RECT delta")?
+                .ok_or_else(|| format!("expected RECT delta near DEF byte {}", record.offset))?;
+            tokens.expect(b")", record.offset, "RECT deltas")?;
+            let Some(previous) = last_point else {
+                return Err(format!(
+                    "RECT with no previous point near DEF byte {}",
+                    record.offset
+                ));
+            };
+            let (x1, y1) = (previous.x + dx1, previous.y + dy1);
+            let (x2, y2) = (previous.x + dx2, previous.y + dy2);
+            let (llx, urx) = if x1 <= x2 { (x1, x2) } else { (x2, x1) };
+            let (lly, ury) = if y1 <= y2 { (y1, y2) } else { (y2, y1) };
+            match current_layer {
+                Some(layer) if eq_token(layer, target_layer) => {
+                    shapes.push(NetShape {
+                        net: net_str.to_string(),
+                        section: record.section.to_string(),
+                        route_status: current_status.unwrap_or("").to_string(),
+                        shape_type: "RECT".to_string(),
+                        layer: token_to_str(layer, record.offset, "route layer")?.to_string(),
+                        width: 0,
+                        x1: llx,
+                        y1: lly,
+                        x2: urx,
+                        y2: ury,
+                        llx,
+                        lly,
+                        urx,
+                        ury,
+                    });
+                }
+                Some(_) => {}
+                None => skipped.after_via += 1,
+            }
+            continue;
+        }
+
         if token == b"(" {
-            if current_layer.is_none() || current_status.is_none() {
+            if current_status.is_none() {
                 tokens.skip_until_close();
                 continue;
             }
             let point = read_route_point(&mut tokens, last_point, record.offset)?;
-            if let (Some(previous), Some(layer), Some(status)) =
-                (last_point, current_layer, current_status)
-            {
-                if eq_token(layer, target_layer) {
-                    shapes.push(make_net_shape(
-                        &RouteContext {
-                            net: net_str,
-                            section: record.section,
-                            status,
-                            shape_type: current_shape,
-                            layer: token_to_str(layer, record.offset, "route layer")?,
-                            width: current_width,
-                        },
-                        previous,
-                        point,
-                    ));
+            if let Some(previous) = last_point {
+                match current_layer {
+                    Some(layer) if eq_token(layer, target_layer) => {
+                        let status = current_status.expect("status checked above");
+                        shapes.push(make_net_shape(
+                            &RouteContext {
+                                net: net_str,
+                                section: record.section,
+                                status,
+                                shape_type: current_shape,
+                                layer: token_to_str(layer, record.offset, "route layer")?,
+                                width: current_width,
+                            },
+                            previous,
+                            point,
+                        ));
+                    }
+                    Some(_) => {}
+                    None => skipped.after_via += 1,
                 }
             }
             last_point = Some(point);
+            continue;
+        }
+
+        // Any other bare word after a point is a via: the next coordinates
+        // are on the via's other routing layer, which is unknown here, so
+        // those segments are skipped and counted.
+        if last_point.is_some() {
+            let saved = tokens.pos;
+            if !tokens
+                .next()
+                .is_some_and(|next| orientation(next).is_some())
+            {
+                tokens.pos = saved;
+            }
+            let saved = tokens.pos;
+            if tokens.next() == Some(b"DO") {
+                for _ in 0..6 {
+                    tokens.next();
+                }
+            } else {
+                tokens.pos = saved;
+            }
+            current_layer = None;
         }
     }
 
-    Ok(shapes)
+    Ok((shapes, skipped))
+}
+
+/// Route pieces a record could not place: segments after a via (the via's
+/// other layer is unknown without via definitions), `+ POLYGON` patches and
+/// `+ SUBNET` wiring.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+struct SkippedRoutes {
+    after_via: u64,
+    polygon: u64,
+    subnet: u64,
+}
+
+impl SkippedRoutes {
+    fn add(&mut self, other: SkippedRoutes) {
+        self.after_via += other.after_via;
+        self.polygon += other.polygon;
+        self.subnet += other.subnet;
+    }
 }
 
 /// A route coordinate with an optional wire extension value.
