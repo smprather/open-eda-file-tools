@@ -330,8 +330,8 @@ for bbox in def_tools.instance_bboxes(lefs: Sequence[str | Path], def_path: str 
 for shape in def_tools.net_shapes(def_path: str | Path, net: str, layer: str):
     shape.net -> str
     shape.section -> str        # "NETS" | "SPECIALNETS"
-    shape.route_status -> str   # "" for net-level `+ RECT` patches
-    shape.shape_type -> str     # "" for wire segments, "RECT" for RECT patches
+    shape.route_status -> str   # net-level `+ RECT`: preceding bare status (`+ FIXED + RECT`), else "ROUTED"
+    shape.shape_type -> str     # wires: special `+ SHAPE` value or ""; "RECT" for RECT patches
     shape.layer -> str
     shape.width -> int          # DBU; always 0 for regular-net wires (width lives in technology LEF)
     shape.x1 -> int             # DBU center-line endpoints (wire) or lower-left corner (RECT)

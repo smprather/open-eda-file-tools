@@ -45,6 +45,12 @@
 6. `+ POLYGON` is skipped and counted as `polygon`, but only when its layer is the queried one. `+ SUBNET` wiring is skipped and counted as `subnet` (one per subnet). `+ VIA` is skipped and not counted. `after_via` and `subnet` count regardless of the queried layer, since the skipped pieces' layer is unknown. Counts cover only records of the queried net.
 7. `write_net_shapes_csv` and `write_net_shapes_csv_from_cache` return `dict[str, int]` with keys `after_via`, `polygon` and `subnet` (today they return `None`). The CLI prints one warning line when any count is non-zero.
 
+**Amended after review (branch `def-route-fixes`), checked against OpenROAD's DEF grammar (`src/odb/src/def/def/def.y`):**
+
+- Decision 4: a net-level `+ RECT` takes its `route_status` from a bare status right before it (DEF 5.8 `+ FIXED + RECT ...`: `snet_other_option: '+' net_type`), and is `ROUTED` otherwise, as in the reference parser. A bare status starts no path and applies to the next `+ RECT`/`+ POLYGON`/`+ VIA` only. In special nets `+ MASK n` precedes `+ RECT` (`+ RECT layer + MASK n pt pt` is not in the grammar).
+- Decision 6: `subnet` counts only subnets that carry wiring (a status keyword outside the pin list). Subnet wiring statuses have no leading `+` (`subnet_type: K_FIXED | K_COVER | K_ROUTED | K_NOSHIELD`), so skipping to the next `+` is correct.
+- Bare words outside a path are ignored, so a `+ PROPERTY` value such as `RECT` or `VIRTUAL` is never read as route syntax. Coordinate arithmetic is checked: a value outside the `i64` range is an error naming the DEF byte.
+
 ---
 
 ### Task 1: Route points (`*`, extension values, `VIRTUAL`, `MASK`)

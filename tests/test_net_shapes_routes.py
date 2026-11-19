@@ -138,7 +138,68 @@ def test_special_net_keywords(tmp_path):
     assert rows(design, "VDD", "met1") == [("STRIPE", 100, 0, 0, 1000, 0, 0, -50, 1000, 50)]
     assert rows(design, "VDD", "met2") == [("", 200, 0, 0, 0, 500, -100, 0, 100, 500)]
     assert rows(design, "VDD", "met3") == [("RECT", 0, 10, 10, 20, 30, 10, 10, 20, 30)]
-    assert next(def_tools.net_shapes(design, "VDD", "met3")).route_status == ""
+    # With no bare status before it, a + RECT is ROUTED (as in the DEF reference parser).
+    assert next(def_tools.net_shapes(design, "VDD", "met3")).route_status == "ROUTED"
+
+
+BARE_STATUS = """
+  - VDD ( * VDD )
+    + FIXED + RECT met3 ( 0 0 ) ( 10 10 )
+    + RECT met3 ( 20 20 ) ( 30 30 )
+    + COVER + SHAPE STRIPE + MASK 1 + RECT met3 ( 40 40 ) ( 50 50 )
+    + SHIELD VSS + RECT met3 ( 60 60 ) ( 70 70 )
+    + FIXED + POLYGON met3 ( 0 0 ) ( 10 0 ) ( 10 10 )
+    + ROUTED + VIA via23 ( 5 5 ) ( 6 6 )
+    + USE POWER ;
+"""
+
+
+def test_bare_status_applies_to_the_next_net_level_shape(tmp_path):
+    # DEF 5.8 special wiring: a status with no layer sets the status of the
+    # next + RECT / + POLYGON / + VIA only.
+    design = write_def(tmp_path, "", specialnets=BARE_STATUS)
+    shapes = def_tools.net_shapes(design, "VDD", "met3")
+    assert [(s.route_status, s.shape_type, s.llx, s.lly, s.urx, s.ury) for s in shapes] == [
+        ("FIXED", "RECT", 0, 0, 10, 10),
+        ("ROUTED", "RECT", 20, 20, 30, 30),
+        ("COVER", "RECT", 40, 40, 50, 50),
+        ("SHIELD", "RECT", 60, 60, 70, 70),
+    ]
+    assert shapes.skipped == {"after_via": 0, "polygon": 1, "subnet": 0}
+    # The `+` after a bare status is never taken as a layer name.
+    assert rows(design, "VDD", "+") == []
+
+
+def test_only_subnets_with_wiring_are_counted(tmp_path):
+    design = write_def(tmp_path, """
+  - c ( u1 Y ) ( u2 A )
+    + SUBNET s1 ( u1 A ) ( u2 B ) NONDEFAULTRULE r1
+    + SUBNET s2 ( ROUTED A ) ( PIN p )
+    + SUBNET s3 ( u1 A ) ROUTED met1 ( 0 0 ) ( 0 99 ) NEW met2 ( 0 99 ) ( 9 99 ) ;
+""")
+    # s2's component is named ROUTED: names inside parentheses are not wiring.
+    shapes = def_tools.net_shapes(design, "c", "met1")
+    assert list(shapes) == []
+    assert shapes.skipped == {"after_via": 0, "polygon": 0, "subnet": 1}
+
+
+def test_route_keywords_outside_a_path_are_ignored(tmp_path):
+    design = write_def(tmp_path, """
+  - p ( u1 Y ) + PROPERTY kind VIRTUAL + PROPERTY shape RECT
+    + ROUTED met1 ( 0 0 ) ( 10 0 ) ;
+""")
+    assert rows(design, "p", "met1") == [("", 0, 0, 0, 10, 0, 0, 0, 10, 0)]
+
+
+def test_out_of_range_shapes_are_errors(tmp_path):
+    big = 9223372036854775807  # i64::MAX
+    design = write_def(tmp_path, f"""
+  - r ( u1 Y ) + ROUTED met1 ( {big} 0 ) RECT ( 1 0 2 0 ) ;
+  - e ( u1 Y ) + ROUTED met1 ( 0 0 ) ( 0 10 {big} ) ;
+""")
+    for net in ("r", "e"):
+        with pytest.raises(RuntimeError, match=r"route coordinate out of range near DEF byte \d+"):
+            list(def_tools.net_shapes(design, net, "met1"))
 
 
 def test_net_level_keywords_end_the_path(tmp_path):
@@ -182,6 +243,3 @@ def test_cache_and_direct_queries_agree_on_new_constructs(tmp_path):
         assert _native.write_net_shapes_csv(design, net, layer, direct) == \
             _native.write_net_shapes_csv_from_cache(tmp_path / "cache", net, layer, cached)
         assert direct.read_bytes() == cached.read_bytes()
-
-
-

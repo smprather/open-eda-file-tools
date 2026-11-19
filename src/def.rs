@@ -398,11 +398,7 @@ impl NetShapeIter {
     /// Route pieces skipped so far: `after_via`, `polygon`, `subnet`.
     #[getter]
     fn skipped<'py>(&self, py: Python<'py>) -> Bound<'py, PyDict> {
-        let map = PyDict::new(py);
-        map.set_item("after_via", self.skipped.after_via).unwrap();
-        map.set_item("polygon", self.skipped.polygon).unwrap();
-        map.set_item("subnet", self.skipped.subnet).unwrap();
-        map
+        skipped_dict(py, self.skipped)
     }
 }
 
@@ -2009,16 +2005,15 @@ fn parse_net_shapes_record(
     }
     let net_str = token_to_str(net, record.offset, "net name")?;
 
+    let offset = record.offset;
+    let out_of_range = || format!("route coordinate out of range near DEF byte {offset}");
+
     let mut shapes = Vec::new();
     let mut skipped = SkippedRoutes::default();
-    let mut current_status: Option<&'static str> = None;
-    // `None` means the layer cannot be known: either no path has started or
-    // the coordinates sit after a via, whose other routing layer is unknown
-    // without via definitions.
-    let mut current_layer: Option<&[u8]> = None;
-    let mut current_width = 0i64;
-    let mut current_shape = "";
-    let mut last_point: Option<RoutePoint> = None;
+    let mut path = RoutePath::default();
+    // A status with no layer (DEF 5.8 `+ FIXED + RECT ...`) is the status of
+    // the next `+ RECT`/`+ POLYGON`/`+ VIA` only, as in the reference parser.
+    let mut patch_status: Option<&'static str> = None;
 
     while let Some(token) = tokens.next() {
         if token == b"+" {
@@ -2026,23 +2021,27 @@ fn parse_net_shapes_record(
                 break;
             };
             match keyword {
-                b"ROUTED" | b"FIXED" | b"COVER" | b"NOSHIELD" => {
-                    current_status = Some(route_status(keyword));
-                    current_layer = tokens.next();
-                    current_width = tokens.next_i64_or_rewind().unwrap_or(0);
-                    current_shape = "";
-                    last_point = None;
-                }
-                b"SHIELD" => {
-                    current_status = Some("SHIELD");
-                    let _shield_net = tokens.next();
-                    current_layer = tokens.next();
-                    current_width = tokens.next_i64_or_rewind().unwrap_or(0);
-                    current_shape = "";
-                    last_point = None;
+                b"ROUTED" | b"FIXED" | b"COVER" | b"NOSHIELD" | b"SHIELD" => {
+                    let status = if keyword == b"SHIELD" {
+                        let _shield_net = tokens.next();
+                        "SHIELD"
+                    } else {
+                        route_status(keyword)
+                    };
+                    if tokens
+                        .peek()
+                        .is_some_and(|next| next != b"+" && next != b";")
+                    {
+                        let layer = tokens.next();
+                        let width = tokens.next_i64_or_rewind().unwrap_or(0);
+                        path.start(status, layer, width);
+                    } else {
+                        path.end();
+                        patch_status = Some(status);
+                    }
                 }
                 b"SHAPE" => {
-                    current_shape = tokens
+                    path.shape = tokens
                         .next()
                         .and_then(|value| std::str::from_utf8(value).ok())
                         .unwrap_or("");
@@ -2051,248 +2050,208 @@ fn parse_net_shapes_record(
                     let _value = tokens.next();
                 }
                 b"RECT" => {
+                    path.end();
+                    let status = patch_status.take().unwrap_or("ROUTED");
                     let layer = tokens.next();
-                    tokens.expect(b"(", record.offset, "special RECT point")?;
-                    let first = read_route_point(&mut tokens, None, record.offset)?;
-                    tokens.expect(b"(", record.offset, "special RECT point")?;
-                    let second = read_route_point(&mut tokens, None, record.offset)?;
-                    current_status = None;
-                    current_layer = None;
-                    last_point = None;
-                    if let Some(layer) = layer {
-                        if eq_token(layer, target_layer) {
-                            let (llx, urx) = if first.x <= second.x {
-                                (first.x, second.x)
-                            } else {
-                                (second.x, first.x)
-                            };
-                            let (lly, ury) = if first.y <= second.y {
-                                (first.y, second.y)
-                            } else {
-                                (second.y, first.y)
-                            };
-                            shapes.push(NetShape {
-                                net: net_str.to_string(),
-                                section: record.section.to_string(),
-                                route_status: String::new(),
-                                shape_type: "RECT".to_string(),
-                                layer: token_to_str(layer, record.offset, "route layer")?
-                                    .to_string(),
-                                width: 0,
-                                x1: llx,
-                                y1: lly,
-                                x2: urx,
-                                y2: ury,
-                                llx,
-                                lly,
-                                urx,
-                                ury,
-                            });
-                        }
+                    let mut corners = [(0, 0); 2];
+                    for corner in &mut corners {
+                        tokens.expect(b"(", offset, "special RECT point")?;
+                        let point = read_route_point(&mut tokens, None, offset)?;
+                        *corner = (point.x, point.y);
+                    }
+                    if let Some(layer) = layer.filter(|layer| eq_token(layer, target_layer)) {
+                        let context = RouteContext::new(record, net_str, status, "RECT", layer, 0)?;
+                        let bbox = rect_bbox(corners[0], corners[1]);
+                        shapes.push(net_shape(&context, bbox, bbox));
                     }
                 }
                 b"POLYGON" => {
-                    let layer = tokens.next();
-                    current_status = None;
-                    current_layer = None;
-                    last_point = None;
-                    if layer.is_some_and(|value| eq_token(value, target_layer)) {
+                    path.end();
+                    patch_status = None;
+                    if tokens
+                        .next()
+                        .is_some_and(|layer| eq_token(layer, target_layer))
+                    {
                         skipped.polygon += 1;
                     }
-                    loop {
-                        let saved = tokens.pos;
-                        if tokens.next() == Some(b"(") {
-                            tokens.skip_until_close();
-                        } else {
-                            tokens.pos = saved;
-                            break;
-                        }
-                    }
+                    tokens.skip_point_groups();
                 }
                 b"VIA" => {
+                    path.end();
+                    patch_status = None;
                     let _name = tokens.next();
-                    let saved = tokens.pos;
-                    if !tokens
-                        .next()
-                        .is_some_and(|next| orientation(next).is_some())
-                    {
-                        tokens.pos = saved;
-                    }
-                    loop {
-                        let saved = tokens.pos;
-                        if tokens.next() == Some(b"(") {
-                            tokens.skip_until_close();
-                        } else {
-                            tokens.pos = saved;
-                            break;
-                        }
-                    }
-                    current_status = None;
-                    current_layer = None;
-                    last_point = None;
+                    tokens.skip_orientation();
+                    tokens.skip_point_groups();
                 }
                 b"SUBNET" => {
-                    skipped.subnet += 1;
-                    current_status = None;
-                    current_layer = None;
-                    last_point = None;
-                    loop {
-                        let saved = tokens.pos;
-                        match tokens.next() {
-                            None | Some(b";") => break,
-                            Some(b"+") => {
-                                tokens.pos = saved;
-                                break;
-                            }
-                            Some(_) => {}
-                        }
+                    path.end();
+                    if skip_subnet(&mut tokens) {
+                        skipped.subnet += 1;
                     }
                 }
-                _ => {
-                    // Every other net-level keyword ends the current path, so
-                    // its parenthesized values are never read as route points.
-                    current_status = None;
-                    current_layer = None;
-                    last_point = None;
-                }
+                // Every other net-level keyword ends the current path, so
+                // its parenthesized values are never read as route points.
+                _ => path.end(),
             }
             continue;
         }
+
+        // Outside a path (before the first status, or after a keyword that
+        // ended one) nothing is route geometry: the values of `+ VPIN` or
+        // `+ PROPERTY kind RECT` are skipped.
+        let Some(status) = path.status else {
+            if token == b"(" {
+                tokens.skip_until_close();
+            }
+            continue;
+        };
 
         if token == b"NEW" {
-            current_layer = tokens.next();
-            current_width = tokens.next_i64_or_rewind().unwrap_or(0);
-            current_shape = "";
-            last_point = None;
+            let layer = tokens.next();
+            let width = tokens.next_i64_or_rewind().unwrap_or(0);
+            path.start(status, layer, width);
             continue;
         }
 
-        if token == b"VIRTUAL" {
-            tokens.expect(b"(", record.offset, "virtual point")?;
-            let point = read_route_point(&mut tokens, last_point, record.offset)?;
-            last_point = Some(point);
-            continue;
-        }
-
-        if token == b"MASK" {
-            let _mask = tokens.next();
-            continue;
-        }
-
-        if token == b"TAPER" {
-            continue;
-        }
-
-        if token == b"TAPERRULE" || token == b"STYLE" {
-            let _rule = tokens.next();
-            continue;
-        }
-
-        if token == b"RECT" {
-            tokens.expect(b"(", record.offset, "RECT deltas")?;
-            let dx1 = tokens
-                .next_i64(record.offset, "RECT delta")?
-                .ok_or_else(|| format!("expected RECT delta near DEF byte {}", record.offset))?;
-            let dy1 = tokens
-                .next_i64(record.offset, "RECT delta")?
-                .ok_or_else(|| format!("expected RECT delta near DEF byte {}", record.offset))?;
-            let dx2 = tokens
-                .next_i64(record.offset, "RECT delta")?
-                .ok_or_else(|| format!("expected RECT delta near DEF byte {}", record.offset))?;
-            let dy2 = tokens
-                .next_i64(record.offset, "RECT delta")?
-                .ok_or_else(|| format!("expected RECT delta near DEF byte {}", record.offset))?;
-            tokens.expect(b")", record.offset, "RECT deltas")?;
-            let Some(previous) = last_point else {
-                return Err(format!(
-                    "RECT with no previous point near DEF byte {}",
-                    record.offset
-                ));
-            };
-            let (x1, y1) = (previous.x + dx1, previous.y + dy1);
-            let (x2, y2) = (previous.x + dx2, previous.y + dy2);
-            let (llx, urx) = if x1 <= x2 { (x1, x2) } else { (x2, x1) };
-            let (lly, ury) = if y1 <= y2 { (y1, y2) } else { (y2, y1) };
-            match current_layer {
-                Some(layer) if eq_token(layer, target_layer) => {
-                    shapes.push(NetShape {
-                        net: net_str.to_string(),
-                        section: record.section.to_string(),
-                        route_status: current_status.unwrap_or("").to_string(),
-                        shape_type: "RECT".to_string(),
-                        layer: token_to_str(layer, record.offset, "route layer")?.to_string(),
-                        width: 0,
-                        x1: llx,
-                        y1: lly,
-                        x2: urx,
-                        y2: ury,
-                        llx,
-                        lly,
-                        urx,
-                        ury,
-                    });
-                }
-                Some(_) => {}
-                None => skipped.after_via += 1,
+        match token {
+            b"VIRTUAL" => {
+                tokens.expect(b"(", offset, "virtual point")?;
+                path.previous = Some(read_route_point(&mut tokens, path.previous, offset)?);
             }
-            continue;
-        }
-
-        if token == b"(" {
-            if current_status.is_none() {
-                tokens.skip_until_close();
-                continue;
+            b"TAPER" => {}
+            b"MASK" | b"TAPERRULE" | b"STYLE" => {
+                let _value = tokens.next();
             }
-            let point = read_route_point(&mut tokens, last_point, record.offset)?;
-            if let Some(previous) = last_point {
-                match current_layer {
+            b"RECT" => {
+                let deltas = read_rect_deltas(&mut tokens, offset)?;
+                let Some(previous) = path.previous else {
+                    return Err(format!(
+                        "RECT with no previous point near DEF byte {offset}"
+                    ));
+                };
+                match path.layer {
                     Some(layer) if eq_token(layer, target_layer) => {
-                        let status = current_status.expect("status checked above");
-                        shapes.push(make_net_shape(
-                            &RouteContext {
-                                net: net_str,
-                                section: record.section,
-                                status,
-                                shape_type: current_shape,
-                                layer: token_to_str(layer, record.offset, "route layer")?,
-                                width: current_width,
-                            },
-                            previous,
-                            point,
-                        ));
+                        let corner = |dx: i64, dy: i64| {
+                            previous
+                                .x
+                                .checked_add(dx)
+                                .zip(previous.y.checked_add(dy))
+                                .ok_or_else(out_of_range)
+                        };
+                        let bbox =
+                            rect_bbox(corner(deltas[0], deltas[1])?, corner(deltas[2], deltas[3])?);
+                        let context = RouteContext::new(record, net_str, status, "RECT", layer, 0)?;
+                        shapes.push(net_shape(&context, bbox, bbox));
                     }
                     Some(_) => {}
                     None => skipped.after_via += 1,
                 }
             }
-            last_point = Some(point);
-            continue;
-        }
-
-        // Any other bare word after a point is a via: the next coordinates
-        // are on the via's other routing layer, which is unknown here, so
-        // those segments are skipped and counted.
-        if last_point.is_some() {
-            let saved = tokens.pos;
-            if !tokens
-                .next()
-                .is_some_and(|next| orientation(next).is_some())
-            {
-                tokens.pos = saved;
-            }
-            let saved = tokens.pos;
-            if tokens.next() == Some(b"DO") {
-                for _ in 0..6 {
-                    tokens.next();
+            b"(" => {
+                let point = read_route_point(&mut tokens, path.previous, offset)?;
+                if let Some(previous) = path.previous {
+                    match path.layer {
+                        Some(layer) if eq_token(layer, target_layer) => {
+                            let context = RouteContext::new(
+                                record, net_str, status, path.shape, layer, path.width,
+                            )?;
+                            shapes.push(
+                                make_net_shape(&context, previous, point)
+                                    .ok_or_else(out_of_range)?,
+                            );
+                        }
+                        Some(_) => {}
+                        None => skipped.after_via += 1,
+                    }
                 }
-            } else {
-                tokens.pos = saved;
+                path.previous = Some(point);
             }
-            current_layer = None;
+            // Any other bare word after a point is a via: the next
+            // coordinates are on the via's other routing layer, which is
+            // unknown here, so those segments are skipped and counted.
+            _ if path.previous.is_some() => {
+                tokens.skip_orientation();
+                if tokens.peek() == Some(b"DO") {
+                    // DO numX BY numY STEP stepX stepY
+                    for _ in 0..7 {
+                        tokens.next();
+                    }
+                }
+                path.layer = None;
+            }
+            _ => {}
         }
     }
 
     Ok((shapes, skipped))
+}
+
+/// The route path being read: its status, layer, width, `SHAPE` and previous
+/// point. `layer` is `None` after a via, whose other routing layer is unknown
+/// without via definitions.
+#[derive(Default)]
+struct RoutePath<'a> {
+    status: Option<&'static str>,
+    layer: Option<&'a [u8]>,
+    width: i64,
+    shape: &'a str,
+    previous: Option<RoutePoint>,
+}
+
+impl<'a> RoutePath<'a> {
+    /// Start a path (a status keyword with a layer, or `NEW`).
+    fn start(&mut self, status: &'static str, layer: Option<&'a [u8]>, width: i64) {
+        *self = Self {
+            status: Some(status),
+            layer,
+            width,
+            shape: "",
+            previous: None,
+        };
+    }
+
+    /// End the path: nothing is route geometry until the next status.
+    fn end(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// Skip a `+ SUBNET` body up to the next net-level `+`. True when it carries
+/// wiring: a status keyword outside its parenthesized pin list.
+fn skip_subnet(tokens: &mut ByteTokens<'_>) -> bool {
+    let mut depth = 0usize;
+    let mut wired = false;
+    while let Some(token) = tokens.peek() {
+        if token == b";" || (token == b"+" && depth == 0) {
+            break;
+        }
+        tokens.next();
+        match token {
+            b"(" => depth += 1,
+            b")" => depth = depth.saturating_sub(1),
+            b"ROUTED" | b"FIXED" | b"COVER" | b"NOSHIELD" if depth == 0 => wired = true,
+            _ => {}
+        }
+    }
+    wired
+}
+
+/// Read the `( dx1 dy1 dx2 dy2 )` that follows an in-path `RECT`.
+fn read_rect_deltas(tokens: &mut ByteTokens<'_>, offset: u64) -> Result<[i64; 4], String> {
+    tokens.expect(b"(", offset, "RECT deltas")?;
+    let mut deltas = [0; 4];
+    for delta in &mut deltas {
+        *delta = tokens
+            .next_i64(offset, "RECT delta")?
+            .ok_or_else(|| format!("expected RECT delta near DEF byte {offset}"))?;
+    }
+    tokens.expect(b")", offset, "RECT deltas")?;
+    Ok(deltas)
+}
+
+/// `llx, lly, urx, ury` of the rectangle spanned by two corners.
+fn rect_bbox(a: (i64, i64), b: (i64, i64)) -> [i64; 4] {
+    [a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1)]
 }
 
 /// Route pieces a record could not place: segments after a via (the via's
@@ -2329,6 +2288,26 @@ struct RouteContext<'a> {
     shape_type: &'a str,
     layer: &'a str,
     width: i64,
+}
+
+impl<'a> RouteContext<'a> {
+    fn new(
+        record: &NetRecord,
+        net: &'a str,
+        status: &'static str,
+        shape_type: &'a str,
+        layer: &'a [u8],
+        width: i64,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            net,
+            section: record.section,
+            status,
+            shape_type,
+            layer: token_to_str(layer, record.offset, "route layer")?,
+            width,
+        })
+    }
 }
 
 /// Read one routing point. Call with the `(` token already consumed; reads
@@ -2485,56 +2464,59 @@ fn split_connection_list(body: &[u8]) -> Option<Vec<&[u8]>> {
     Some(pieces)
 }
 
-fn make_net_shape(context: &RouteContext<'_>, start: RoutePoint, end: RoutePoint) -> NetShape {
+/// A wire segment row. The bbox reaches past each end by that point's
+/// extension along the segment axis and spans the width across it; a
+/// diagonal ignores extensions and spans the width on both axes. `None` when
+/// a bbox edge leaves the `i64` range.
+fn make_net_shape(
+    context: &RouteContext<'_>,
+    start: RoutePoint,
+    end: RoutePoint,
+) -> Option<NetShape> {
     let low = context.width / 2;
     let high = context.width - low;
-    let (mut llx, mut urx) = if start.x <= end.x {
-        (start.x, end.x)
-    } else {
-        (end.x, start.x)
-    };
-    let (mut lly, mut ury) = if start.y <= end.y {
-        (start.y, end.y)
-    } else {
-        (end.y, start.y)
-    };
-    if start.x == end.x {
-        // Vertical: a wire extension reaches past the endpoint along the
-        // segment axis; width padding spans the orthogonal axis.
-        lly -= if start.y <= end.y {
-            start.ext.unwrap_or(0)
+    let ext = |point: RoutePoint| point.ext.unwrap_or(0);
+    let (mut llx, mut urx) = (start.x.min(end.x), start.x.max(end.x));
+    let (mut lly, mut ury) = (start.y.min(end.y), start.y.max(end.y));
+    let vertical = start.x == end.x;
+    let horizontal = start.y == end.y;
+    if vertical {
+        let (bottom, top) = if start.y <= end.y {
+            (start, end)
         } else {
-            end.ext.unwrap_or(0)
+            (end, start)
         };
-        ury += if start.y <= end.y {
-            end.ext.unwrap_or(0)
-        } else {
-            start.ext.unwrap_or(0)
-        };
-        llx -= low;
-        urx += high;
+        lly = lly.checked_sub(ext(bottom))?;
+        ury = ury.checked_add(ext(top))?;
     }
-    if start.y == end.y {
-        llx -= if start.x <= end.x {
-            start.ext.unwrap_or(0)
+    if horizontal {
+        let (left, right) = if start.x <= end.x {
+            (start, end)
         } else {
-            end.ext.unwrap_or(0)
+            (end, start)
         };
-        urx += if start.x <= end.x {
-            end.ext.unwrap_or(0)
-        } else {
-            start.ext.unwrap_or(0)
-        };
-        lly -= low;
-        ury += high;
+        llx = llx.checked_sub(ext(left))?;
+        urx = urx.checked_add(ext(right))?;
     }
-    if start.x != end.x && start.y != end.y {
-        // Diagonal: extensions are ignored, width padding on both axes.
-        llx -= low;
-        urx += high;
-        lly -= low;
-        ury += high;
+    if vertical || !horizontal {
+        llx = llx.checked_sub(low)?;
+        urx = urx.checked_add(high)?;
     }
+    if horizontal || !vertical {
+        lly = lly.checked_sub(low)?;
+        ury = ury.checked_add(high)?;
+    }
+    Some(net_shape(
+        context,
+        [start.x, start.y, end.x, end.y],
+        [llx, lly, urx, ury],
+    ))
+}
+
+/// One output row: `ends` is `x1, y1, x2, y2`, `bbox` is `llx, lly, urx, ury`.
+fn net_shape(context: &RouteContext<'_>, ends: [i64; 4], bbox: [i64; 4]) -> NetShape {
+    let [x1, y1, x2, y2] = ends;
+    let [llx, lly, urx, ury] = bbox;
     NetShape {
         net: context.net.to_string(),
         section: context.section.to_string(),
@@ -2542,10 +2524,10 @@ fn make_net_shape(context: &RouteContext<'_>, start: RoutePoint, end: RoutePoint
         shape_type: context.shape_type.to_string(),
         layer: context.layer.to_string(),
         width: context.width,
-        x1: start.x,
-        y1: start.y,
-        x2: end.x,
-        y2: end.y,
+        x1,
+        y1,
+        x2,
+        y2,
         llx,
         lly,
         urx,
@@ -3467,6 +3449,34 @@ impl<'a> ByteTokens<'a> {
             if token == b")" {
                 break;
             }
+        }
+    }
+
+    /// The next token, not consumed.
+    fn peek(&self) -> Option<&'a [u8]> {
+        ByteTokens {
+            bytes: self.bytes,
+            pos: self.pos,
+        }
+        .next()
+    }
+
+    /// Consume an orientation (`N`, `FS`, ...) when one is next.
+    fn skip_orientation(&mut self) {
+        if self
+            .peek()
+            .is_some_and(|token| orientation(token).is_some())
+        {
+            self.next();
+        }
+    }
+
+    /// Consume consecutive parenthesized groups, such as the points of a
+    /// `+ POLYGON` or `+ VIA`.
+    fn skip_point_groups(&mut self) {
+        while self.peek() == Some(b"(") {
+            self.next();
+            self.skip_until_close();
         }
     }
 }

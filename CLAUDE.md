@@ -321,10 +321,16 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   corners and `width = 0`; after a via the layer is unknown until the next
   `NEW`/status keyword, and those segments are skipped and counted. Route
   pieces the reader cannot place are counted (`after_via`, `polygon`,
-  `subnet`), never attributed to a guessed layer; the CLI warns when any
-  count is non-zero, and the writers/iterator return/expose the counts.
-  Net-level `+` keywords other than the path statuses, `SHAPE`, `STYLE`,
-  `MASK`, `RECT`, `POLYGON`, `VIA` and `SUBNET` end the current path.
+  `subnet` for subnets that carry wiring), never attributed to a guessed
+  layer; the CLI warns when any count is non-zero, and the writers/iterator
+  return/expose the counts. Net-level `+ SHAPE`, `+ STYLE` and `+ MASK`
+  continue the current path; a status followed by a layer starts one; every
+  other net-level keyword ends it. A status with no layer (DEF 5.8
+  `+ FIXED + RECT ...`) starts no path: it is the `route_status` of the next
+  `+ RECT`/`+ POLYGON`/`+ VIA` only, and a `+ RECT` without one is `ROUTED`,
+  as in the DEF reference parser (`def.y`). Bare words outside a path are
+  ignored. Coordinate arithmetic is checked: out-of-range values are errors
+  naming the DEF byte, never wrapped.
 - **`__version__` is the installed distribution version, with no git fallback.**
   CalVer releases (`YYYY.M.D`, same-day `YYYY.M.D.N`) ship the release version
   on HEAD until the next release, so `version.py` reads installed metadata and

@@ -120,16 +120,19 @@ def-tools configure-io --target /scratch/$USER -o def-tools-io-config.toml
   `net,section,route_status,shape_type,layer,width,x1,y1,x2,y2,llx,lly,urx,ury`.
   Coordinates are DEF database units (integer DBU). Wire segments carry their
   center-line endpoints in `x1,y1,x2,y2` and a bbox that includes width and
-  wire-extension padding; `shape_type` is empty. `RECT` patches (both the
+  wire-extension padding; `shape_type` is the special-wire `+ SHAPE` value
+  (empty without one). `RECT` patches (both the
   in-path `RECT ( dx1 dy1 dx2 dy2 )` form and the net-level `+ RECT layer pt
   pt` form) carry their normalized lower-left/upper-right corners in
-  `x1,y1,x2,y2`, `shape_type` = `RECT`, `width` = 0; the net-level form has an
-  empty `route_status`. Regular-net wire `width` is always 0 — the width comes
+  `x1,y1,x2,y2`, `shape_type` = `RECT`, `width` = 0. The net-level form takes
+  its `route_status` from a bare status right before it (DEF 5.8:
+  `+ FIXED + RECT ...`, also `+ COVER`, `+ ROUTED`, `+ SHIELD net`), and is
+  `ROUTED` otherwise. Regular-net wire `width` is always 0 — the width comes
   from technology LEF, which net-shapes does not read.
 - Route pieces the reader cannot place on a layer are skipped and counted:
   segments after a via (the via's other layer needs via definitions, which
   net-shapes does not read) as `after_via`, `+ POLYGON` patches on the queried
-  layer as `polygon`, and `+ SUBNET` wiring as `subnet`. When any count is
+  layer as `polygon`, and each `+ SUBNET` that carries wiring as `subnet`. When any count is
   non-zero the CLI prints one warning line to stderr:
   `warning: net-shapes skipped route pieces: after_via=N polygon=N subnet=N`.
   The Python writers return the same counts as `{"after_via", "polygon",
