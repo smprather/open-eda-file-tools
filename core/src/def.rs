@@ -2534,7 +2534,19 @@ pub fn parse_lef_files(
     paths: &[PathBuf],
     dbu_per_micron: i64,
 ) -> Result<(MacroMap, Vec<String>), String> {
-    let library = crate::lef::parse_library(paths, None, false).map_err(|e| e.to_string())?;
+    load_lef_macros(paths, dbu_per_micron).map_err(|err| err.to_string())
+}
+
+/// `parse_lef_files` with the failure kept typed: an unreadable LEF stays an
+/// `io::Error` so the public API can report its `ErrorKind`.
+fn load_lef_macros(
+    paths: &[PathBuf],
+    dbu_per_micron: i64,
+) -> Result<(MacroMap, Vec<String>), crate::Error> {
+    let library = crate::lef::parse_library(paths, None, false).map_err(|err| match err {
+        crate::lef::LefError::Io(err) => crate::Error::Io(err),
+        crate::lef::LefError::Value(message) => crate::Error::Message(message),
+    })?;
     let mut macros = HashMap::with_capacity(library.macros.len());
     for item in &library.macros {
         macros.insert(
@@ -3185,7 +3197,7 @@ pub struct InstanceBBoxIter {
 impl InstanceBBoxIter {
     pub fn from_path(def: &Path, lefs: &[PathBuf]) -> Result<Self, crate::Error> {
         let scanner = DefScanner::from_path(def)?;
-        let (macros, _duplicates) = parse_lef_files(lefs, scanner.dbu_per_micron)?;
+        let (macros, _duplicates) = load_lef_macros(lefs, scanner.dbu_per_micron)?;
         Ok(Self {
             scanner,
             macros,

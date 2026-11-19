@@ -411,6 +411,11 @@ fn test_missing_files_report_not_found() {
     }
     let err = scan_instance_bboxes(&missing, &[lef]).err().unwrap();
     assert_eq!(kind(err), ErrorKind::NotFound);
+    let def = write_def(&tmp, DEF);
+    let err = scan_instance_bboxes(&def, std::slice::from_ref(&missing))
+        .err()
+        .unwrap();
+    assert_eq!(kind(err), ErrorKind::NotFound);
     assert_eq!(
         kind(dbu_per_micron(&missing).unwrap_err()),
         ErrorKind::NotFound
