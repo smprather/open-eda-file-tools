@@ -1706,7 +1706,6 @@ fn rect_bbox(a: (i64, i64), b: (i64, i64)) -> [i64; 4] {
     [a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1)]
 }
 
-
 /// Route pieces a record could not place: segments after a via (the via's
 /// other layer is unknown without via definitions), `+ POLYGON` patches and
 /// `+ SUBNET` wiring.
@@ -2932,8 +2931,6 @@ impl<'a> ByteTokens<'a> {
             self.skip_until_close();
         }
     }
-
-
 }
 
 pub fn eq_token(left: &[u8], right: &[u8]) -> bool {
