@@ -265,12 +265,21 @@ impl<R: Read> Lexer<R> {
                 continue;
             }
             let hit = if stop_at_plus {
-                chunk
-                    .iter()
-                    .position(|&byte| matches!(byte, b';' | b'"' | b'#' | b'+' | b'(' | b')'))
+                // Hop to the next `+` or the next other delimiter, whichever
+                // comes first; parentheses are counted only in the skipped
+                // bytes, when a `+` needs a depth.
+                let plus = memchr(b'+', chunk);
+                let limit = plus.unwrap_or(chunk.len());
+                memchr3(b';', b'"', b'#', &chunk[..limit]).or(plus)
             } else {
                 memchr3(b';', b'"', b'#', chunk)
             };
+            let skipped = &chunk[..hit.unwrap_or(chunk.len())];
+            if stop_at_plus {
+                let opens = memchr::memchr_iter(b'(', skipped).count();
+                let closes = memchr::memchr_iter(b')', skipped).count();
+                depth = (depth + opens).saturating_sub(closes);
+            }
             match hit {
                 Some(index) => {
                     let byte = chunk[index];
@@ -279,19 +288,6 @@ impl<R: Read> Lexer<R> {
                         if byte == b'"' {
                             out.push(b'"');
                         }
-                    }
-                    if matches!(byte, b'(' | b')') {
-                        // Parentheses are record text: copy them through.
-                        if let Some(out) = out.as_deref_mut() {
-                            out.push(byte);
-                        }
-                        depth = if byte == b'(' {
-                            depth + 1
-                        } else {
-                            depth.saturating_sub(1)
-                        };
-                        self.pos += index + 1;
-                        continue;
                     }
                     self.pos += index + 1;
                     match byte {

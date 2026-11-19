@@ -1922,14 +1922,6 @@ pub(crate) fn parse_connection_list(bytes: &[u8], offset: u64) -> Result<Vec<Net
     Ok(conns)
 }
 
-/// Cut a long connection list into pieces that parse independently, or
-/// `None` to parse it whole.
-///
-/// The list ends at the first `+` outside parentheses. Pieces start at a `(` whose previous
-/// non-blank byte is `)`: a parse with no error is between connections
-/// there, and a misaligned parse is an error inside the piece before. Lists
-/// with quotes are never split, since `(`, `)` and `+` inside a quoted token
-/// are not delimiters.
 fn net_shape(context: &RouteContext<'_>, ends: [i64; 4], bbox: [i64; 4]) -> NetShape {
     let [x1, y1, x2, y2] = ends;
     let [llx, lly, urx, ury] = bbox;
@@ -1950,23 +1942,47 @@ fn net_shape(context: &RouteContext<'_>, ends: [i64; 4], bbox: [i64; 4]) -> NetS
         ury,
     }
 }
+
 /// Offset of the first `+` outside parentheses and quotes, or the length.
 fn connection_list_end(body: &[u8]) -> usize {
     let mut depth = 0usize;
-    let mut in_quote = false;
-    for (index, &byte) in body.iter().enumerate() {
-        match byte {
-            b'"' => in_quote = !in_quote,
-            _ if in_quote => {}
-            b'(' => depth += 1,
-            b')' => depth = depth.saturating_sub(1),
-            b'+' if depth == 0 => return index,
-            _ => {}
+    let mut start = 0;
+    while start < body.len() {
+        // The next quote or `+`; parentheses are counted only in the bytes
+        // skipped, so the common case is two memchr hops.
+        let rest = &body[start..];
+        let plus = memchr::memchr(b'+', rest);
+        let quote = memchr::memchr(b'"', &rest[..plus.unwrap_or(rest.len())]);
+        let Some(index) = quote.or(plus) else {
+            break;
+        };
+        let skipped = &rest[..index];
+        let opens = memchr::memchr_iter(b'(', skipped).count();
+        let closes = memchr::memchr_iter(b')', skipped).count();
+        depth = (depth + opens).saturating_sub(closes);
+        if quote.is_some() {
+            // Skip the quoted text; an unterminated quote ends the scan.
+            match memchr::memchr(b'"', &rest[index + 1..]) {
+                Some(close) => start += index + close + 2,
+                None => return body.len(),
+            }
+        } else if depth == 0 {
+            return start + index;
+        } else {
+            start += index + 1;
         }
     }
     body.len()
 }
 
+/// Cut a long connection list into pieces that parse independently, or
+/// `None` to parse it whole.
+///
+/// The list ends at the first `+` outside parentheses. Pieces start at a
+/// `(` whose previous non-blank byte is `)`: a parse with no error is
+/// between connections there, and a misaligned parse is an error inside the
+/// piece before. Lists with quotes are never split, since `(`, `)` and `+`
+/// inside a quoted token are not delimiters.
 pub(crate) fn split_connection_list(body: &[u8]) -> Option<Vec<&[u8]>> {
     let end = connection_list_end(body);
     let list = &body[..end];
