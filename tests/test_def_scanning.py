@@ -32,6 +32,7 @@ def _reset_thread_limit():
 
 def write_design(tmp_path: Path, components: int, power_conns: int = 0) -> tuple[Path, Path]:
     """A DEF with more components than one scan batch (65,536 records)."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     lef = tmp_path / "cells.lef"
     lef.write_text(LEF, encoding="utf-8")
     lines = [
@@ -219,3 +220,29 @@ def test_synthesized_connections_are_kept(tmp_path):
     cells = _native.clock_tree_cells(design, ["port:clk"], [("INV", ["A"], ["Y"], False, [])], False)
     assert cells == ["u0", "u1", "u2"]
     _native.write_def_cache(design, tmp_path / "cache")  # must not raise
+
+
+def test_synthesized_in_split_connection_list(tmp_path):
+    """A >1 MiB list splits for parallel parsing; `+ SYNTHESIZED` must not end it."""
+    count = 160_000
+    _lef, plain = write_design(tmp_path / "plain", components=3, power_conns=count)
+    _lef, marked = write_design(tmp_path / "marked", components=3, power_conns=count)
+    text = marked.read_text(encoding="utf-8")
+    for index in (count // 2, count - 5):
+        text = text.replace(f"( t{index} VDD )", f"( t{index} VDD + SYNTHESIZED )")
+    assert text.count("SYNTHESIZED") == 2
+    marked.write_text(text, encoding="utf-8")
+    assert len(text.split("+ ROUTED")[0]) > 1 << 20
+    cells = [
+        _native.clock_tree_cells(path, ["port:clk"], [("INV", ["A"], ["Y"], False, [])], False)
+        for path in (plain, marked)
+    ]
+    assert cells[0] == cells[1]
+    _native.write_def_cache(plain, tmp_path / "plain_cache")
+    _native.write_def_cache(marked, tmp_path / "marked_cache")
+    names = sorted(p.name for p in (tmp_path / "plain_cache").iterdir())
+    assert "connectivity.bin" in names
+    for name in names:
+        if name in ("nets.dat", "nets.idx"):  # raw records keep the marker text
+            continue
+        assert (tmp_path / "plain_cache" / name).read_bytes() == (tmp_path / "marked_cache" / name).read_bytes(), name
