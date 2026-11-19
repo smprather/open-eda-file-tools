@@ -622,3 +622,33 @@ mod tests {
         assert_eq!(library.macros[0].name, "KEEP");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Public Rust API (issue #12)
+// ---------------------------------------------------------------------------
+
+/// A LEF macro's size in microns (`SIZE w BY h`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MacroSize {
+    pub width_um: f64,
+    pub height_um: f64,
+}
+
+/// Parse `paths` in order and return every macro's size in microns. The last
+/// definition of a duplicated macro wins.
+pub fn macro_sizes(paths: &[PathBuf]) -> Result<HashMap<String, MacroSize>, crate::Error> {
+    let library = parse_library(paths, None, false).map_err(|err| crate::Error(err.to_string()))?;
+    Ok(library
+        .macros
+        .iter()
+        .map(|item| {
+            (
+                item.name.clone(),
+                MacroSize {
+                    width_um: item.width,
+                    height_um: item.height,
+                },
+            )
+        })
+        .collect())
+}

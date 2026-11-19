@@ -3143,3 +3143,152 @@ mod tests {
         ))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Public Rust API (issue #12): plain-Rust consumers, no pyo3 anywhere.
+// ---------------------------------------------------------------------------
+
+/// Streaming DEF `COMPONENTS` -> instance bounding boxes in DEF database
+/// units, with LEF `SIZE`/`ORIGIN` extents and `UNITS DISTANCE MICRONS`
+/// honored. Errors surface per item so a mid-scan failure does not abort the
+/// rows already produced.
+pub struct InstanceBBoxIter {
+    scanner: DefScanner,
+    macros: MacroMap,
+    pending: VecDeque<InstanceBBox>,
+    done: bool,
+}
+
+impl InstanceBBoxIter {
+    pub fn from_path(def: &Path, lefs: &[PathBuf]) -> Result<Self, crate::Error> {
+        let scanner = DefScanner::from_path(def)?;
+        let (macros, _duplicates) = parse_lef_files(lefs, scanner.dbu_per_micron)?;
+        Ok(Self {
+            scanner,
+            macros,
+            pending: VecDeque::new(),
+            done: false,
+        })
+    }
+}
+
+impl Iterator for InstanceBBoxIter {
+    type Item = Result<InstanceBBox, crate::Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(item) = self.pending.pop_front() {
+                return Some(Ok(item));
+            }
+            if self.done {
+                return None;
+            }
+            let batch = match self.scanner.next_batch(BATCH_SIZE) {
+                Ok(batch) => batch,
+                Err(err) => return Some(Err(err.into())),
+            };
+            if batch.is_empty() {
+                self.done = true;
+                return None;
+            }
+            match process_record_batch(&batch, &self.macros) {
+                Ok(converted) => self.pending = converted.into(),
+                Err(err) => return Some(Err(err.into())),
+            }
+        }
+    }
+}
+
+/// Scan every placed component of `def` with the macro sizes from `lefs`.
+pub fn scan_instance_bboxes(
+    def: &Path,
+    lefs: &[PathBuf],
+) -> Result<InstanceBBoxIter, crate::Error> {
+    InstanceBBoxIter::from_path(def, lefs)
+}
+
+/// The DEF's `UNITS DISTANCE MICRONS` value (default 1000): the scale
+/// consumers need to convert the DBU integer bbox fields to microns. Scans
+/// only the header; a DEF with no `UNITS` line yields 1000, and one without a
+/// `COMPONENTS` section is fine here.
+pub fn dbu_per_micron(def: &Path) -> Result<i64, crate::Error> {
+    let input = open_input(def)?;
+    let mut lexer = Lexer::new(input);
+    let mut dbu_per_micron = None;
+    while let Some(token) = lexer.next_token()? {
+        if token.text.eq_ignore_ascii_case("COMPONENTS") {
+            break;
+        }
+        if token.text.eq_ignore_ascii_case("UNITS") {
+            parse_def_units(&mut lexer, &mut dbu_per_micron)?;
+        } else {
+            lexer.skip_until_semicolon()?;
+        }
+    }
+    Ok(dbu_per_micron.unwrap_or(1000))
+}
+
+/// Streaming routed shapes of one net on one layer, in DEF database units.
+/// `skipped()` reports the route pieces the parser could not place on a
+/// layer (segments after a via, `+ POLYGON`, `+ SUBNET`).
+pub struct NetShapeIter {
+    scanner: NetRecordScanner,
+    net: Vec<u8>,
+    layer: Vec<u8>,
+    pending: VecDeque<NetShape>,
+    skipped: SkippedRoutes,
+    done: bool,
+}
+
+impl NetShapeIter {
+    pub fn from_path(def: &Path, net: &str, layer: &str) -> Result<Self, crate::Error> {
+        Ok(Self {
+            scanner: NetRecordScanner::from_path(def)?,
+            net: net.as_bytes().to_vec(),
+            layer: layer.as_bytes().to_vec(),
+            pending: VecDeque::new(),
+            skipped: SkippedRoutes::default(),
+            done: false,
+        })
+    }
+
+    /// Route pieces skipped so far.
+    pub fn skipped(&self) -> SkippedRoutes {
+        self.skipped
+    }
+}
+
+impl Iterator for NetShapeIter {
+    type Item = Result<NetShape, crate::Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(item) = self.pending.pop_front() {
+                return Some(Ok(item));
+            }
+            if self.done {
+                return None;
+            }
+            let batch = match self.scanner.next_matching_batch(BATCH_SIZE, &self.net) {
+                Ok(batch) => batch,
+                Err(err) => return Some(Err(err.into())),
+            };
+            if batch.is_empty() {
+                self.done = true;
+                return None;
+            }
+            match process_net_record_batch(&batch, &self.net, &self.layer) {
+                Ok((shapes, skipped)) => {
+                    self.skipped.add(skipped);
+                    self.pending = shapes.into();
+                }
+                Err(err) => return Some(Err(err.into())),
+            }
+        }
+    }
+}
+
+/// Scan the routed shapes of `net` on `layer`.
+pub fn scan_net_shapes(def: &Path, net: &str, layer: &str) -> Result<NetShapeIter, crate::Error> {
+    NetShapeIter::from_path(def, net, layer)
+}

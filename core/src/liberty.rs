@@ -3,6 +3,7 @@ use flate2::write::GzEncoder;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Unit scales resolved from the library header and inherited by every cell
@@ -3596,6 +3597,7 @@ impl ParseError {
     }
 }
 
+#[derive(Debug)]
 pub enum ParseLoadError {
     Io(io::Error),
     Parse(ParseError),
@@ -3603,6 +3605,7 @@ pub enum ParseLoadError {
 
 impl ParseLoadError {}
 
+#[derive(Debug)]
 pub enum CellLookupError {
     Unknown(String),
     Parse(ParseError),
@@ -3611,6 +3614,7 @@ pub enum CellLookupError {
 
 impl CellLookupError {}
 
+#[derive(Debug)]
 pub enum CellSourceError {
     Unknown(String),
 }
@@ -3663,3 +3667,141 @@ pub type Latch = LatchData;
 pub type DynamicCurrent = DynamicCurrentData;
 pub type SwitchingGroup = SwitchingGroupData;
 pub type PgCurrent = PgCurrentData;
+
+// ---------------------------------------------------------------------------
+// Public Rust API (issue #12): attribute-only Liberty + indexed cell access.
+// ---------------------------------------------------------------------------
+
+/// Cell-level attributes for `is_seq` classification: the cell's simple
+/// attributes plus whether it has an `ff` or `latch` group.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CellAttributes {
+    pub name: String,
+    pub attributes: Vec<(String, String)>,
+    pub is_sequential: bool,
+}
+
+/// Owning, lazy attribute scan: the index (file bytes) is held inside the
+/// iterator and cells parse one at a time with `skip_tables=true`, so a
+/// multi-GB library never holds every cell's attributes at once.
+pub struct CellAttributesIter {
+    index: LibraryIndex,
+    position: usize,
+}
+
+impl CellAttributesIter {
+    pub fn open(path: &Path) -> Result<Self, ParseLoadError> {
+        Ok(Self {
+            index: LibraryIndex::open(path)?,
+            position: 0,
+        })
+    }
+}
+
+impl Iterator for CellAttributesIter {
+    type Item = Result<CellAttributes, CellLookupError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let name = self.index.order.get(self.position)?.clone();
+        self.position += 1;
+        Some(self.index.cell_attributes(&name))
+    }
+}
+
+/// Iterate every cell's attributes with table bodies skipped.
+pub fn cell_attributes(path: &Path) -> Result<CellAttributesIter, ParseLoadError> {
+    CellAttributesIter::open(path)
+}
+
+impl LibraryIndex {
+    /// Index an in-memory Liberty file: `path` may be plain or `.gz`.
+    pub fn open(path: &Path) -> Result<Self, ParseLoadError> {
+        open_library_index(&path.to_string_lossy())
+    }
+
+    pub fn library_name(&self) -> &str {
+        &self.library_name
+    }
+
+    pub fn cell_names(&self) -> Vec<String> {
+        self.order.clone()
+    }
+
+    pub fn num_cells(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Parse one cell fully (pins, arcs, tables), resolving the library
+    /// header's units and templates.
+    pub fn cell(&self, name: &str) -> Result<Cell, CellLookupError> {
+        self.parse_cell_by_name(name)
+    }
+
+    /// Parse one cell structurally only (`skip_tables`): simple attributes and
+    /// `ff`/`latch` presence, no table bodies materialized.
+    pub fn cell_attributes(&self, name: &str) -> Result<CellAttributes, CellLookupError> {
+        let &(start, end) = self
+            .ranges
+            .get(name)
+            .ok_or_else(|| CellLookupError::Unknown(name.to_string()))?;
+        let doc = parse_slice_as_library(&self.library_name, &self.data[start..end], true)
+            .map_err(CellLookupError::Parse)?;
+        let cell = doc
+            .cells
+            .into_iter()
+            .next()
+            .ok_or_else(|| CellLookupError::Empty(name.to_string()))?;
+        Ok(CellAttributes {
+            name: cell.name.clone(),
+            is_sequential: cell.ff.is_some() || cell.latch.is_some(),
+            attributes: cell.attributes,
+        })
+    }
+
+    /// Raw Liberty source text of one cell, sliced from the in-memory buffer.
+    /// O(cell size) — independent of the total file size.
+    pub fn cell_source(&self, name: &str) -> Result<String, CellSourceError> {
+        self.cell_source_by_name(name)
+    }
+
+    // -- library header pass-throughs (parsed once at open) --
+    pub fn voltage_unit(&self) -> Option<String> {
+        self.header.voltage_unit.clone()
+    }
+
+    pub fn current_unit(&self) -> Option<String> {
+        self.header.current_unit.clone()
+    }
+
+    pub fn time_unit(&self) -> Option<String> {
+        self.header.time_unit.clone()
+    }
+
+    pub fn capacitive_load_unit(&self) -> Option<String> {
+        self.header.capacitive_load_unit.clone()
+    }
+
+    pub fn energy_unit_joules(&self) -> Option<f64> {
+        self.header.energy_unit_joules()
+    }
+
+    /// Lookup-table templates: name -> per-axis variables, `None` slots kept.
+    pub fn templates(&self) -> HashMap<String, Vec<Option<String>>> {
+        self.header.templates()
+    }
+
+    pub fn attributes(&self) -> Vec<(String, String)> {
+        self.header.attributes()
+    }
+}
+
+impl Document {
+    /// Lookup-table templates: name -> [variable_1, variable_2, variable_3],
+    /// with `None` slots preserved so 2-axis templates stay 3 wide.
+    pub fn templates(&self) -> HashMap<String, Vec<Option<String>>> {
+        self.templates
+            .iter()
+            .map(|(name, vars)| (name.clone(), vars.to_vec()))
+            .collect()
+    }
+}
