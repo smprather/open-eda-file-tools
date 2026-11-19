@@ -1979,7 +1979,7 @@ fn parse_net_shapes_record(
     let mut current_layer: Option<&[u8]> = None;
     let mut current_width = 0i64;
     let mut current_shape = "";
-    let mut last_point: Option<(i64, i64)> = None;
+    let mut last_point: Option<RoutePoint> = None;
 
     while let Some(token) = tokens.next() {
         if token == b"+" {
@@ -2021,41 +2021,110 @@ fn parse_net_shapes_record(
             continue;
         }
 
+        if token == b"VIRTUAL" {
+            tokens.expect(b"(", record.offset, "virtual point")?;
+            let point = read_route_point(&mut tokens, last_point, record.offset)?;
+            last_point = Some(point);
+            continue;
+        }
+
+        if token == b"MASK" {
+            let _mask = tokens.next();
+            continue;
+        }
+
         if token == b"(" {
             if current_layer.is_none() || current_status.is_none() {
                 tokens.skip_until_close();
                 continue;
             }
-            let x = tokens
-                .next_i64(record.offset, "route point x")?
-                .ok_or_else(|| format!("expected route point x near DEF byte {}", record.offset))?;
-            let y = tokens
-                .next_i64(record.offset, "route point y")?
-                .ok_or_else(|| format!("expected route point y near DEF byte {}", record.offset))?;
-            tokens.expect(b")", record.offset, "route point")?;
-            if let (Some((x1, y1)), Some(layer), Some(status)) =
+            let point = read_route_point(&mut tokens, last_point, record.offset)?;
+            if let (Some(previous), Some(layer), Some(status)) =
                 (last_point, current_layer, current_status)
             {
                 if eq_token(layer, target_layer) {
                     shapes.push(make_net_shape(
-                        net_str,
-                        record.section,
-                        status,
-                        current_shape,
-                        token_to_str(layer, record.offset, "route layer")?,
-                        current_width,
-                        x1,
-                        y1,
-                        x,
-                        y,
+                        &RouteContext {
+                            net: net_str,
+                            section: record.section,
+                            status,
+                            shape_type: current_shape,
+                            layer: token_to_str(layer, record.offset, "route layer")?,
+                            width: current_width,
+                        },
+                        previous,
+                        point,
                     ));
                 }
             }
-            last_point = Some((x, y));
+            last_point = Some(point);
         }
     }
 
     Ok(shapes)
+}
+
+/// A route coordinate with an optional wire extension value.
+#[derive(Clone, Copy)]
+struct RoutePoint {
+    x: i64,
+    y: i64,
+    ext: Option<i64>,
+}
+
+/// Everything a shape row needs, filled once per segment.
+struct RouteContext<'a> {
+    net: &'a str,
+    section: &'static str,
+    status: &'static str,
+    shape_type: &'a str,
+    layer: &'a str,
+    width: i64,
+}
+
+/// Read one routing point. Call with the `(` token already consumed; reads
+/// `x|*`, `y|*`, an optional `ext|*`, then `)`. A `*` repeats the previous
+/// point's coordinate (or extension); the first point of a sequence cannot
+/// use one.
+fn read_route_point(
+    tokens: &mut ByteTokens<'_>,
+    previous: Option<RoutePoint>,
+    offset: u64,
+) -> Result<RoutePoint, String> {
+    let read_coord = |tokens: &mut ByteTokens<'_>, prev: Option<i64>| -> Result<i64, String> {
+        let token = tokens
+            .next()
+            .ok_or_else(|| format!("expected route point coordinate near DEF byte {offset}"))?;
+        if token == b"*" {
+            prev.ok_or_else(|| format!("'*' with no previous point near DEF byte {offset}"))
+        } else {
+            parse_i64_bytes(token).ok_or_else(|| {
+                format!(
+                    "invalid route point coordinate: '{}' near DEF byte {offset}",
+                    String::from_utf8_lossy(token)
+                )
+            })
+        }
+    };
+    let x = read_coord(tokens, previous.map(|point| point.x))?;
+    let y = read_coord(tokens, previous.map(|point| point.y))?;
+    let saved = tokens.pos;
+    let ext = match tokens.next() {
+        None => None,
+        Some(token) if token == b")" => {
+            tokens.pos = saved;
+            None
+        }
+        Some(b"*") => previous.and_then(|point| point.ext),
+        Some(token) => Some(parse_i64_bytes(token).ok_or_else(|| {
+            format!(
+                "invalid route point extension: '{}' near DEF byte {offset}",
+                String::from_utf8_lossy(token)
+            )
+        })?),
+    };
+    tokens.expect(b")", offset, "route point")?;
+    Ok(RoutePoint { x, y, ext })
 }
 
 /// Connection lists longer than this split into pieces that parse in
@@ -2167,47 +2236,67 @@ fn split_connection_list(body: &[u8]) -> Option<Vec<&[u8]>> {
     Some(pieces)
 }
 
-fn make_net_shape(
-    net: &str,
-    section: &str,
-    route_status: &str,
-    shape_type: &str,
-    layer: &str,
-    width: i64,
-    x1: i64,
-    y1: i64,
-    x2: i64,
-    y2: i64,
-) -> NetShape {
-    let low = width / 2;
-    let high = width - low;
-    let (mut llx, mut urx) = if x1 <= x2 { (x1, x2) } else { (x2, x1) };
-    let (mut lly, mut ury) = if y1 <= y2 { (y1, y2) } else { (y2, y1) };
-    if x1 == x2 {
+fn make_net_shape(context: &RouteContext<'_>, start: RoutePoint, end: RoutePoint) -> NetShape {
+    let low = context.width / 2;
+    let high = context.width - low;
+    let (mut llx, mut urx) = if start.x <= end.x {
+        (start.x, end.x)
+    } else {
+        (end.x, start.x)
+    };
+    let (mut lly, mut ury) = if start.y <= end.y {
+        (start.y, end.y)
+    } else {
+        (end.y, start.y)
+    };
+    if start.x == end.x {
+        // Vertical: a wire extension reaches past the endpoint along the
+        // segment axis; width padding spans the orthogonal axis.
+        lly -= if start.y <= end.y {
+            start.ext.unwrap_or(0)
+        } else {
+            end.ext.unwrap_or(0)
+        };
+        ury += if start.y <= end.y {
+            end.ext.unwrap_or(0)
+        } else {
+            start.ext.unwrap_or(0)
+        };
         llx -= low;
         urx += high;
     }
-    if y1 == y2 {
+    if start.y == end.y {
+        llx -= if start.x <= end.x {
+            start.ext.unwrap_or(0)
+        } else {
+            end.ext.unwrap_or(0)
+        };
+        urx += if start.x <= end.x {
+            end.ext.unwrap_or(0)
+        } else {
+            start.ext.unwrap_or(0)
+        };
         lly -= low;
         ury += high;
     }
-    if x1 != x2 && y1 != y2 {
+    if start.x != end.x && start.y != end.y {
+        // Diagonal: extensions are ignored, width padding on both axes.
         llx -= low;
         urx += high;
         lly -= low;
         ury += high;
     }
     NetShape {
-        net: net.to_string(),
-        section: section.to_string(),
-        route_status: route_status.to_string(),
-        shape_type: shape_type.to_string(),
-        layer: layer.to_string(),
-        width,
-        x1,
-        y1,
-        x2,
-        y2,
+        net: context.net.to_string(),
+        section: context.section.to_string(),
+        route_status: context.status.to_string(),
+        shape_type: context.shape_type.to_string(),
+        layer: context.layer.to_string(),
+        width: context.width,
+        x1: start.x,
+        y1: start.y,
+        x2: end.x,
+        y2: end.y,
         llx,
         lly,
         urx,

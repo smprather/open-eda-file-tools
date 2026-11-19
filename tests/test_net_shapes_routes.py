@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+import def_tools
+
+
+def write_def(tmp_path: Path, nets: str, specialnets: str = "") -> Path:
+    """Wrap NETS/SPECIALNETS bodies in a minimal routed DEF."""
+    sections = ""
+    if specialnets:
+        sections += "SPECIALNETS 1 ;\n" + specialnets + "\nEND SPECIALNETS\n"
+    if nets:
+        sections += "NETS 1 ;\n" + nets + "\nEND NETS\n"
+    design = tmp_path / "design.def"
+    design.write_text(
+        "VERSION 5.8 ;\n"
+        'DIVIDERCHAR "/" ;\n'
+        'BUSBITCHARS "[]" ;\n'
+        "DESIGN routes ;\n"
+        "UNITS DISTANCE MICRONS 1000 ;\n"
+        "COMPONENTS 2 ;\n"
+        "  - u1 INV + PLACED ( 0 0 ) N ;\n"
+        "  - u2 INV + FIXED ( 10 10 ) N ;\n"
+        "END COMPONENTS\n"
+        + sections
+        + "END DESIGN\n",
+        encoding="utf-8",
+    )
+    return design
+
+
+def rows(design: Path, net: str, layer: str) -> list[tuple]:
+    return [
+        (
+            shape.shape_type,
+            shape.width,
+            shape.x1,
+            shape.y1,
+            shape.x2,
+            shape.y2,
+            shape.llx,
+            shape.lly,
+            shape.urx,
+            shape.ury,
+        )
+        for shape in def_tools.net_shapes(design, net, layer)
+    ]
+
+
+ROUTE = """
+  - a ( u1 Y ) ( u2 A )
+    + ROUTED met2 ( 100 200 ) ( 300 * ) ( * 500 )
+    NEW met3 ( 300 500 0 ) ( 300 900 40 )
+    NEW met2 ( 0 0 ) VIRTUAL ( 50 * ) ( 50 70 )
+    NEW met2 ( 10 10 ) MASK 2 ( 20 * ) ;
+"""
+
+
+def test_star_repeats_previous_coordinate(tmp_path):
+    design = write_def(tmp_path, ROUTE)
+    assert rows(design, "a", "met2") == [
+        ("", 0, 100, 200, 300, 200, 100, 200, 300, 200),
+        ("", 0, 300, 200, 300, 500, 300, 200, 300, 500),
+        ("", 0, 50, 0, 50, 70, 50, 0, 50, 70),
+        ("", 0, 10, 10, 20, 10, 10, 10, 20, 10),
+    ]
+
+
+def test_extension_value_extends_segment_end(tmp_path):
+    design = write_def(tmp_path, ROUTE)
+    assert rows(design, "a", "met3") == [("", 0, 300, 500, 300, 900, 300, 500, 300, 940)]
+
+
+def test_star_without_previous_point_is_an_error(tmp_path):
+    design = write_def(tmp_path, "  - b ( u1 Y ) + ROUTED met2 ( * 5 ) ( 10 5 ) ;\n")
+    with pytest.raises(RuntimeError, match=r"'\*' with no previous point near DEF byte \d+"):
+        list(def_tools.net_shapes(design, "b", "met2"))
+
+
+def test_openroad_route_from_the_failing_design(tmp_path):
+    # Shape of the record that failed on cva6 (net _000000_).
+    design = write_def(tmp_path, """
+  - n0 ( u1 D ) ( u2 X ) + USE SIGNAL
+      + ROUTED Metal3 ( 824640 895020 ) ( 830400 * )
+      NEW Metal2 ( 824640 895020 ) ( * 897960 )
+      NEW Metal1 ( 830400 895020 ) Via1_XY ;
+""")
+    assert rows(design, "n0", "Metal2") == [("", 0, 824640, 895020, 824640, 897960, 824640, 895020, 824640, 897960)]
+    assert rows(design, "n0", "Metal3") == [("", 0, 824640, 895020, 830400, 895020, 824640, 895020, 830400, 895020)]
