@@ -35,7 +35,7 @@ print(trace.cells)   # tuple of clock-tree instance names
 ## Forward Clock-Tree Trace Semantics
 
 - Seeds nets from the symbolic sources (`port:clk`, `pin:div/Q`, `net:clk`, `cell:u1`) of every clock in the SDC.
-- Parses Liberty libraries concurrently across threads using `parse_file(..., skip_tables=True)` to obtain each cell's clock role (`def_tools.clock_roles`): pin directions, `ff`/`latch` groups, `clock : true` pins and `clock_gating_integrated_cell`.
+- Parses Liberty libraries concurrently across threads (at most `--threads N`, default all CPUs) using `parse_file(..., skip_tables=True)` to obtain each cell's clock role (`def_tools.clock_roles`): pin directions, `ff`/`latch` groups, `clock : true` pins and `clock_gating_integrated_cell`.
 - Follows `input -> output` through combinational cells whose input pin sits on a clock net.
 - **Integrated clock gates are traced through**, clock pin -> gated-clock output (`clock_gate_clock_pin` / `clock_gate_out_pin`, falling back to the `clock : true` pin or the latch's enable clock). A clock arriving on a gate's enable or test pin does not make it a clock cell.
 - Stops at endpoints — flip-flops, latches, and memories or other cells with a `clock : true` pin — which are not marked as clock-tree distribution cells.

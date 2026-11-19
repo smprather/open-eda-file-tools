@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
 import rich_click as click
 
 from liberty_tools._native import (
+    set_threads,
     write_clock_instances_csv,
     write_clock_instances_csv_from_cache,
     write_def_cache,
@@ -202,7 +202,7 @@ def main() -> None:
 @click.option(
     "--threads",
     type=click.IntRange(min=1),
-    help="Rayon worker threads for component parsing. Defaults to all logical CPUs.",
+    help="Use at most N CPUs. Defaults to all logical CPUs.",
 )
 def instances(
     lefs: tuple[Path, ...],
@@ -219,6 +219,8 @@ def instances(
     threads: int | None,
 ) -> None:
     """Dump placed instance bounding boxes (in microns) as CSV, Parquet, or table."""
+    # Before any native work: the Liberty and clock-data steps run in parallel too.
+    set_threads(threads)
     try:
         sequential, clock, warnings = instance_flag_inputs(
             def_path, list(libs), clock_cells, clock_data, twf
@@ -290,14 +292,21 @@ def _clock_data_failure(exc: ClockDataError) -> click.ClickException:
     type=click.Path(dir_okay=False, path_type=Path),
     help="Write here instead of stdout.",
 )
+@click.option(
+    "--threads",
+    type=click.IntRange(min=1),
+    help="Use at most N CPUs. Defaults to all logical CPUs.",
+)
 def clock_data_command(
     source: str,
     report: str,
     def_path: Path | None,
     libs: tuple[Path, ...],
     output: Path | None,
+    threads: int | None,
 ) -> None:
     """Inspect a clock/data source, or resolve it to clock-tree instances."""
+    set_threads(threads)
     import csv
     import io
 
@@ -367,7 +376,7 @@ def clock_data_command(
 @click.option(
     "--threads",
     type=click.IntRange(min=1),
-    help="Rayon worker threads for net record parsing. Defaults to all logical CPUs.",
+    help="Use at most N CPUs. Defaults to all logical CPUs.",
 )
 def net_shapes(
     def_path: Path | None,
@@ -380,8 +389,7 @@ def net_shapes(
     """Write routed shape bboxes for one net/layer as CSV."""
     if (def_path is None) == (cache_dir is None):
         raise click.UsageError("provide exactly one of --def or --cache-dir")
-    if threads is not None:
-        os.environ["RAYON_NUM_THREADS"] = str(threads)
+    set_threads(threads)
     if cache_dir is not None:
         write_net_shapes_csv_from_cache(cache_dir, net, layer, output)
     elif def_path is not None:
@@ -409,8 +417,14 @@ def def_cache() -> None:
     required=True,
     help="Output cache directory.",
 )
-def def_cache_create(def_path: Path, cache_dir: Path) -> None:
+@click.option(
+    "--threads",
+    type=click.IntRange(min=1),
+    help="Use at most N CPUs. Defaults to all logical CPUs.",
+)
+def def_cache_create(def_path: Path, cache_dir: Path, threads: int | None) -> None:
     """Convert a DEF into indexed binary cache files."""
+    set_threads(threads)
     write_def_cache(def_path, cache_dir)
 
 
@@ -447,7 +461,7 @@ def def_cache_create(def_path: Path, cache_dir: Path) -> None:
 @click.option(
     "--threads",
     type=click.IntRange(min=1),
-    help="Rayon worker threads. Defaults to all logical CPUs.",
+    help="Use at most N CPUs. Defaults to all logical CPUs.",
 )
 def clock_instances(
     sdc_path: Path,
@@ -460,8 +474,7 @@ def clock_instances(
     """Write instances reached from SDC clock roots."""
     if (def_path is None) == (cache_dir is None):
         raise click.UsageError("provide exactly one of --def or --cache-dir")
-    if threads is not None:
-        os.environ["RAYON_NUM_THREADS"] = str(threads)
+    set_threads(threads)
     roots = clock_roots_from_sdc(sdc_path)
     if not roots:
         raise click.ClickException(f"no create_clock roots found in {sdc_path}")

@@ -91,13 +91,14 @@ def-tools instances \
 - Default columns are `instance,base_cell,llx,lly,urx,ury`, plus `is_seq` when `--lib` is given and `is_clock` when `--clock-cells`, `--clock-data` or `--twf` is given.
 - `--columns` selects and renames columns (`instance=inst_name,base_cell=cell,status,orient,is_seq,is_clock,llx=llx_um`). Requesting `is_seq` without `--lib` or `is_clock` without a clock input is an error.
 - `--clock-cells`, `--clock-data` and `--twf` are alternatives. `--clock-data [BACKEND:]PATH` reads a clock/data source through a backend: `otw` (built in, [otw.md](otw.md); inferred from `.otw`/`.otw.gz`), `names` (an instance list), or a plug-in. Net/pin sources need `--lib`. `--twf PATH` is shorthand for `--clock-data twf:PATH`; vendor TWF is **not** read by this project and needs a plug-in `twf` backend.
+- `--threads N` caps CPU use at N; the default is all logical CPUs. It covers every step of the command, Liberty parsing and clock-data resolution included. The same option exists on every `def-tools`, `sdc-tools clock-cells` and `pex-tools` command that runs in parallel; output never depends on it.
 - Exit codes: `3` the requested backend is not installed, `4` the source is malformed, `1` any other error. An `is_clock` column is never written when its source could not be read. Unmatched or unclassifiable clock objects are warned about on stderr.
 
 ### `def-tools clock-data`
 
 ```bash
 def-tools clock-data --source [BACKEND:]PATH [--report objects|windows|instances] \
-  [--def design.def.gz] [--lib stdcell.lib ...] [--output PATH]
+  [--def design.def.gz] [--lib stdcell.lib ...] [--threads N] [--output PATH]
 ```
 
 - `objects` (default): CSV `kind,instance,name,role` for every net, pin and instance the source describes.
@@ -107,9 +108,9 @@ def-tools clock-data --source [BACKEND:]PATH [--report objects|windows|instances
 ### `def-tools net-shapes`, `cache create`, `clock-instances`, `configure-io`
 
 ```bash
-def-tools clock-instances --sdc design.sdc --def design.def.gz -o clock_instances.csv   # legacy, see below
-def-tools net-shapes --def design.def.gz --net VDD --layer met1 -o vdd_met1.csv
-def-tools cache create --def design.def.gz -o design.ldefcache
+def-tools clock-instances --sdc design.sdc --def design.def.gz -o clock_instances.csv [--threads N]   # legacy, see below
+def-tools net-shapes --def design.def.gz --net VDD --layer met1 -o vdd_met1.csv [--threads N]
+def-tools cache create --def design.def.gz -o design.ldefcache [--threads N]
 def-tools net-shapes --cache-dir design.ldefcache --net VDD --layer met1 -o vdd_met1.csv
 def-tools configure-io --target /scratch/$USER -o def-tools-io-config.toml
 ```
@@ -124,7 +125,7 @@ Requires `tclsh` >= 8.6 on `PATH` (or `TCLSH=/path/to/tclsh`).
 
 ```bash
 sdc-tools clocks --sdc design.sdc [--format tsv|json] [--output PATH]
-sdc-tools clock-cells --sdc design.sdc --def design.def.gz --lib stdcell.lib [--no-prune] [--format lines|json] [--output PATH]
+sdc-tools clock-cells --sdc design.sdc --def design.def.gz --lib stdcell.lib [--no-prune] [--format lines|json] [--threads N] [--output PATH]
 ```
 
 - `clocks` lists created and generated clocks (`clock  period  waveform  sources  generated_from  divide_by  multiply_by`).
@@ -135,9 +136,9 @@ sdc-tools clock-cells --sdc design.sdc --def design.def.gz --lib stdcell.lib [--
 ## `pex-tools`
 
 ```bash
-pex-tools summary --spef design.spef [--mode auto|stream]
-pex-tools histogram --spef design.spef [--bins 20] [--mode auto|stream] [--output PATH]
-pex-tools nets --spef design.spef [--top 20] [--mode auto|stream] [--output PATH]
+pex-tools summary --spef design.spef [--mode auto|stream] [--threads N]
+pex-tools histogram --spef design.spef [--bins 20] [--mode auto|stream] [--threads N] [--output PATH]
+pex-tools nets --spef design.spef [--top 20] [--mode auto|stream] [--threads N] [--output PATH]
 ```
 
 - `--mode auto` parses `*D_NET`/`*R_NET` blocks in parallel with Rayon; `--mode stream` buffers one net block at a time for a low-memory pass.

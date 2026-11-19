@@ -27,6 +27,7 @@ entry points (`liberty-tools`, `liberty-format`, `liberty-view`, `lef-tools`,
 | Identify clock-tree cells from STA clock/data roles (OTW or plug-in backend) + DEF + Liberty | `def_tools.clock_data.clock_instances(spec, def_path, roles)` or `def-tools instances --clock-data [BACKEND:]PATH` | Net- and pin-based; exit 3 = backend missing, 4 = malformed | `ClockInstances` / `is_clock` column |
 | Read / write OTW (open timing windows) | `def_tools.otw.read_otw(path)` / `write_otw(path, ...)` | Spec: `docs/otw.md`; no vendor TWF reader ships | `OtwFile` |
 | Summarize SPEF/DSPF parasitics or build capacitance histogram | `pex_tools.summaries(path)` / `pex_tools.histogram(path)` / `pex-tools` | `mode="auto"` (parallel Rayon) or `mode="stream"` (low-memory) | `list[PexSummary]` / `PexHistogram` |
+| Limit CPU use of the native readers | `def_tools.set_threads(n)` / `pex_tools.set_threads(n)` / `--threads N` on every parallel command | Default: all logical CPUs; `None` removes the limit; works after the first parallel call | `get_threads() -> int` |
 | Parse full SPEF/DSPF conns, caps, resistors, and `$` extensions | `pex_tools.parse(path)` | Preserves `$layer=`, `$x=`, `$y=`, and DSPF `*C x y` | `PexFile` |
 
 ---
@@ -425,13 +426,22 @@ write_otw(path, *, design="", time_unit=None, cap_unit=None, res_unit=None, slew
 # Text grammar (docs/otw.md): `n <net> <role>`; `i <instance>` then `p <pin> <role>` (instance `-` = ports);
 #   `w <clock|-> <r|f|-> <role> <8 decimals or ->`; trailing key=value attrs; mandatory `end <nets> <pins> <windows>`.
 #   Body numbers are fixed-point decimals (no exponent); precision = max fractional digits written.
-# Native reader parses group-aligned blocks in parallel (rayon); honors RAYON_NUM_THREADS.
+# Native reader parses group-aligned blocks in parallel (rayon) within the set_threads limit.
 write_otw_windows_csv(path, output: str | None) -> int     # one CSV row per window
 
 # Binary DEF cache for repeated net/clock queries:
 def_tools.write_def_cache(def_path: str | Path, cache_dir: str | Path) -> None
 def_tools.write_net_shapes_csv(def_path, net, layer, output) -> None
 def_tools.write_net_shapes_csv_from_cache(cache_dir, net, layer, output) -> None
+
+# CPU limit for every native reader (DEF, OTW, SPEF/DSPF) and for Liberty
+# parsing in cell_clock_roles; process-wide, also exported by pex_tools:
+def_tools.set_threads(threads: int | None = None) -> None   # None or 0 = all logical CPUs (default)
+def_tools.get_threads() -> int                              # the limit, else the CPU count
+# RAYON_NUM_THREADS still sets the default, but only before the first parallel
+# call; set_threads works at any time. A reader that overlaps its sequential
+# scan with parallel parsing counts the scan thread inside the limit, and does
+# not overlap at all when the limit is 1. Outputs do not depend on the limit.
 ```
 
 ---
@@ -479,7 +489,8 @@ result.cells -> tuple[str, ...]             # sorted clock-tree instance names
 
 Reads SPEF and DSPF (`.spef`, `.spef.gz`, `.dspf`, `.dspf.gz`).
 `mode="auto"` parses net blocks in parallel with Rayon; `mode="stream"` buffers
-one net block at a time for a ~5× lower memory footprint.
+one net block at a time for a ~5× lower memory footprint. `pex_tools.set_threads(n)`
+/ `get_threads()` are the same process-wide CPU limit as `def_tools.set_threads`.
 
 ```python
 import pex_tools

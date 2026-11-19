@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from liberty_tools._native import (
+    set_threads,
     write_instance_bbox_csv,
     write_instance_parquet,
     write_instance_table,
@@ -330,7 +331,7 @@ def run_instances(
 ) -> int:
     """Execute the instance dump and return exit code (0 on success, 1 on error)."""
     if threads is not None:
-        os.environ["RAYON_NUM_THREADS"] = str(threads)
+        set_threads(threads)
     if fmt == "parquet" and output is None:
         output = Path("instances.parquet")
 
@@ -447,6 +448,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(normalized)
     if args.batch_size < 1:
         parser.error("--batch-size must be at least 1")
+    if args.threads is not None and args.threads < 1:
+        parser.error("--threads must be at least 1")
+    # Before any native work: the Liberty and clock-data steps run in parallel too.
+    set_threads(args.threads)
     try:
         sequential, clock, warnings = instance_flag_inputs(
             args.def_path, args.lib, args.clock_cells, args.clock_data, args.twf

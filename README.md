@@ -193,9 +193,13 @@ Measured with the release build:
 | Full parse of a 96.8 MB Liberty library | about 1.5 s, about 150 MB peak RSS |
 | `LibraryIndex.open` on the same file | about 0.15 s, cells parsed on demand |
 | `skip_tables=True` on the IHP sg13g2 standard-cell library | 23.8 ms → 15.3 ms |
+| `def-tools instances` CSV, 118 MB routed DEF (302k instances) | 0.08 s |
+| `def-tools net-shapes`, one net in the same DEF | 0.02 s |
 
 Parsing releases the GIL, so several libraries can be parsed at once from
-Python threads. DEF, SPEF and DSPF work is batched and parallelized in Rust.
+Python threads. DEF, SPEF and DSPF work is batched and parallelized in Rust,
+on all logical CPUs by default; `--threads N` or `set_threads(N)` limits it.
+More numbers in [docs/def.md](docs/def.md#performance-and-cpu-use).
 
 ## Documentation
 

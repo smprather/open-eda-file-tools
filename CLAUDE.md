@@ -33,6 +33,7 @@ sdc_tools/                  SDC clock extraction, `sdc-tools` CLI (Tcl stub eval
 pex_tools/                  SPEF/DSPF parser, `pex-tools` CLI
 src/pex.rs                  SPEF/DSPF parser (parallel + streaming modes)
 src/otw.rs                  OTW (Open Timing Windows) line-oriented reader and CSV dump
+src/threads.rs              Process-wide CPU limit (`set_threads`) for every parallel native reader
 tests/                      Unified pytest suite (Liberty, LEF, DEF, SDC, PEX, and `tests/gen/design_gen.py`)
 otw-design/                 Design workspace for the next OTW version (non-normative; `docs/otw.md` is the spec)
 docs/                       AI-agent and per-tool Markdown documentation (`docs/ai-api.md`, `docs/cli.md`, `docs/*.md`)
@@ -291,6 +292,26 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   only matching records. Bump `CACHE_VERSION` when the layout changes.
 - **Heavy work releases the GIL** via `py.detach(...)`; batch and parallelize
   in Rust (rayon), never by loading a whole DEF into Python.
+- **All parallel native work runs inside `crate::threads::install`** (or
+  `install_for`). That is what makes `set_threads(n)` / `--threads N` a real
+  CPU cap: the default is all logical CPUs, and the limit works even after
+  rayon's global pool has started (`RAYON_NUM_THREADS` does not). A new
+  `par_iter` outside it silently ignores the user's limit. CLIs call
+  `set_threads` before any native work, Liberty parsing included.
+- **Scan and parse overlap only within the limit.** `for_each_batch`
+  (`src/def.rs`) runs the sequential scanner on its own thread one batch ahead
+  and gives the parallel part `n - 1` workers; with `n = 1` nothing overlaps.
+- **Output never depends on batching or thread count.** Batches parse in
+  parallel chunks and are reassembled in record order; the first error in
+  record order is the one reported. Long connection lists split only at a
+  `(` that follows `)` (`split_connection_list`), never inside quotes.
+- **The tokenizer scans slices, not bytes.** `src/lef/lexer.rs` finds record
+  ends with memchr and word ends with a byte-class table; records the caller
+  does not need are consumed with `skip_until_semicolon` (no copy), and a
+  `-` record outside the sections a pass reads is skipped whole, so names
+  like `NETS` inside VIAS/PINS records are never read as section keywords.
+  The connectivity pass keeps only a net's connection list
+  (`read_until_plus_or_semicolon`), never its routing.
 - **`__version__` is the installed distribution version, with no git fallback.**
   CalVer releases (`YYYY.M.D`, same-day `YYYY.M.D.N`) ship the release version
   on HEAD until the next release, so `version.py` reads installed metadata and

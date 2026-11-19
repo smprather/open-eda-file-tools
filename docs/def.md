@@ -139,6 +139,35 @@ uv run def-tools cache create --def design.def.gz -o design.ldefcache
 uv run def-tools net-shapes --cache-dir design.ldefcache --net VDD --layer met1 -o vdd_met1.csv
 ```
 
+## Performance and CPU use
+
+All DEF commands stream: memory does not grow with design size. The scan that
+splits the file into records is sequential and runs on its own thread, one
+batch ahead of the parallel parse; records are skipped without being copied
+when a command does not need them (`net-shapes` reads only the matching net,
+the clock trace keeps only each net's connection list, not its routing).
+Very long connection lists, such as power nets that list every cell, are
+split and parsed in parallel.
+
+`--threads N` (or `def_tools.set_threads(N)`) limits a run to N CPUs; the
+default is all logical CPUs. The scan thread counts inside the limit, and with
+N = 1 nothing overlaps. Output is identical for every N.
+
+Measured on a Ryzen 9 5900X (12 cores / 24 threads), files in page cache:
+
+| Command | 458 MB synthetic, 2M instances | 118 MB routed cva6, 302k instances |
+| --- | --- | --- |
+| `instances` CSV | 0.53 s | 0.08 s |
+| `instances` Parquet | 0.46 s | 0.08 s |
+| `instances` table | 1.06 s | 0.15 s |
+| `net-shapes` (one signal net) | 0.08 s | 0.02 s |
+| `cache create` | 1.24 s | 0.25 s |
+| clock trace (`sdc-tools clock-cells` core) | 2.66 s | 0.16 s |
+
+The table format scans the DEF twice (column widths first). The clock trace
+holds every connection as two strings; that memory layout, not the scan, is
+now its main cost.
+
 ## Python API
 
 ```python

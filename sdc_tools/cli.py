@@ -115,6 +115,11 @@ def clocks_command(sdc_path: Path, fmt: str, output: Path | None) -> None:
     type=click.Path(dir_okay=False, path_type=Path),
     help="Write here instead of stdout.",
 )
+@click.option(
+    "--threads",
+    type=click.IntRange(min=1),
+    help="Use at most N CPUs. Defaults to all logical CPUs.",
+)
 def clock_cells_command(
     sdc_path: Path,
     def_path: Path,
@@ -122,8 +127,12 @@ def clock_cells_command(
     prune: bool,
     fmt: str,
     output: Path | None,
+    threads: int | None,
 ) -> None:
     """List the clock-tree instances reachable from the SDC clock roots."""
+    from liberty_tools._native import set_threads
+
+    set_threads(threads)
     result = find_clock_cells(def_path, list(libs), sdc_path, prune=prune)
     if fmt == "json":
         rendered = json.dumps(list(result.cells), indent=2) + "\n"

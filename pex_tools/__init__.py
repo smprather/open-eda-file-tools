@@ -18,10 +18,12 @@ from liberty_tools._native import (
     PexNet,
     PexRes,
     PexSummary,
+    get_threads,
     parse_pex,
     pex_header,
     pex_histogram,
     pex_summaries,
+    set_threads,
 )
 from .version import get_version
 
@@ -78,9 +80,11 @@ __all__ = [
     "PexRes",
     "PexSummary",
     "__version__",
+    "get_threads",
     "get_version",
     "header",
     "histogram",
     "parse",
+    "set_threads",
     "summaries",
 ]

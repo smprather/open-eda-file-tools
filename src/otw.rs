@@ -639,7 +639,7 @@ pub fn parse_otw<S: Sink>(
     };
 
     let declared_clocks = header.clocks.len();
-    let batch_size = rayon::current_num_threads().max(1);
+    let batch_size = crate::threads::budget();
     let (mut nets, mut pins, mut windows) = (0u64, 0u64, 0u64);
     let mut end: Option<(u64, u64, u64)> = None;
     loop {
@@ -653,10 +653,12 @@ pub fn parse_otw<S: Sink>(
         if batch.is_empty() {
             break;
         }
-        let parsed: Vec<BlockOut<S>> = batch
-            .par_iter()
-            .map(|block| parse_block(block, declared_clocks))
-            .collect();
+        let parsed: Vec<BlockOut<S>> = crate::threads::install(|| {
+            batch
+                .par_iter()
+                .map(|block| parse_block(block, declared_clocks))
+                .collect()
+        });
         for (block, out) in batch.iter().zip(parsed) {
             if end.is_some() && out.has_records {
                 return Err(malformed(

@@ -6,6 +6,8 @@ from pathlib import Path
 
 import rich_click as click
 
+from liberty_tools._native import set_threads
+
 from . import header, histogram, summaries
 from .version import get_version
 
@@ -27,8 +29,14 @@ def main() -> None:
     help="SPEF or DSPF file (plain or .gz).",
 )
 @click.option("--mode", type=MODE, default="auto", show_default=True)
-def summary(spef_path: Path, mode: str) -> None:
+@click.option(
+    "--threads",
+    type=click.IntRange(min=1),
+    help="Use at most N CPUs. Defaults to all logical CPUs.",
+)
+def summary(spef_path: Path, mode: str, threads: int | None) -> None:
     """Print the header and aggregate parasitics."""
+    set_threads(threads)
     info = header(spef_path)
     nets = summaries(spef_path, mode=mode)
     total = sum(net.total_cap for net in nets)
@@ -62,10 +70,16 @@ def summary(spef_path: Path, mode: str) -> None:
     type=click.Path(dir_okay=False, path_type=Path),
     help="Write TSV here instead of stdout.",
 )
+@click.option(
+    "--threads",
+    type=click.IntRange(min=1),
+    help="Use at most N CPUs. Defaults to all logical CPUs.",
+)
 def histogram_command(
-    spef_path: Path, bins: int, mode: str, output: Path | None
+    spef_path: Path, bins: int, mode: str, output: Path | None, threads: int | None
 ) -> None:
     """Histogram of per-net total capacitance."""
+    set_threads(threads)
     hist = histogram(spef_path, bins=bins, mode=mode)
     lines = ["bin_low\tbin_high\tcount"]
     for index, count in enumerate(hist.counts):
@@ -92,8 +106,16 @@ def histogram_command(
     type=click.Path(dir_okay=False, path_type=Path),
     help="Write TSV here instead of stdout.",
 )
-def nets_command(spef_path: Path, top: int, mode: str, output: Path | None) -> None:
+@click.option(
+    "--threads",
+    type=click.IntRange(min=1),
+    help="Use at most N CPUs. Defaults to all logical CPUs.",
+)
+def nets_command(
+    spef_path: Path, top: int, mode: str, output: Path | None, threads: int | None
+) -> None:
     """Largest nets by total capacitance."""
+    set_threads(threads)
     ranked = sorted(summaries(spef_path, mode=mode), key=lambda net: -net.total_cap)
     lines = ["net\ttotal_cap\tground_cap\tcoupling_cap\tcaps\tresistors"]
     for net in ranked[:top]:

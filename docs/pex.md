@@ -3,6 +3,8 @@
 `pex_tools` reads SPEF and DSPF parasitic-exchange files (`.spef`, `.spef.gz`,
 `.dspf`, `.dspf.gz`). The Rust parser reads the header and `*NAME_MAP`
 sequentially, then parses `*D_NET` and `*R_NET` blocks in parallel with Rayon.
+`--threads N` (or `pex_tools.set_threads(N)`) limits the parse to N CPUs; the
+default is all logical CPUs.
 
 ## Performance Modes
 

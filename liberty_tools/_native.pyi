@@ -297,4 +297,10 @@ def pex_histogram(
     path: _StrPath, bins: int = 20, mode: str = "auto"
 ) -> PexHistogram: ...
 def pex_header(path: _StrPath) -> PexHeader: ...
+def set_threads(threads: int | None = None) -> None:
+    """Limit native readers to ``threads`` CPUs; ``None`` removes the limit."""
+
+def get_threads() -> int:
+    """CPUs native readers will use: the limit, else all logical CPUs."""
+
 def __getattr__(name: str) -> Any: ...

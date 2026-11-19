@@ -130,6 +130,9 @@ fn parse_columns(
 }
 
 const BATCH_SIZE: usize = 65_536;
+/// Byte cap on a batch of net records, which vary from tens of bytes to
+/// hundreds of MB.
+const BATCH_BYTES: usize = 64 << 20;
 const CACHE_VERSION: u32 = 1;
 const CACHE_HEADER_LEN: u64 = 20;
 const MANIFEST_MAGIC: &[u8; 8] = b"LDTMAN1\0";
@@ -163,6 +166,35 @@ struct NetRecord {
     section: &'static str,
 }
 
+/// A placed component whose names borrow from its record bytes, so the
+/// writers never allocate per instance.
+#[derive(Clone, Copy, Debug)]
+struct Component<'a> {
+    instance: &'a str,
+    macro_name: &'a str,
+    status: &'static str,
+    orient: &'static str,
+    llx: i64,
+    lly: i64,
+    urx: i64,
+    ury: i64,
+}
+
+impl Component<'_> {
+    fn to_bbox(self) -> InstanceBBox {
+        InstanceBBox {
+            instance: self.instance.to_string(),
+            macro_name: self.macro_name.to_string(),
+            status: self.status.to_string(),
+            orient: self.orient.to_string(),
+            llx: self.llx,
+            lly: self.lly,
+            urx: self.urx,
+            ury: self.ury,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Placement {
     status: &'static str,
@@ -181,11 +213,6 @@ struct NetConn {
 struct NetInfo {
     name: String,
     conns: Vec<NetConn>,
-}
-
-struct DefCache {
-    components: HashMap<String, String>,
-    net_records: Vec<NetRecord>,
 }
 
 #[pyclass(frozen, skip_from_py_object)]
@@ -932,7 +959,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-/// Widths for the selected name columns, plus the placed-row count.
+/// Widths for the selected name columns.
 ///
 /// Only columns that are actually selected are measured. This pass tokenizes
 /// component records; it needs neither the LEF macros nor the bounding boxes.
@@ -953,23 +980,81 @@ fn instance_table_widths(
     }
 
     let mut scanner = DefScanner::from_path(def_path).map_err(|e| e.to_string())?;
-    loop {
-        let batch = scanner.next_batch(BATCH_SIZE).map_err(|e| e.to_string())?;
-        if batch.is_empty() {
-            break;
-        }
-        for record in &batch {
-            if let Some((instance_len, macro_len)) = component_name_lengths(record)? {
-                if let Some(width) = instance_width.as_mut() {
-                    *width = (*width).max(instance_len);
-                }
-                if let Some(width) = macro_width.as_mut() {
-                    *width = (*width).max(macro_len);
-                }
+    for_each_batch(
+        || scanner.next_batch(BATCH_SIZE),
+        |batch, overlapped| {
+            let (instance_len, macro_len) = crate::threads::install_for(overlapped, || {
+                let chunks: Vec<Result<(usize, usize), String>> = batch
+                    .par_chunks(CHUNK)
+                    .map(|chunk| {
+                        let mut longest = (0, 0);
+                        for record in chunk {
+                            if let Some((instance, macro_name)) = component_name_lengths(record)? {
+                                longest = (longest.0.max(instance), longest.1.max(macro_name));
+                            }
+                        }
+                        Ok(longest)
+                    })
+                    .collect();
+                chunks.into_iter().try_fold((0, 0), |acc, chunk| {
+                    let chunk = chunk?;
+                    Ok::<_, String>((acc.0.max(chunk.0), acc.1.max(chunk.1)))
+                })
+            })?;
+            if let Some(width) = instance_width.as_mut() {
+                *width = (*width).max(instance_len);
             }
+            if let Some(width) = macro_width.as_mut() {
+                *width = (*width).max(macro_len);
+            }
+            Ok(())
+        },
+    )?;
+    Ok((instance_width, macro_width))
+}
+
+/// Feed batches from `next` to `consume` in order until `next` returns an
+/// empty batch.
+///
+/// When the CPU budget allows (`threads::may_overlap`), `next` runs on its
+/// own scanner thread one batch ahead, so the sequential scan overlaps the
+/// parallel parse; `consume` is told so and must then run its parallel work
+/// with `threads::install_for(true, ..)`, which leaves one CPU to the
+/// scanner. With a budget of one CPU nothing overlaps.
+fn for_each_batch<T: Send>(
+    mut next: impl FnMut() -> io::Result<Vec<T>> + Send,
+    mut consume: impl FnMut(Vec<T>, bool) -> Result<(), String>,
+) -> Result<(), String> {
+    if !crate::threads::may_overlap() {
+        loop {
+            let batch = next().map_err(|e| e.to_string())?;
+            if batch.is_empty() {
+                return Ok(());
+            }
+            consume(batch, false)?;
         }
     }
-    Ok((instance_width, macro_width))
+    std::thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<io::Result<Vec<T>>>(1);
+        scope.spawn(move || {
+            loop {
+                let item = next();
+                let last = !matches!(&item, Ok(batch) if !batch.is_empty());
+                // A send fails only when the consumer stopped early.
+                if sender.send(item).is_err() || last {
+                    break;
+                }
+            }
+        });
+        for item in receiver {
+            let batch = item.map_err(|e| e.to_string())?;
+            if batch.is_empty() {
+                break;
+            }
+            consume(batch, true)?;
+        }
+        Ok(())
+    })
 }
 
 /// Lengths of a placed component's instance and macro names.
@@ -1005,6 +1090,7 @@ fn component_name_lengths(record: &RawRecord) -> Result<Option<(usize, usize)>, 
     Ok(placed.then_some((instance_len, macro_len)))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_instance_table_stream<W: Write>(
     scanner: &mut DefScanner,
     macros: &MacroMap,
@@ -1049,102 +1135,65 @@ fn write_instance_table_stream<W: Write>(
     writeln!(out, "{}", "-".repeat(line_width)).map_err(|e| e.to_string())?;
 
     let dbu = scanner.dbu_per_micron as f64;
-    let mut count = 0usize;
-    loop {
-        let batch = scanner.next_batch(BATCH_SIZE).map_err(|e| e.to_string())?;
-        if batch.is_empty() {
-            break;
-        }
-        let bboxes = process_record_batch(&batch, macros)?;
-        let mut buffer = String::with_capacity(bboxes.len() * (line_width + 1));
-        for bbox in bboxes {
-            for (index, column) in columns.iter().enumerate() {
-                if index > 0 {
-                    buffer.push_str("  ");
-                }
-                match column.kind {
-                    ColumnKind::Instance => {
-                        write!(
-                            &mut buffer,
-                            "{:<width$}",
-                            bbox.instance,
-                            width = widths[index]
-                        )
-                    }
-                    ColumnKind::BaseCell => {
-                        write!(
-                            &mut buffer,
-                            "{:<width$}",
-                            bbox.macro_name,
-                            width = widths[index]
-                        )
-                    }
-                    ColumnKind::Status => {
-                        write!(
-                            &mut buffer,
-                            "{:<width$}",
-                            bbox.status,
-                            width = widths[index]
-                        )
-                    }
-                    ColumnKind::Orient => {
-                        write!(
-                            &mut buffer,
-                            "{:<width$}",
-                            bbox.orient,
-                            width = widths[index]
-                        )
-                    }
-                    ColumnKind::IsSeq => {
-                        let text = if sequential.is_some_and(|set| set.contains(&bbox.macro_name)) {
-                            "true"
-                        } else {
-                            "false"
-                        };
-                        write!(&mut buffer, "{:<width$}", text, width = widths[index])
-                    }
-                    ColumnKind::IsClock => {
-                        let text = if clock.is_some_and(|set| set.contains(&bbox.instance)) {
-                            "true"
-                        } else {
-                            "false"
-                        };
-                        write!(&mut buffer, "{:<width$}", text, width = widths[index])
-                    }
-                    ColumnKind::Llx => write!(
-                        &mut buffer,
-                        "{:>width$.3}",
-                        bbox.llx as f64 / dbu,
-                        width = widths[index]
-                    ),
-                    ColumnKind::Lly => write!(
-                        &mut buffer,
-                        "{:>width$.3}",
-                        bbox.lly as f64 / dbu,
-                        width = widths[index]
-                    ),
-                    ColumnKind::Urx => write!(
-                        &mut buffer,
-                        "{:>width$.3}",
-                        bbox.urx as f64 / dbu,
-                        width = widths[index]
-                    ),
-                    ColumnKind::Ury => write!(
-                        &mut buffer,
-                        "{:>width$.3}",
-                        bbox.ury as f64 / dbu,
-                        width = widths[index]
-                    ),
-                }
-                .map_err(|e| e.to_string())?;
+    let flag = |value: bool| if value { "true" } else { "false" };
+    let render = |buffer: &mut String, row: &Component<'_>| {
+        for (index, column) in columns.iter().enumerate() {
+            if index > 0 {
+                buffer.push_str("  ");
             }
-            buffer.push('\n');
-            count += 1;
+            let width = widths[index];
+            // Writing to a String cannot fail.
+            let _ = match column.kind {
+                ColumnKind::Instance => write!(buffer, "{:<width$}", row.instance),
+                ColumnKind::BaseCell => write!(buffer, "{:<width$}", row.macro_name),
+                ColumnKind::Status => write!(buffer, "{:<width$}", row.status),
+                ColumnKind::Orient => write!(buffer, "{:<width$}", row.orient),
+                ColumnKind::IsSeq => write!(
+                    buffer,
+                    "{:<width$}",
+                    flag(sequential.is_some_and(|set| set.contains(row.macro_name)))
+                ),
+                ColumnKind::IsClock => write!(
+                    buffer,
+                    "{:<width$}",
+                    flag(clock.is_some_and(|set| set.contains(row.instance)))
+                ),
+                ColumnKind::Llx => write!(buffer, "{:>width$.3}", row.llx as f64 / dbu),
+                ColumnKind::Lly => write!(buffer, "{:>width$.3}", row.lly as f64 / dbu),
+                ColumnKind::Urx => write!(buffer, "{:>width$.3}", row.urx as f64 / dbu),
+                ColumnKind::Ury => write!(buffer, "{:>width$.3}", row.ury as f64 / dbu),
+            };
         }
-        out.write_all(buffer.as_bytes())
-            .map_err(|e| e.to_string())?;
-    }
+        buffer.push('\n');
+    };
+    let count = write_component_rows(scanner, macros, &render, &mut out)?;
     out.flush().map_err(|e| e.to_string())?;
+    Ok(count)
+}
+
+/// Parse every remaining component batch, render the placed rows in
+/// parallel and write them in file order. Returns the row count.
+fn write_component_rows<W: Write>(
+    scanner: &mut DefScanner,
+    macros: &MacroMap,
+    render: &(impl Fn(&mut String, &Component<'_>) + Sync),
+    out: &mut W,
+) -> Result<usize, String> {
+    let mut count = 0usize;
+    for_each_batch(
+        || scanner.next_batch(BATCH_SIZE),
+        |batch, overlapped| {
+            let (rows, texts) = crate::threads::install_for(overlapped, || {
+                let rows = parse_components(&batch, macros)?;
+                Ok::<_, String>((rows.len(), render_rows(&rows, render)))
+            })?;
+            count += rows;
+            for text in &texts {
+                out.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        },
+    )?;
     Ok(count)
 }
 
@@ -1217,52 +1266,34 @@ fn write_instance_bbox_csv_stream<W: Write>(
         .map_err(|e| e.to_string())?;
 
     let dbu = scanner.dbu_per_micron as f64;
-    let mut count = 0usize;
-    loop {
-        let batch = scanner.next_batch(BATCH_SIZE).map_err(|e| e.to_string())?;
-        if batch.is_empty() {
-            break;
-        }
-        let bboxes = process_record_batch(&batch, macros)?;
-        let mut buffer = String::with_capacity(bboxes.len() * 64);
-        for bbox in bboxes {
-            for (index, column) in columns.iter().enumerate() {
-                if index > 0 {
-                    buffer.push(',');
-                }
-                match column.kind {
-                    ColumnKind::Instance => append_csv_field(&mut buffer, &bbox.instance),
-                    ColumnKind::BaseCell => append_csv_field(&mut buffer, &bbox.macro_name),
-                    ColumnKind::Status => append_csv_field(&mut buffer, &bbox.status),
-                    ColumnKind::Orient => append_csv_field(&mut buffer, &bbox.orient),
-                    ColumnKind::IsSeq => append_csv_field(
-                        &mut buffer,
-                        if sequential.is_some_and(|set| set.contains(&bbox.macro_name)) {
-                            "true"
-                        } else {
-                            "false"
-                        },
-                    ),
-                    ColumnKind::IsClock => append_csv_field(
-                        &mut buffer,
-                        if clock.is_some_and(|set| set.contains(&bbox.instance)) {
-                            "true"
-                        } else {
-                            "false"
-                        },
-                    ),
-                    ColumnKind::Llx => append_csv_micron(&mut buffer, bbox.llx as f64 / dbu),
-                    ColumnKind::Lly => append_csv_micron(&mut buffer, bbox.lly as f64 / dbu),
-                    ColumnKind::Urx => append_csv_micron(&mut buffer, bbox.urx as f64 / dbu),
-                    ColumnKind::Ury => append_csv_micron(&mut buffer, bbox.ury as f64 / dbu),
-                }
+    let flag = |value: bool| if value { "true" } else { "false" };
+    let render = |buffer: &mut String, row: &Component<'_>| {
+        for (index, column) in columns.iter().enumerate() {
+            if index > 0 {
+                buffer.push(',');
             }
-            buffer.push('\n');
-            count += 1;
+            match column.kind {
+                ColumnKind::Instance => append_csv_field(buffer, row.instance),
+                ColumnKind::BaseCell => append_csv_field(buffer, row.macro_name),
+                ColumnKind::Status => append_csv_field(buffer, row.status),
+                ColumnKind::Orient => append_csv_field(buffer, row.orient),
+                ColumnKind::IsSeq => append_csv_field(
+                    buffer,
+                    flag(sequential.is_some_and(|set| set.contains(row.macro_name))),
+                ),
+                ColumnKind::IsClock => append_csv_field(
+                    buffer,
+                    flag(clock.is_some_and(|set| set.contains(row.instance))),
+                ),
+                ColumnKind::Llx => append_csv_micron(buffer, row.llx as f64 / dbu),
+                ColumnKind::Lly => append_csv_micron(buffer, row.lly as f64 / dbu),
+                ColumnKind::Urx => append_csv_micron(buffer, row.urx as f64 / dbu),
+                ColumnKind::Ury => append_csv_micron(buffer, row.ury as f64 / dbu),
+            }
         }
-        out.write_all(buffer.as_bytes())
-            .map_err(|e| e.to_string())?;
-    }
+        buffer.push('\n');
+    };
+    let count = write_component_rows(scanner, macros, &render, &mut out)?;
     out.flush().map_err(|e| e.to_string())?;
     Ok(count)
 }
@@ -1354,92 +1385,84 @@ fn write_instance_parquet_impl(
         .map_err(|e| e.to_string())?;
 
     let mut count = 0usize;
-    loop {
-        let batch = scanner.next_batch(chunk).map_err(|e| e.to_string())?;
-        if batch.is_empty() {
-            break;
-        }
-        let bboxes = process_record_batch(&batch, &macros)?;
-        if bboxes.is_empty() {
-            continue;
-        }
-        let mut cache: HashMap<ColumnKind, ArrayRef> = HashMap::new();
-        let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
-        for column in columns {
-            if let Some(array) = cache.get(&column.kind) {
-                arrays.push(Arc::clone(array));
-                continue;
+    for_each_batch(
+        || scanner.next_batch(chunk),
+        |batch, overlapped| {
+            let bboxes =
+                crate::threads::install_for(overlapped, || parse_components(&batch, &macros))?;
+            if bboxes.is_empty() {
+                return Ok(());
             }
-            let array: ArrayRef = match column.kind {
-                ColumnKind::Instance => Arc::new(StringArray::from(
-                    bboxes
-                        .iter()
-                        .map(|item| item.instance.as_str())
-                        .collect::<Vec<_>>(),
-                )),
-                ColumnKind::BaseCell => Arc::new(StringArray::from(
-                    bboxes
-                        .iter()
-                        .map(|item| item.macro_name.as_str())
-                        .collect::<Vec<_>>(),
-                )),
-                ColumnKind::Status => Arc::new(StringArray::from(
-                    bboxes
-                        .iter()
-                        .map(|item| item.status.as_str())
-                        .collect::<Vec<_>>(),
-                )),
-                ColumnKind::Orient => Arc::new(StringArray::from(
-                    bboxes
-                        .iter()
-                        .map(|item| item.orient.as_str())
-                        .collect::<Vec<_>>(),
-                )),
-                ColumnKind::IsSeq => Arc::new(BooleanArray::from(
-                    bboxes
-                        .iter()
-                        .map(|item| sequential.is_some_and(|set| set.contains(&item.macro_name)))
-                        .collect::<Vec<_>>(),
-                )),
-                ColumnKind::IsClock => Arc::new(BooleanArray::from(
-                    bboxes
-                        .iter()
-                        .map(|item| clock.is_some_and(|set| set.contains(&item.instance)))
-                        .collect::<Vec<_>>(),
-                )),
-                ColumnKind::Llx => Arc::new(Float64Array::from(
-                    bboxes
-                        .iter()
-                        .map(|item| item.llx as f64 / dbu)
-                        .collect::<Vec<_>>(),
-                )),
-                ColumnKind::Lly => Arc::new(Float64Array::from(
-                    bboxes
-                        .iter()
-                        .map(|item| item.lly as f64 / dbu)
-                        .collect::<Vec<_>>(),
-                )),
-                ColumnKind::Urx => Arc::new(Float64Array::from(
-                    bboxes
-                        .iter()
-                        .map(|item| item.urx as f64 / dbu)
-                        .collect::<Vec<_>>(),
-                )),
-                ColumnKind::Ury => Arc::new(Float64Array::from(
-                    bboxes
-                        .iter()
-                        .map(|item| item.ury as f64 / dbu)
-                        .collect::<Vec<_>>(),
-                )),
-            };
-            cache.insert(column.kind, Arc::clone(&array));
-            arrays.push(array);
-        }
-        let record =
-            RecordBatch::try_new(Arc::clone(&schema), arrays).map_err(|e| e.to_string())?;
-        writer.write(&record).map_err(|e| e.to_string())?;
-        count += bboxes.len();
-    }
+            let mut cache: HashMap<ColumnKind, ArrayRef> = HashMap::new();
+            let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
+            for column in columns {
+                if let Some(array) = cache.get(&column.kind) {
+                    arrays.push(Arc::clone(array));
+                    continue;
+                }
+                let array: ArrayRef = match column.kind {
+                    ColumnKind::Instance => Arc::new(StringArray::from(
+                        bboxes.iter().map(|item| item.instance).collect::<Vec<_>>(),
+                    )),
+                    ColumnKind::BaseCell => Arc::new(StringArray::from(
+                        bboxes
+                            .iter()
+                            .map(|item| item.macro_name)
+                            .collect::<Vec<_>>(),
+                    )),
+                    ColumnKind::Status => Arc::new(StringArray::from(
+                        bboxes.iter().map(|item| item.status).collect::<Vec<_>>(),
+                    )),
+                    ColumnKind::Orient => Arc::new(StringArray::from(
+                        bboxes.iter().map(|item| item.orient).collect::<Vec<_>>(),
+                    )),
+                    ColumnKind::IsSeq => Arc::new(BooleanArray::from(
+                        bboxes
+                            .iter()
+                            .map(|item| sequential.is_some_and(|set| set.contains(item.macro_name)))
+                            .collect::<Vec<_>>(),
+                    )),
+                    ColumnKind::IsClock => Arc::new(BooleanArray::from(
+                        bboxes
+                            .iter()
+                            .map(|item| clock.is_some_and(|set| set.contains(item.instance)))
+                            .collect::<Vec<_>>(),
+                    )),
+                    ColumnKind::Llx => Arc::new(Float64Array::from(
+                        bboxes
+                            .iter()
+                            .map(|item| item.llx as f64 / dbu)
+                            .collect::<Vec<_>>(),
+                    )),
+                    ColumnKind::Lly => Arc::new(Float64Array::from(
+                        bboxes
+                            .iter()
+                            .map(|item| item.lly as f64 / dbu)
+                            .collect::<Vec<_>>(),
+                    )),
+                    ColumnKind::Urx => Arc::new(Float64Array::from(
+                        bboxes
+                            .iter()
+                            .map(|item| item.urx as f64 / dbu)
+                            .collect::<Vec<_>>(),
+                    )),
+                    ColumnKind::Ury => Arc::new(Float64Array::from(
+                        bboxes
+                            .iter()
+                            .map(|item| item.ury as f64 / dbu)
+                            .collect::<Vec<_>>(),
+                    )),
+                };
+                cache.insert(column.kind, Arc::clone(&array));
+                arrays.push(array);
+            }
+            let record =
+                RecordBatch::try_new(Arc::clone(&schema), arrays).map_err(|e| e.to_string())?;
+            writer.write(&record).map_err(|e| e.to_string())?;
+            count += bboxes.len();
+            Ok(())
+        },
+    )?;
     let metadata = writer.close().map_err(|e| e.to_string())?;
     Ok((count, metadata.num_row_groups()))
 }
@@ -1503,39 +1526,31 @@ fn write_def_cache_impl(def_path: &Path, cache_dir: &Path) -> Result<(), String>
     let mut data_offset = CACHE_HEADER_LEN;
     let mut net_map: HashMap<String, Vec<u64>> = HashMap::new();
 
+    let mut writer = NetCacheWriter {
+        data: &mut net_data,
+        index: &mut net_index,
+        connectivity: &mut connectivity,
+        net_map: &mut net_map,
+        data_offset: &mut data_offset,
+        net_count: &mut net_count,
+        connectivity_count: &mut connectivity_count,
+    };
     while let Some(token) = lexer.next_token().map_err(|e| e.to_string())? {
-        if token.text.eq_ignore_ascii_case("COMPONENTS") {
+        if token.text == "-" {
+            // A record of a section the cache does not store.
+            lexer.skip_until_semicolon().map_err(|e| e.to_string())?;
+        } else if token.text.eq_ignore_ascii_case("COMPONENTS") {
             let _count = lexer.next_token().map_err(|e| e.to_string())?;
             expect_semicolon(&mut lexer).map_err(|e| e.to_string())?;
             stream_components_to_cache(&mut lexer, &mut components, &mut component_count)?;
         } else if token.text.eq_ignore_ascii_case("NETS") {
             let _count = lexer.next_token().map_err(|e| e.to_string())?;
             expect_semicolon(&mut lexer).map_err(|e| e.to_string())?;
-            stream_nets_to_cache(
-                &mut lexer,
-                "NETS",
-                &mut net_data,
-                &mut net_index,
-                &mut connectivity,
-                &mut net_map,
-                &mut data_offset,
-                &mut net_count,
-                &mut connectivity_count,
-            )?;
+            stream_nets_to_cache(&mut lexer, "NETS", &mut writer)?;
         } else if token.text.eq_ignore_ascii_case("SPECIALNETS") {
             let _count = lexer.next_token().map_err(|e| e.to_string())?;
             expect_semicolon(&mut lexer).map_err(|e| e.to_string())?;
-            stream_nets_to_cache(
-                &mut lexer,
-                "SPECIALNETS",
-                &mut net_data,
-                &mut net_index,
-                &mut connectivity,
-                &mut net_map,
-                &mut data_offset,
-                &mut net_count,
-                &mut connectivity_count,
-            )?;
+            stream_nets_to_cache(&mut lexer, "SPECIALNETS", &mut writer)?;
         }
     }
 
@@ -1773,18 +1788,58 @@ fn write_net_shapes_records_csv<W: Write>(
     out.flush().map_err(|e| e.to_string())
 }
 
+/// Records per parallel task: large enough to amortize scheduling, small
+/// enough to balance 65k-record batches across many cores.
+const CHUNK: usize = 2048;
+
+/// Parse a batch into placed components, in record order. Chunks parse in
+/// parallel; the first error in record order is reported.
+fn parse_components<'a>(
+    batch: &'a [RawRecord],
+    macros: &MacroMap,
+) -> Result<Vec<Component<'a>>, String> {
+    let chunks: Vec<Result<Vec<Component<'a>>, String>> = batch
+        .par_chunks(CHUNK)
+        .map(|chunk| {
+            let mut rows = Vec::with_capacity(chunk.len());
+            for record in chunk {
+                if let Some(row) = parse_component_record(record, macros)? {
+                    rows.push(row);
+                }
+            }
+            Ok(rows)
+        })
+        .collect();
+    let mut rows = Vec::with_capacity(batch.len());
+    for chunk in chunks {
+        rows.extend(chunk?);
+    }
+    Ok(rows)
+}
+
+/// Render rows to text in parallel chunks, concatenated in row order.
+fn render_rows<T: Sync>(rows: &[T], render: impl Fn(&mut String, &T) + Sync) -> Vec<String> {
+    rows.par_chunks(CHUNK)
+        .map(|chunk| {
+            let mut text = String::with_capacity(chunk.len() * 64);
+            for row in chunk {
+                render(&mut text, row);
+            }
+            text
+        })
+        .collect()
+}
+
 fn process_record_batch(
     batch: &[RawRecord],
     macros: &MacroMap,
 ) -> Result<Vec<InstanceBBox>, String> {
-    batch
-        .par_iter()
-        .filter_map(|record| match parse_component_record(record, macros) {
-            Ok(Some(bbox)) => Some(Ok(bbox)),
-            Ok(None) => None,
-            Err(err) => Some(Err(err)),
-        })
-        .collect()
+    crate::threads::install(|| {
+        Ok(parse_components(batch, macros)?
+            .into_iter()
+            .map(Component::to_bbox)
+            .collect())
+    })
 }
 
 fn process_net_record_batch(
@@ -1799,10 +1854,10 @@ fn process_net_record_batch(
     Ok(nested?.into_iter().flatten().collect())
 }
 
-fn parse_component_record(
-    record: &RawRecord,
+fn parse_component_record<'a>(
+    record: &'a RawRecord,
     macros: &MacroMap,
-) -> Result<Option<InstanceBBox>, String> {
+) -> Result<Option<Component<'a>>, String> {
     let mut tokens = ByteTokens::new(&record.bytes);
     tokens.expect(b"-", record.offset, "component record")?;
     let instance = tokens
@@ -1877,11 +1932,11 @@ fn parse_component_record(
             ));
         }
     };
-    Ok(Some(InstanceBBox {
-        instance: instance_str.to_string(),
-        macro_name: macro_str.to_string(),
-        status: placement.status.to_string(),
-        orient: placement.orient.to_string(),
+    Ok(Some(Component {
+        instance: instance_str,
+        macro_name: macro_str,
+        status: placement.status,
+        orient: placement.orient,
         llx: placement.x,
         lly: placement.y,
         urx: placement.x + width,
@@ -1889,18 +1944,18 @@ fn parse_component_record(
     }))
 }
 
-fn parse_component_identity(record: &RawRecord) -> Result<(String, String), String> {
-    let mut tokens = ByteTokens::new(&record.bytes);
-    tokens.expect(b"-", record.offset, "component record")?;
+fn parse_component_identity(bytes: &[u8], offset: u64) -> Result<(String, String), String> {
+    let mut tokens = ByteTokens::new(bytes);
+    tokens.expect(b"-", offset, "component record")?;
     let instance = tokens
         .next()
-        .ok_or_else(|| format!("expected component name near DEF byte {}", record.offset))?;
+        .ok_or_else(|| format!("expected component name near DEF byte {offset}"))?;
     let macro_name = tokens
         .next()
-        .ok_or_else(|| format!("expected component model near DEF byte {}", record.offset))?;
+        .ok_or_else(|| format!("expected component model near DEF byte {offset}"))?;
     Ok((
-        token_to_str(instance, record.offset, "component name")?.to_string(),
-        token_to_str(macro_name, record.offset, "component model")?.to_string(),
+        token_to_str(instance, offset, "component name")?.to_string(),
+        token_to_str(macro_name, offset, "component model")?.to_string(),
     ))
 }
 
@@ -2003,6 +2058,11 @@ fn parse_net_shapes_record(
     Ok(shapes)
 }
 
+/// Connection lists longer than this split into pieces that parse in
+/// parallel: a power net that lists every cell is one record of hundreds of
+/// MB.
+const SPLIT_BYTES: usize = 1 << 20;
+
 fn parse_net_connections_record(record: &NetRecord) -> Result<NetInfo, String> {
     let mut tokens = ByteTokens::new(&record.bytes);
     tokens.expect(b"-", record.offset, "net record")?;
@@ -2010,8 +2070,31 @@ fn parse_net_connections_record(record: &NetRecord) -> Result<NetInfo, String> {
         .next()
         .ok_or_else(|| format!("expected net name near DEF byte {}", record.offset))?;
     let net_name = token_to_str(net, record.offset, "net name")?.to_string();
-    let mut conns = Vec::new();
+    let body = &record.bytes[tokens.pos..];
+    let conns = match split_connection_list(body) {
+        Some(pieces) => {
+            let parsed: Vec<Result<Vec<NetConn>, String>> = pieces
+                .par_iter()
+                .map(|piece| parse_connection_list(piece, record.offset))
+                .collect();
+            let mut conns = Vec::new();
+            for piece in parsed {
+                conns.extend(piece?);
+            }
+            conns
+        }
+        None => parse_connection_list(body, record.offset)?,
+    };
+    Ok(NetInfo {
+        name: net_name,
+        conns,
+    })
+}
 
+/// `( instance pin )` / `( PIN port )` pairs up to the first `+`.
+fn parse_connection_list(bytes: &[u8], offset: u64) -> Result<Vec<NetConn>, String> {
+    let mut tokens = ByteTokens::new(bytes);
+    let mut conns = Vec::new();
     while let Some(token) = tokens.next() {
         if token == b"+" {
             break;
@@ -2025,24 +2108,63 @@ fn parse_net_connections_record(record: &NetRecord) -> Result<NetInfo, String> {
         let Some(second) = tokens.next() else {
             break;
         };
-        tokens.expect(b")", record.offset, "net connection")?;
+        tokens.expect(b")", offset, "net connection")?;
         if first == b"PIN" {
             conns.push(NetConn {
                 instance: None,
-                pin: token_to_str(second, record.offset, "port name")?.to_string(),
+                pin: token_to_str(second, offset, "port name")?.to_string(),
             });
         } else {
             conns.push(NetConn {
-                instance: Some(token_to_str(first, record.offset, "component name")?.to_string()),
-                pin: token_to_str(second, record.offset, "pin name")?.to_string(),
+                instance: Some(token_to_str(first, offset, "component name")?.to_string()),
+                pin: token_to_str(second, offset, "pin name")?.to_string(),
             });
         }
     }
+    Ok(conns)
+}
 
-    Ok(NetInfo {
-        name: net_name,
-        conns,
-    })
+/// Cut a long connection list into pieces that parse independently, or
+/// `None` to parse it whole.
+///
+/// The list ends at the first `+`. Pieces start at a `(` whose previous
+/// non-blank byte is `)`: a parse with no error is between connections
+/// there, and a misaligned parse is an error inside the piece before. Lists
+/// with quotes are never split, since `(`, `)` and `+` inside a quoted token
+/// are not delimiters.
+fn split_connection_list(body: &[u8]) -> Option<Vec<&[u8]>> {
+    let end = memchr::memchr(b'+', body).unwrap_or(body.len());
+    let list = &body[..end];
+    if list.len() <= SPLIT_BYTES || memchr::memchr(b'"', list).is_some() {
+        return None;
+    }
+    let mut pieces = Vec::with_capacity(list.len() / SPLIT_BYTES + 1);
+    let mut start = 0;
+    while list.len() - start > SPLIT_BYTES {
+        let mut cut = start + SPLIT_BYTES;
+        let found = loop {
+            match memchr::memchr(b'(', &list[cut..]) {
+                None => break None,
+                Some(index) => {
+                    let at = cut + index;
+                    let before = list[..at]
+                        .iter()
+                        .rposition(|byte| !byte.is_ascii_whitespace());
+                    if before.is_some_and(|position| list[position] == b')') {
+                        break Some(at);
+                    }
+                    cut = at + 1;
+                }
+            }
+        };
+        let Some(at) = found else {
+            break;
+        };
+        pieces.push(&list[start..at]);
+        start = at;
+    }
+    pieces.push(&list[start..]);
+    Some(pieces)
 }
 
 fn make_net_shape(
@@ -2093,52 +2215,53 @@ fn make_net_shape(
     }
 }
 
+/// Components (instance -> macro) and per-net connections of a DEF.
+///
+/// Only each net's connection list is kept: the routing after the first
+/// `+` is skipped while scanning, never copied. Net records parse in
+/// parallel batches as the scan goes.
 fn collect_def_connectivity(
     def_path: &Path,
 ) -> Result<(HashMap<String, String>, Vec<NetInfo>), String> {
-    let cache = collect_def_cache(def_path)?;
-    let nets = parse_connectivity_records(&cache.net_records)?;
-    Ok((cache.components, nets))
-}
-
-fn collect_def_cache(def_path: &Path) -> Result<DefCache, String> {
     let mut lexer = Lexer::new(open_input(def_path).map_err(|e| e.to_string())?);
     let mut components = HashMap::new();
-    let mut net_records = Vec::new();
+    let mut nets = Vec::new();
 
     while let Some(token) = lexer.next_token().map_err(|e| e.to_string())? {
-        if token.text.eq_ignore_ascii_case("COMPONENTS") {
+        if token.text == "-" {
+            // A record of a section this pass does not read.
+            lexer.skip_until_semicolon().map_err(|e| e.to_string())?;
+        } else if token.text.eq_ignore_ascii_case("COMPONENTS") {
             let _count = lexer.next_token().map_err(|e| e.to_string())?;
             expect_semicolon(&mut lexer).map_err(|e| e.to_string())?;
             collect_component_section(&mut lexer, &mut components)?;
         } else if token.text.eq_ignore_ascii_case("NETS") {
             let _count = lexer.next_token().map_err(|e| e.to_string())?;
             expect_semicolon(&mut lexer).map_err(|e| e.to_string())?;
-            collect_raw_net_section(&mut lexer, "NETS", &mut net_records)?;
+            collect_net_connectivity(&mut lexer, "NETS", &mut nets)?;
         } else if token.text.eq_ignore_ascii_case("SPECIALNETS") {
             let _count = lexer.next_token().map_err(|e| e.to_string())?;
             expect_semicolon(&mut lexer).map_err(|e| e.to_string())?;
-            collect_raw_net_section(&mut lexer, "SPECIALNETS", &mut net_records)?;
+            collect_net_connectivity(&mut lexer, "SPECIALNETS", &mut nets)?;
         }
     }
-
-    Ok(DefCache {
-        components,
-        net_records,
-    })
+    Ok((components, nets))
 }
 
 fn parse_connectivity_records(records: &[NetRecord]) -> Result<Vec<NetInfo>, String> {
-    records
-        .par_iter()
-        .map(parse_net_connections_record)
-        .collect()
+    crate::threads::install(|| {
+        records
+            .par_iter()
+            .map(parse_net_connections_record)
+            .collect()
+    })
 }
 
 fn collect_component_section<R: Read>(
     lexer: &mut Lexer<R>,
     components: &mut HashMap<String, String>,
 ) -> Result<(), String> {
+    let mut bytes = Vec::with_capacity(256);
     while let Some(token) = lexer.next_token().map_err(|e| e.to_string())? {
         if token.text.eq_ignore_ascii_case("END") {
             let _section = lexer.next_token().map_err(|e| e.to_string())?;
@@ -2147,43 +2270,54 @@ fn collect_component_section<R: Read>(
         if token.text != "-" {
             continue;
         }
-        let offset = token.offset;
-        let mut bytes = Vec::with_capacity(96);
+        bytes.clear();
         bytes.push(b'-');
         lexer
             .read_until_semicolon(&mut bytes)
             .map_err(|e| e.to_string())?;
-        let (instance, macro_name) = parse_component_identity(&RawRecord { bytes, offset })?;
+        let (instance, macro_name) = parse_component_identity(&bytes, token.offset)?;
         components.insert(instance, macro_name);
     }
     Ok(())
 }
 
-fn collect_raw_net_section<R: Read>(
+/// Read one NETS/SPECIALNETS section, keeping each net's connection list.
+fn collect_net_connectivity<R: Read>(
     lexer: &mut Lexer<R>,
     section: &'static str,
-    records: &mut Vec<NetRecord>,
+    nets: &mut Vec<NetInfo>,
 ) -> Result<(), String> {
+    let mut batch: Vec<NetRecord> = Vec::new();
+    let mut batch_bytes = 0usize;
     while let Some(token) = lexer.next_token().map_err(|e| e.to_string())? {
         if token.text.eq_ignore_ascii_case("END") {
             let _section = lexer.next_token().map_err(|e| e.to_string())?;
-            return Ok(());
+            break;
         }
         if token.text != "-" {
             continue;
         }
-        let offset = token.offset;
-        let mut bytes = Vec::with_capacity(1024);
+        let mut bytes = Vec::with_capacity(128);
         bytes.push(b'-');
-        lexer
-            .read_until_semicolon(&mut bytes)
+        let routed = lexer
+            .read_until_plus_or_semicolon(&mut bytes)
             .map_err(|e| e.to_string())?;
-        records.push(NetRecord {
+        if routed {
+            lexer.skip_until_semicolon().map_err(|e| e.to_string())?;
+        }
+        batch_bytes += bytes.len();
+        batch.push(NetRecord {
             bytes,
-            offset,
+            offset: token.offset,
             section,
         });
+        if batch.len() >= BATCH_SIZE || batch_bytes >= BATCH_BYTES {
+            nets.extend(parse_connectivity_records(&batch)?);
+            batch.clear();
+            batch_bytes = 0;
+        }
     }
+    nets.extend(parse_connectivity_records(&batch)?);
     Ok(())
 }
 
@@ -2192,6 +2326,7 @@ fn stream_components_to_cache<R: Read, W: Write>(
     out: &mut W,
     count: &mut u64,
 ) -> Result<(), String> {
+    let mut bytes = Vec::with_capacity(256);
     while let Some(token) = lexer.next_token().map_err(|e| e.to_string())? {
         if token.text.eq_ignore_ascii_case("END") {
             let _section = lexer.next_token().map_err(|e| e.to_string())?;
@@ -2200,13 +2335,12 @@ fn stream_components_to_cache<R: Read, W: Write>(
         if token.text != "-" {
             continue;
         }
-        let offset = token.offset;
-        let mut bytes = Vec::with_capacity(96);
+        bytes.clear();
         bytes.push(b'-');
         lexer
             .read_until_semicolon(&mut bytes)
             .map_err(|e| e.to_string())?;
-        let (instance, macro_name) = parse_component_identity(&RawRecord { bytes, offset })?;
+        let (instance, macro_name) = parse_component_identity(&bytes, token.offset)?;
         write_string(out, &instance)?;
         write_string(out, &macro_name)?;
         *count += 1;
@@ -2214,54 +2348,82 @@ fn stream_components_to_cache<R: Read, W: Write>(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Everything `stream_nets_to_cache` writes, and the running counters.
+struct NetCacheWriter<'a, W1: Write, W2: Write, W3: Write> {
+    data: &'a mut W1,
+    index: &'a mut W2,
+    connectivity: &'a mut W3,
+    net_map: &'a mut HashMap<String, Vec<u64>>,
+    data_offset: &'a mut u64,
+    net_count: &'a mut u64,
+    connectivity_count: &'a mut u64,
+}
+
+impl<W1: Write, W2: Write, W3: Write> NetCacheWriter<'_, W1, W2, W3> {
+    /// Parse a batch's connectivity in parallel, then write every record in
+    /// order.
+    fn flush(&mut self, batch: &mut Vec<NetRecord>) -> Result<(), String> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let infos = parse_connectivity_records(batch)?;
+        for (record, net_info) in batch.iter().zip(&infos) {
+            let net_name = record_net_name(&record.bytes, record.offset)?;
+            self.net_map
+                .entry(net_name)
+                .or_default()
+                .push(*self.net_count);
+
+            write_u8(self.index, section_id(record.section))?;
+            write_u64(self.index, record.offset)?;
+            write_u64(self.index, *self.data_offset)?;
+            write_u64(self.index, record.bytes.len() as u64)?;
+            self.data
+                .write_all(&record.bytes)
+                .map_err(|e| e.to_string())?;
+            *self.data_offset += record.bytes.len() as u64;
+
+            write_net_info(self.connectivity, net_info)?;
+            *self.net_count += 1;
+            *self.connectivity_count += 1;
+        }
+        batch.clear();
+        Ok(())
+    }
+}
+
 fn stream_nets_to_cache<R: Read, W1: Write, W2: Write, W3: Write>(
     lexer: &mut Lexer<R>,
     section: &'static str,
-    data: &mut W1,
-    index: &mut W2,
-    connectivity: &mut W3,
-    net_map: &mut HashMap<String, Vec<u64>>,
-    data_offset: &mut u64,
-    net_count: &mut u64,
-    connectivity_count: &mut u64,
+    writer: &mut NetCacheWriter<'_, W1, W2, W3>,
 ) -> Result<(), String> {
+    let mut batch: Vec<NetRecord> = Vec::new();
+    let mut batch_bytes = 0usize;
     while let Some(token) = lexer.next_token().map_err(|e| e.to_string())? {
         if token.text.eq_ignore_ascii_case("END") {
             let _section = lexer.next_token().map_err(|e| e.to_string())?;
-            return Ok(());
+            break;
         }
         if token.text != "-" {
             continue;
         }
-        let offset = token.offset;
         let mut bytes = Vec::with_capacity(1024);
         bytes.push(b'-');
         lexer
             .read_until_semicolon(&mut bytes)
             .map_err(|e| e.to_string())?;
-
-        let record = NetRecord {
+        batch_bytes += bytes.len();
+        batch.push(NetRecord {
             bytes,
-            offset,
+            offset: token.offset,
             section,
-        };
-        let net_name = record_net_name(&record.bytes, record.offset)?;
-        net_map.entry(net_name).or_default().push(*net_count);
-
-        write_u8(index, section_id(record.section))?;
-        write_u64(index, record.offset)?;
-        write_u64(index, *data_offset)?;
-        write_u64(index, record.bytes.len() as u64)?;
-        data.write_all(&record.bytes).map_err(|e| e.to_string())?;
-        *data_offset += record.bytes.len() as u64;
-
-        let net_info = parse_net_connections_record(&record)?;
-        write_net_info(connectivity, &net_info)?;
-        *net_count += 1;
-        *connectivity_count += 1;
+        });
+        if batch.len() >= BATCH_SIZE || batch_bytes >= BATCH_BYTES {
+            writer.flush(&mut batch)?;
+            batch_bytes = 0;
+        }
     }
-    Ok(())
+    writer.flush(&mut batch)
 }
 
 fn seed_clock_nets(nets: &[NetInfo], root_type: &str, root_name: &str) -> Vec<usize> {
@@ -2649,7 +2811,10 @@ impl DefScanner {
         let mut lexer = Lexer::new(input);
         let mut dbu_per_micron = None;
         while let Some(token) = lexer.next_token()? {
-            if token.text.eq_ignore_ascii_case("UNITS") {
+            if token.text == "-" {
+                // A record of an earlier section (VIAS, NONDEFAULTRULES, ...).
+                lexer.skip_until_semicolon()?;
+            } else if token.text.eq_ignore_ascii_case("UNITS") {
                 parse_def_units(&mut lexer, &mut dbu_per_micron)?;
             } else if token.text.eq_ignore_ascii_case("COMPONENTS") {
                 let _count = lexer.next_token()?;
@@ -2732,12 +2897,51 @@ impl NetRecordScanner {
         Ok(items)
     }
 
+    /// The next NETS/SPECIALNETS record whose name is `net`.
+    ///
+    /// Records are skipped at memchr speed without being copied: those of
+    /// other sections entirely, net records once their name does not match.
     fn next_matching_record(&mut self, net: &[u8]) -> io::Result<Option<NetRecord>> {
         loop {
             let token = match self.lexer.next_token()? {
                 Some(token) => token,
                 None => return Ok(None),
             };
+            if token.text == "-" {
+                let Some(section) = self.section else {
+                    self.lexer.skip_until_semicolon()?;
+                    continue;
+                };
+                let Some(name) = self.lexer.next_token()? else {
+                    return Ok(None);
+                };
+                if name.text == ";" {
+                    continue;
+                }
+                if !eq_token(name.text.as_bytes(), net) {
+                    self.lexer.skip_until_semicolon()?;
+                    continue;
+                }
+                let mut bytes = Vec::with_capacity(1024);
+                bytes.extend_from_slice(b"- ");
+                let plain = !name.text.bytes().any(|byte| {
+                    byte.is_ascii_whitespace() || matches!(byte, b'(' | b')' | b'+' | b';' | b'"')
+                });
+                if plain {
+                    bytes.extend_from_slice(name.text.as_bytes());
+                } else {
+                    bytes.push(b'"');
+                    bytes.extend_from_slice(name.text.as_bytes());
+                    bytes.push(b'"');
+                }
+                bytes.push(b' ');
+                self.lexer.read_until_semicolon(&mut bytes)?;
+                return Ok(Some(NetRecord {
+                    bytes,
+                    offset: token.offset,
+                    section,
+                }));
+            }
 
             if token.text.eq_ignore_ascii_case("SPECIALNETS") {
                 let _count = self.lexer.next_token()?;
@@ -2769,24 +2973,6 @@ impl NetRecordScanner {
                     self.section = None;
                     continue;
                 }
-            }
-
-            let Some(section) = self.section else {
-                continue;
-            };
-            if token.text != "-" {
-                continue;
-            }
-            let offset = token.offset;
-            let mut bytes = Vec::with_capacity(1024);
-            bytes.push(b'-');
-            self.lexer.read_until_semicolon(&mut bytes)?;
-            if record_net_matches(&bytes, net) {
-                return Ok(Some(NetRecord {
-                    bytes,
-                    offset,
-                    section,
-                }));
             }
         }
     }
@@ -2945,14 +3131,6 @@ impl<'a> ByteTokens<'a> {
             }
         }
     }
-}
-
-fn record_net_matches(bytes: &[u8], target_net: &[u8]) -> bool {
-    let mut tokens = ByteTokens::new(bytes);
-    if tokens.next() != Some(&b"-"[..]) {
-        return false;
-    }
-    tokens.next().is_some_and(|net| eq_token(net, target_net))
 }
 
 fn eq_token(left: &[u8], right: &[u8]) -> bool {

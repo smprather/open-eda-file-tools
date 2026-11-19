@@ -660,10 +660,14 @@ fn parse_all(
     let (header, names, first_net) = parse_header(&data)?;
     let delimiter = header.delimiter.chars().next().unwrap_or(':');
     let blocks = index_blocks(&data, first_net)?;
-    let parsed: Vec<(PexNet, PexSummary)> = blocks
-        .par_iter()
-        .map(|(start, end)| parse_net_block(&data[*start..*end], &names, delimiter, keep_entries))
-        .collect::<Result<Vec<_>, _>>()?;
+    let parsed: Vec<(PexNet, PexSummary)> = crate::threads::install(|| {
+        blocks
+            .par_iter()
+            .map(|(start, end)| {
+                parse_net_block(&data[*start..*end], &names, delimiter, keep_entries)
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })?;
     let (nets, summaries): (Vec<_>, Vec<_>) = parsed.into_iter().unzip();
     Ok((header, nets, summaries))
 }

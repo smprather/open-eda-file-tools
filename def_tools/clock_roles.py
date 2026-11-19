@@ -119,15 +119,19 @@ def cell_clock_role(cell) -> CellClockRole:
 def cell_clock_roles(libs: Sequence[Path | str]) -> dict[str, CellClockRole]:
     """Clock role of every cell in ``libs``, one thread per library.
 
+    At most ``get_threads()`` libraries parse at once (the CPU limit set
+    with ``set_threads`` or ``--threads``).
+
     Only structural fields are read, so each library parses with
     ``skip_tables=True``; ``parse_file`` releases the GIL, so the set parses
     concurrently. A later library wins for a duplicated cell name.
     """
     from liberty_tools import parse_file
+    from liberty_tools._native import get_threads
 
     if not libs:
         return {}
-    with ThreadPoolExecutor(max_workers=len(libs)) as pool:
+    with ThreadPoolExecutor(max_workers=min(len(libs), get_threads())) as pool:
         documents = list(
             pool.map(lambda path: parse_file(str(path), skip_tables=True), libs)
         )
