@@ -391,9 +391,17 @@ def net_shapes(
         raise click.UsageError("provide exactly one of --def or --cache-dir")
     set_threads(threads)
     if cache_dir is not None:
-        write_net_shapes_csv_from_cache(cache_dir, net, layer, output)
+        skipped = write_net_shapes_csv_from_cache(cache_dir, net, layer, output)
     elif def_path is not None:
-        write_net_shapes_csv(def_path, net, layer, output)
+        skipped = write_net_shapes_csv(def_path, net, layer, output)
+    if any(skipped.values()):
+        click.echo(
+            "warning: net-shapes skipped route pieces: "
+            f"after_via={skipped['after_via']} "
+            f"polygon={skipped['polygon']} "
+            f"subnet={skipped['subnet']}",
+            err=True,
+        )
 
 
 @main.group(name="cache")

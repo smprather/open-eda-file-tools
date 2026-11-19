@@ -312,6 +312,19 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   like `NETS` inside VIAS/PINS records are never read as section keywords.
   The connectivity pass keeps only a net's connection list
   (`read_until_plus_or_semicolon`), never its routing.
+- **All route geometry comes from one state machine.** `parse_net_shapes_record`
+  (`src/def.rs`) drives the direct scan, the Python iterator and the cache
+  query. `read_route_point` resolves `*` against the previous point (an error
+  when there is none), optional extension values, `VIRTUAL` (previous point
+  updated, no shape) and `MASK`; `RECT ( dx dy dx dy )` deltas and net-level
+  `+ RECT layer pt pt` both yield `shape_type = "RECT"` rows with normalized
+  corners and `width = 0`; after a via the layer is unknown until the next
+  `NEW`/status keyword, and those segments are skipped and counted. Route
+  pieces the reader cannot place are counted (`after_via`, `polygon`,
+  `subnet`), never attributed to a guessed layer; the CLI warns when any
+  count is non-zero, and the writers/iterator return/expose the counts.
+  Net-level `+` keywords other than the path statuses, `SHAPE`, `STYLE`,
+  `MASK`, `RECT`, `POLYGON`, `VIA` and `SUBNET` end the current path.
 - **`__version__` is the installed distribution version, with no git fallback.**
   CalVer releases (`YYYY.M.D`, same-day `YYYY.M.D.N`) ship the release version
   on HEAD until the next release, so `version.py` reads installed metadata and

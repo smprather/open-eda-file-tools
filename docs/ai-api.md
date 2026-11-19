@@ -330,14 +330,21 @@ for bbox in def_tools.instance_bboxes(lefs: Sequence[str | Path], def_path: str 
 for shape in def_tools.net_shapes(def_path: str | Path, net: str, layer: str):
     shape.net -> str
     shape.section -> str        # "NETS" | "SPECIALNETS"
-    shape.route_status -> str
-    shape.shape_type -> str
+    shape.route_status -> str   # "" for net-level `+ RECT` patches
+    shape.shape_type -> str     # "" for wire segments, "RECT" for RECT patches
     shape.layer -> str
-    shape.width -> int          # DBU
-    shape.llx -> int            # DBU
+    shape.width -> int          # DBU; always 0 for regular-net wires (width lives in technology LEF)
+    shape.x1 -> int             # DBU center-line endpoints (wire) or lower-left corner (RECT)
+    shape.y1 -> int
+    shape.x2 -> int             # DBU
+    shape.y2 -> int
+    shape.llx -> int            # DBU bbox, includes width and wire-extension padding
     shape.lly -> int            # DBU
     shape.urx -> int            # DBU
     shape.ury -> int            # DBU
+# after iterating (or at any point), route pieces the parser skipped because it
+# could not place them on a layer:
+shapes.skipped -> dict[str, int]  # {"after_via": n, "polygon": n, "subnet": n}
 
 # Native writers (coordinates in MICRONS = DBU / UNITS DISTANCE MICRONS):
 # columns: optional list of (source_name, output_name) pairs.
@@ -431,8 +438,8 @@ write_otw_windows_csv(path, output: str | None) -> int     # one CSV row per win
 
 # Binary DEF cache for repeated net/clock queries:
 def_tools.write_def_cache(def_path: str | Path, cache_dir: str | Path) -> None
-def_tools.write_net_shapes_csv(def_path, net, layer, output) -> None
-def_tools.write_net_shapes_csv_from_cache(cache_dir, net, layer, output) -> None
+def_tools.write_net_shapes_csv(def_path, net, layer, output) -> dict[str, int]   # {"after_via", "polygon", "subnet"}
+def_tools.write_net_shapes_csv_from_cache(cache_dir, net, layer, output) -> dict[str, int]
 
 # CPU limit for every native reader (DEF, OTW, SPEF/DSPF) and for Liberty
 # parsing in cell_clock_roles; process-wide, also exported by pex_tools:
