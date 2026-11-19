@@ -76,3 +76,24 @@ def test_index_agrees_with_a_full_parse_on_late_items(tmp_path: Path):
     ).axis_roles() == doc.cell("u1").pin("z").timing_arcs()[0].table(
         "cell_rise"
     ).axis_roles()
+
+
+def test_index_templates_keep_declaration_order(tmp_path: Path):
+    names = ["zeta", "mid", "alpha", "tpl_9", "beta", "omega", "gamma"]
+    body = "".join(
+        f"  lu_table_template ({n}) {{\n"
+        "    variable_1 : input_net_transition;\n"
+        "  }\n"
+        for n in names
+    )
+    path = tmp_path / "order.lib"
+    path.write_text(
+        f"library (order_lib) {{\n{body}  cell (u1) {{ area : 1.0; }}\n}}\n",
+        encoding="utf-8",
+    )
+
+    index = lt.LibraryIndex.open(path)
+    doc = lt.parse_file(path)
+
+    assert list(index.templates()) == names
+    assert list(index.templates()) == list(doc.templates())

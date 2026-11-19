@@ -1986,7 +1986,7 @@ impl LibraryIndex {
 
     fn cell(&self, py: Python<'_>, name: &str) -> PyResult<Cell> {
         let name = name.to_string();
-        py.detach(move || self.inner.parse_cell_by_name(&name))
+        py.detach(move || self.inner.cell(&name))
             .map(Cell::from)
             .map_err(cell_lookup_error_to_py)
     }
@@ -1995,7 +1995,7 @@ impl LibraryIndex {
     /// O(cell size) — independent of the total file size.
     fn cell_source(&self, py: Python<'_>, name: &str) -> PyResult<String> {
         let name = name.to_string();
-        py.detach(move || self.inner.cell_source_by_name(&name))
+        py.detach(move || self.inner.cell_source(&name))
             .map_err(cell_source_error_to_py)
     }
 
@@ -2021,7 +2021,7 @@ impl LibraryIndex {
     }
     fn templates<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let map = PyDict::new(py);
-        for (name, vars) in &self.inner.templates() {
+        for (name, vars) in self.inner.templates_in_order() {
             let list = PyList::empty(py);
             for v in vars {
                 list.append(v.as_deref())?;
@@ -2315,5 +2315,6 @@ fn write_error_to_py(err: WriteError) -> PyErr {
         WriteError::Poisoned => PyValueError::new_err("document edit log is poisoned"),
         WriteError::Invalid(message) => PyValueError::new_err(message),
         WriteError::Parse(err) => parse_error_to_py(err),
+        other => PyValueError::new_err(other.to_string()),
     }
 }
