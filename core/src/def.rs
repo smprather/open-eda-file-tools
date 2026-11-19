@@ -6,7 +6,7 @@ use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use crate::connectivity::{Conn, Connectivity, ConnectivityBuilder, NetConns, PORT};
+use crate::connectivity::{Adjacency, Conn, Connectivity, ConnectivityBuilder, NetConns, PORT};
 use crate::lef::{Lexer, open_input};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -255,6 +255,7 @@ pub struct NetShape {
 #[doc(hidden)]
 pub type MacroRole = (String, Vec<String>, Vec<String>, bool, Vec<String>);
 
+#[derive(Clone, Copy)]
 pub(crate) struct RoleRef<'a> {
     inputs: &'a [String],
     outputs: &'a [String],
@@ -283,6 +284,18 @@ pub(crate) fn has_pin(pins: &[String], pin: &str) -> bool {
     pins.iter().any(|candidate| candidate == pin)
 }
 
+/// Roles by macro id (`None` for a macro without a Liberty cell), built once
+/// by name rather than per connection.
+pub(crate) fn roles_by_macro<'a>(
+    c: &Connectivity,
+    macros: &'a [MacroRole],
+) -> Vec<Option<RoleRef<'a>>> {
+    let by_name = role_map(macros);
+    (0..c.macros.len() as u32)
+        .map(|id| by_name.get(c.macros.get(id)).copied())
+        .collect()
+}
+
 #[doc(hidden)]
 pub fn clock_tree_cells_impl(
     def_path: &Path,
@@ -290,71 +303,67 @@ pub fn clock_tree_cells_impl(
     macros: &[MacroRole],
     prune: bool,
 ) -> Result<Vec<String>, String> {
-    let (components, nets) = legacy_tables(&collect_def_connectivity(def_path)?);
-    let macro_map = role_map(macros);
-
-    let mut instance_nets: HashMap<&str, Vec<(usize, &str)>> = HashMap::new();
-    let mut net_by_name: HashMap<&str, usize> = HashMap::new();
-    for (index, net) in nets.iter().enumerate() {
-        net_by_name.insert(net.name.as_str(), index);
-        for conn in &net.conns {
-            if let Some(instance) = &conn.instance {
-                instance_nets
-                    .entry(instance.as_str())
-                    .or_default()
-                    .push((index, conn.pin.as_str()));
-            }
+    let c = collect_def_connectivity(def_path)?;
+    let roles = roles_by_macro(&c, macros);
+    let role_of = |instance: u32| -> Option<&RoleRef<'_>> {
+        if instance >= c.component_count {
+            return None;
         }
+        roles[c.instance_macro[instance as usize] as usize].as_ref()
+    };
+    let adjacency = c.adjacency();
+    let components = c.component_lookup();
+    let mut net_by_name: HashMap<&str, u32> = HashMap::new();
+    for net in 0..c.nets.len() as u32 {
+        net_by_name.insert(c.nets.get(net), net);
     }
 
-    let mut seeds: Vec<usize> = Vec::new();
+    let mut seeds: Vec<u32> = Vec::new();
     for root in roots {
         collect_root_nets(
             root,
-            &nets,
+            &c,
             &net_by_name,
-            &instance_nets,
-            &macro_map,
+            &adjacency,
             &components,
+            &roles,
             &mut seeds,
         );
     }
     seeds.sort_unstable();
     seeds.dedup();
 
-    let mut queue: VecDeque<usize> = seeds.into_iter().collect();
-    let mut seen_nets = vec![false; nets.len()];
+    let mut queue: VecDeque<u32> = seeds.into_iter().collect();
+    let mut seen_nets = vec![false; c.nets.len()];
     // Nets a clock pin hangs on, and the candidates fed by / driving each net.
-    let mut sink_nets: Vec<usize> = Vec::new();
-    let mut live: HashSet<&str> = HashSet::new();
-    let mut reached_from: HashMap<&str, Vec<usize>> = HashMap::new();
-    let mut drivers: HashMap<usize, Vec<&str>> = HashMap::new();
+    let mut sink_nets: Vec<u32> = Vec::new();
+    let mut live: HashSet<u32> = HashSet::new();
+    let mut reached_from: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut drivers: HashMap<u32, Vec<u32>> = HashMap::new();
 
     while let Some(net_index) = queue.pop_front() {
-        if seen_nets[net_index] {
+        if seen_nets[net_index as usize] {
             continue;
         }
-        seen_nets[net_index] = true;
+        seen_nets[net_index as usize] = true;
         let mut is_sink = false;
-        for conn in &nets[net_index].conns {
-            let Some(instance) = conn.instance.as_deref() else {
-                continue;
-            };
-            let Some(role) = components
-                .get(instance)
-                .and_then(|macro_name| macro_map.get(macro_name.as_str()))
-            else {
-                continue;
-            };
-            if role.endpoint {
-                is_sink |= has_pin(role.clock_pins, &conn.pin);
+        for (instance, pin) in c.conns(net_index) {
+            if instance == PORT {
                 continue;
             }
-            if role.outputs.is_empty() || !has_pin(role.inputs, &conn.pin) {
+            let Some(role) = role_of(instance) else {
+                continue;
+            };
+            let pin = c.pins.get(pin);
+            if role.endpoint {
+                is_sink |= has_pin(role.clock_pins, pin);
+                continue;
+            }
+            if role.outputs.is_empty() || !has_pin(role.inputs, pin) {
                 continue;
             }
             // A clock gate reached on its clock pin is on the tree by itself.
-            if has_pin(role.clock_pins, &conn.pin) {
+            if has_pin(role.clock_pins, pin) {
                 live.insert(instance);
             }
             let reached = reached_from.entry(instance).or_default();
@@ -363,11 +372,11 @@ pub fn clock_tree_cells_impl(
             if !first_visit {
                 continue;
             }
-            for (next_net, pin) in instance_nets.get(instance).into_iter().flatten() {
-                if has_pin(role.outputs, pin) {
-                    drivers.entry(*next_net).or_default().push(instance);
-                    if !seen_nets[*next_net] {
-                        queue.push_back(*next_net);
+            for (next_net, out_pin) in adjacency.of(instance) {
+                if has_pin(role.outputs, c.pins.get(out_pin)) {
+                    drivers.entry(next_net).or_default().push(instance);
+                    if !seen_nets[next_net as usize] {
+                        queue.push_back(next_net);
                     }
                 }
             }
@@ -380,25 +389,30 @@ pub fn clock_tree_cells_impl(
     let mut result: Vec<String> = if prune {
         // Walk back from every clock pin: a net is live when a clock pin or a
         // live candidate reads it, a candidate when it drives a live net.
-        let mut live_nets = vec![false; nets.len()];
-        let mut pending: Vec<usize> = sink_nets;
+        let mut live_nets = vec![false; c.nets.len()];
+        let mut pending: Vec<u32> = sink_nets;
         for instance in &live {
             pending.extend(reached_from.get(instance).into_iter().flatten());
         }
         while let Some(net_index) = pending.pop() {
-            if live_nets[net_index] {
+            if live_nets[net_index as usize] {
                 continue;
             }
-            live_nets[net_index] = true;
+            live_nets[net_index as usize] = true;
             for instance in drivers.get(&net_index).into_iter().flatten() {
-                if live.insert(instance) {
+                if live.insert(*instance) {
                     pending.extend(reached_from.get(instance).into_iter().flatten());
                 }
             }
         }
-        live.into_iter().map(str::to_string).collect()
+        live.into_iter()
+            .map(|id| c.instances.get(id).to_string())
+            .collect()
     } else {
-        reached_from.into_keys().map(str::to_string).collect()
+        reached_from
+            .into_keys()
+            .map(|id| c.instances.get(id).to_string())
+            .collect()
     };
     result.sort();
     Ok(result)
@@ -517,24 +531,28 @@ pub fn clock_object_instances_impl(
 
 pub(crate) fn collect_root_nets(
     root: &str,
-    nets: &[NetInfo],
-    net_by_name: &HashMap<&str, usize>,
-    instance_nets: &HashMap<&str, Vec<(usize, &str)>>,
-    macros: &HashMap<&str, RoleRef<'_>>,
-    components: &HashMap<String, String>,
-    seeds: &mut Vec<usize>,
+    c: &Connectivity,
+    net_by_name: &HashMap<&str, u32>,
+    adjacency: &Adjacency,
+    components: &HashMap<&str, u32>,
+    roles: &[Option<RoleRef<'_>>],
+    seeds: &mut Vec<u32>,
 ) {
+    // Components first (last duplicate wins), then instances seen only in nets.
+    let instance_id = |name: &str| -> Option<u32> {
+        components.get(name).copied().or_else(|| {
+            (c.component_count..c.instances.len() as u32).find(|&id| c.instances.get(id) == name)
+        })
+    };
     if let Some(name) = root.strip_prefix("port:") {
         if let Some(&index) = net_by_name.get(name) {
             seeds.push(index);
         }
-        for (index, net) in nets.iter().enumerate() {
-            if net
-                .conns
-                .iter()
-                .any(|conn| conn.instance.is_none() && conn.pin == name)
+        for net in 0..c.nets.len() as u32 {
+            if c.conns(net)
+                .any(|(instance, pin)| instance == PORT && c.pins.get(pin) == name)
             {
-                seeds.push(index);
+                seeds.push(net);
             }
         }
     } else if let Some(name) = root.strip_prefix("net:") {
@@ -545,25 +563,23 @@ pub(crate) fn collect_root_nets(
         let Some((instance, pin)) = split_root_pin(path) else {
             return;
         };
-        if let Some(connections) = instance_nets.get(instance) {
-            for (index, conn_pin) in connections {
-                if *conn_pin == pin {
-                    seeds.push(*index);
+        if let Some(id) = instance_id(instance) {
+            for (net, conn_pin) in adjacency.of(id) {
+                if c.pins.get(conn_pin) == pin {
+                    seeds.push(net);
                 }
             }
         }
     } else if let Some(instance) = root.strip_prefix("cell:") {
-        let Some(macro_name) = components.get(instance) else {
+        let Some(&id) = components.get(instance) else {
             return;
         };
-        let Some(role) = macros.get(macro_name.as_str()) else {
+        let Some(role) = roles[c.instance_macro[id as usize] as usize].as_ref() else {
             return;
         };
-        if let Some(connections) = instance_nets.get(instance) {
-            for (index, pin) in connections {
-                if has_pin(role.outputs, pin) {
-                    seeds.push(*index);
-                }
+        for (net, pin) in adjacency.of(id) {
+            if has_pin(role.outputs, c.pins.get(pin)) {
+                seeds.push(net);
             }
         }
     }

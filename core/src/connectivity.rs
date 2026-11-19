@@ -110,8 +110,6 @@ impl Connectivity {
     }
 
     /// Component name to id; the last definition of a duplicate wins.
-    // Used by the clock trace and instance scans in Tasks 4-6.
-    #[allow(dead_code)]
     pub(crate) fn component_lookup(&self) -> HashMap<&str, u32> {
         (0..self.component_count)
             .map(|id| (self.instances.get(id), id))
@@ -119,8 +117,6 @@ impl Connectivity {
     }
 
     /// Per-instance `(net, pin)` lists in net order, then connection order.
-    // Used by the clock trace and instance scans in Tasks 4-6.
-    #[allow(dead_code)]
     pub(crate) fn adjacency(&self) -> Adjacency {
         let count = self.instances.len();
         let mut start = vec![0usize; count + 1];
@@ -152,8 +148,6 @@ impl Connectivity {
 }
 
 /// Connections grouped by instance (CSR).
-// Used by the clock trace and instance scans in Tasks 4-6.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct Adjacency {
     start: Vec<usize>,
@@ -161,8 +155,6 @@ pub(crate) struct Adjacency {
     pin: Vec<u32>,
 }
 
-// Used by the clock trace and instance scans in Tasks 4-6.
-#[allow(dead_code)]
 impl Adjacency {
     /// `(net, pin)` of each connection of `instance`.
     pub(crate) fn of(&self, instance: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
