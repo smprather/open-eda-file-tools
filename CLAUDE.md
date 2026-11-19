@@ -103,9 +103,12 @@ data storage lives in `core/` (`open-eda-file-tools-core`, an rlib with no
 pyo3/Arrow/Parquet); the root crate is the thin `_native` cdylib whose
 pyclasses delegate to or convert from core types. **The bindings never
 re-implement parser logic** — they call `core::def`/`core::lef`/
-`core::liberty`; a handful of 5-line accessors exist on both sides because
-pymethods call them on the pyclass. The Liberty writer machinery (surgical
-attribute edits) stays in the bindings; it is Python-surface only.
+`core::liberty`; a handful of 5-line accessors and thin writer shims exist
+on both sides because pymethods call them on the pyclass. The Liberty
+writer machinery (surgical attribute edits) is pure Rust in
+`core::liberty` (`apply_edits_to_source`, `read_source_text`,
+`write_source_text`, …); the bindings' pyclass methods delegate to it and
+never hold a second copy of its logic.
 
 ```
 core/src/lib.rs            Rust: Liberty lexer, parser, boolean evaluator, data model, LibraryIndex

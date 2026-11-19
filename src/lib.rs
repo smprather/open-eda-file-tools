@@ -3,13 +3,11 @@ pub mod lef;
 pub mod otw;
 pub mod pex;
 pub mod threads;
-use flate2::write::GzEncoder;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::sync::{Arc, Mutex};
 
 use open_eda_file_tools_core::liberty;
@@ -2109,21 +2107,7 @@ impl Document {
     /// Pure Rust — no Python token is involved — so the caller can run it
     /// with the GIL released.
     fn write_to_path(&self, path: &str) -> Result<(), WriteError> {
-        let text = self.render_source_text()?;
-        let bytes = text.as_bytes();
-        if path.ends_with(".gz") {
-            let file = File::create(path).map_err(|err| WriteError::Io(err.to_string()))?;
-            let mut encoder = GzEncoder::new(file, flate2::Compression::default());
-            encoder
-                .write_all(bytes)
-                .map_err(|err| WriteError::Io(err.to_string()))?;
-            encoder
-                .finish()
-                .map_err(|err| WriteError::Io(err.to_string()))?;
-        } else {
-            std::fs::write(path, bytes).map_err(|err| WriteError::Io(err.to_string()))?;
-        }
-        Ok(())
+        write_source_text(path, &self.render_source_text()?)
     }
 }
 
@@ -2132,21 +2116,6 @@ impl Document {
 ///
 /// Pure Rust: it takes no Python token, so the caller can run it with the GIL
 /// released.
-fn read_source_text(
-    source_path: Option<&str>,
-    source_len: usize,
-    source_hash: u64,
-) -> Result<String, WriteError> {
-    let path = source_path.ok_or(WriteError::NoSource)?;
-    let data = read_to_memory(path).map_err(|err| WriteError::Io(err.to_string()))?;
-    if data.len() != source_len || fnv1a(&data) != source_hash {
-        return Err(WriteError::Changed(format!(
-            "source file {path:?} changed since it was parsed; re-parse it before writing"
-        )));
-    }
-    String::from_utf8(data).map_err(|err| WriteError::Io(err.to_string()))
-}
-
 /// Apply the pending attribute edits to the source text of a document.
 ///
 /// Only the cells that were edited are re-written; every other byte of the

@@ -2938,22 +2938,29 @@ impl Document {
     /// Pure Rust — no Python token is involved — so the caller can run it
     /// with the GIL released.
     pub fn write_to_path(&self, path: &str) -> Result<(), WriteError> {
-        let text = self.render_source_text()?;
-        let bytes = text.as_bytes();
-        if path.ends_with(".gz") {
-            let file = File::create(path).map_err(|err| WriteError::Io(err.to_string()))?;
-            let mut encoder = GzEncoder::new(file, flate2::Compression::default());
-            encoder
-                .write_all(bytes)
-                .map_err(|err| WriteError::Io(err.to_string()))?;
-            encoder
-                .finish()
-                .map_err(|err| WriteError::Io(err.to_string()))?;
-        } else {
-            std::fs::write(path, bytes).map_err(|err| WriteError::Io(err.to_string()))?;
-        }
-        Ok(())
+        write_source_text(path, &self.render_source_text()?)
     }
+}
+
+/// Write `text` to `path` (gzip-compressed when the path ends in `.gz`).
+///
+/// Pure Rust — no Python token is involved — so the caller can run it with
+/// the GIL released.
+pub fn write_source_text(path: &str, text: &str) -> Result<(), WriteError> {
+    let bytes = text.as_bytes();
+    if path.ends_with(".gz") {
+        let file = File::create(path).map_err(|err| WriteError::Io(err.to_string()))?;
+        let mut encoder = GzEncoder::new(file, flate2::Compression::default());
+        encoder
+            .write_all(bytes)
+            .map_err(|err| WriteError::Io(err.to_string()))?;
+        encoder
+            .finish()
+            .map_err(|err| WriteError::Io(err.to_string()))?;
+    } else {
+        std::fs::write(path, bytes).map_err(|err| WriteError::Io(err.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Read the original source text of a document, verifying that the file has
