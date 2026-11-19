@@ -4,5 +4,6 @@
 //! The Python extension (`open-eda-file-tools-native`, the `_native` module)
 //! wraps these types behind pyo3; nothing here requires Python.
 
+pub mod def;
 pub mod lef;
 pub mod threads;
