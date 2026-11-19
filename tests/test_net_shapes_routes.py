@@ -118,3 +118,33 @@ def test_rect_without_previous_point_is_an_error(tmp_path):
     with pytest.raises(RuntimeError, match="RECT with no previous point"):
         list(def_tools.net_shapes(design, "c", "met1"))
 
+
+SPECIAL = """
+  - VDD ( * VDD )
+    + ROUTED met1 100 + SHAPE STRIPE + STYLE 1 ( 0 0 ) ( 1000 0 ) via12_a DO 2 BY 1 STEP 50 0 ( 1000 300 )
+    NEW met2 200 ( 0 0 ) ( 0 500 )
+    + RECT met3 ( 20 30 ) ( 10 10 )
+    + POLYGON met3 ( 0 0 ) ( 10 0 ) ( 10 10 )
+    + VIA via23_b ( 5 5 ) ( 6 6 )
+    + USE POWER ;
+"""
+
+
+def test_special_net_keywords(tmp_path):
+    design = write_def(tmp_path, "", specialnets=SPECIAL)
+    assert rows(design, "VDD", "met1") == [("STRIPE", 100, 0, 0, 1000, 0, 0, -50, 1000, 50)]
+    assert rows(design, "VDD", "met2") == [("", 200, 0, 0, 0, 500, -100, 0, 100, 500)]
+    assert rows(design, "VDD", "met3") == [("RECT", 0, 10, 10, 20, 30, 10, 10, 20, 30)]
+    assert next(def_tools.net_shapes(design, "VDD", "met3")).route_status == ""
+
+
+def test_net_level_keywords_end_the_path(tmp_path):
+    design = write_def(tmp_path, """
+  - c ( u1 Y ) ( u2 A )
+    + ROUTED met1 ( 0 0 ) ( 10 0 )
+    + VPIN vp LAYER met1 ( 0 0 ) ( 9 9 ) PLACED ( 1 1 ) N
+    + SUBNET s1 ( u1 A ) ROUTED met1 ( 0 0 ) ( 0 99 ) ;
+""")
+    assert rows(design, "c", "met1") == [("", 0, 0, 0, 10, 0, 0, 0, 10, 0)]
+
+

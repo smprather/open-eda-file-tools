@@ -2019,7 +2019,114 @@ fn parse_net_shapes_record(
                         .and_then(|value| std::str::from_utf8(value).ok())
                         .unwrap_or("");
                 }
-                _ => {}
+                b"STYLE" | b"MASK" => {
+                    let _value = tokens.next();
+                }
+                b"RECT" => {
+                    let layer = tokens.next();
+                    tokens.expect(b"(", record.offset, "special RECT point")?;
+                    let first = read_route_point(&mut tokens, None, record.offset)?;
+                    tokens.expect(b"(", record.offset, "special RECT point")?;
+                    let second = read_route_point(&mut tokens, None, record.offset)?;
+                    current_status = None;
+                    current_layer = None;
+                    last_point = None;
+                    if let Some(layer) = layer {
+                        if eq_token(layer, target_layer) {
+                            let (llx, urx) = if first.x <= second.x {
+                                (first.x, second.x)
+                            } else {
+                                (second.x, first.x)
+                            };
+                            let (lly, ury) = if first.y <= second.y {
+                                (first.y, second.y)
+                            } else {
+                                (second.y, first.y)
+                            };
+                            shapes.push(NetShape {
+                                net: net_str.to_string(),
+                                section: record.section.to_string(),
+                                route_status: String::new(),
+                                shape_type: "RECT".to_string(),
+                                layer: token_to_str(layer, record.offset, "route layer")?
+                                    .to_string(),
+                                width: 0,
+                                x1: llx,
+                                y1: lly,
+                                x2: urx,
+                                y2: ury,
+                                llx,
+                                lly,
+                                urx,
+                                ury,
+                            });
+                        }
+                    }
+                }
+                b"POLYGON" => {
+                    let layer = tokens.next();
+                    current_status = None;
+                    current_layer = None;
+                    last_point = None;
+                    if layer.is_some_and(|value| eq_token(value, target_layer)) {
+                        skipped.polygon += 1;
+                    }
+                    loop {
+                        let saved = tokens.pos;
+                        if tokens.next() == Some(b"(") {
+                            tokens.skip_until_close();
+                        } else {
+                            tokens.pos = saved;
+                            break;
+                        }
+                    }
+                }
+                b"VIA" => {
+                    let _name = tokens.next();
+                    let saved = tokens.pos;
+                    if !tokens
+                        .next()
+                        .is_some_and(|next| orientation(next).is_some())
+                    {
+                        tokens.pos = saved;
+                    }
+                    loop {
+                        let saved = tokens.pos;
+                        if tokens.next() == Some(b"(") {
+                            tokens.skip_until_close();
+                        } else {
+                            tokens.pos = saved;
+                            break;
+                        }
+                    }
+                    current_status = None;
+                    current_layer = None;
+                    last_point = None;
+                }
+                b"SUBNET" => {
+                    skipped.subnet += 1;
+                    current_status = None;
+                    current_layer = None;
+                    last_point = None;
+                    loop {
+                        let saved = tokens.pos;
+                        match tokens.next() {
+                            None | Some(b";") => break,
+                            Some(b"+") => {
+                                tokens.pos = saved;
+                                break;
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                }
+                _ => {
+                    // Every other net-level keyword ends the current path, so
+                    // its parenthesized values are never read as route points.
+                    current_status = None;
+                    current_layer = None;
+                    last_point = None;
+                }
             }
             continue;
         }
