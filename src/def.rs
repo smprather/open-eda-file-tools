@@ -1,5 +1,6 @@
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
@@ -336,6 +337,7 @@ struct NetShapeIter {
     net: Vec<u8>,
     layer: Vec<u8>,
     pending: VecDeque<NetShape>,
+    skipped: SkippedRoutes,
     done: bool,
 }
 
@@ -386,11 +388,21 @@ impl NetShapeIter {
                 self.done = true;
                 return Ok(None);
             }
-            self.pending = process_net_record_batch(&batch, &self.net, &self.layer)
-                .map_err(to_py_err)?
-                .0
-                .into();
+            let (shapes, skipped) =
+                process_net_record_batch(&batch, &self.net, &self.layer).map_err(to_py_err)?;
+            self.skipped.add(skipped);
+            self.pending = shapes.into();
         }
+    }
+
+    /// Route pieces skipped so far: `after_via`, `polygon`, `subnet`.
+    #[getter]
+    fn skipped<'py>(&self, py: Python<'py>) -> Bound<'py, PyDict> {
+        let map = PyDict::new(py);
+        map.set_item("after_via", self.skipped.after_via).unwrap();
+        map.set_item("polygon", self.skipped.polygon).unwrap();
+        map.set_item("subnet", self.skipped.subnet).unwrap();
+        map
     }
 }
 
@@ -414,6 +426,7 @@ fn net_shapes(def_path: PathBuf, net: String, layer: String) -> PyResult<NetShap
         net: net.into_bytes(),
         layer: layer.into_bytes(),
         pending: VecDeque::new(),
+        skipped: SkippedRoutes::default(),
         done: false,
     })
 }
@@ -511,10 +524,11 @@ fn write_net_shapes_csv(
     net: String,
     layer: String,
     output: Option<PathBuf>,
-) -> PyResult<()> {
-    py.detach(|| {
+) -> PyResult<Bound<'_, PyDict>> {
+    let skipped = py.detach(|| {
         write_net_shapes_csv_impl(&def_path, &net, &layer, output.as_deref()).map_err(to_py_err)
-    })
+    })?;
+    Ok(skipped_dict(py, skipped))
 }
 
 #[pyfunction]
@@ -529,11 +543,12 @@ fn write_net_shapes_csv_from_cache(
     net: String,
     layer: String,
     output: Option<PathBuf>,
-) -> PyResult<()> {
-    py.detach(|| {
+) -> PyResult<Bound<'_, PyDict>> {
+    let skipped = py.detach(|| {
         write_net_shapes_csv_from_cache_impl(&cache_dir, &net, &layer, output.as_deref())
             .map_err(to_py_err)
-    })
+    })?;
+    Ok(skipped_dict(py, skipped))
 }
 
 #[pyfunction]
@@ -1473,7 +1488,7 @@ fn write_net_shapes_csv_impl(
     net: &str,
     layer: &str,
     output: Option<&Path>,
-) -> Result<(), String> {
+) -> Result<SkippedRoutes, String> {
     let mut scanner = NetRecordScanner::from_path(def_path).map_err(|e| e.to_string())?;
     let net_bytes = net.as_bytes();
     let layer_bytes = layer.as_bytes();
@@ -1489,6 +1504,15 @@ fn write_net_shapes_csv_impl(
             write_net_shapes_csv_stream(&mut scanner, net_bytes, layer_bytes, BufWriter::new(lock))
         }
     }
+}
+
+/// The skip counts as a Python dict, built with the GIL held.
+fn skipped_dict(py: Python<'_>, skipped: SkippedRoutes) -> Bound<'_, PyDict> {
+    let map = PyDict::new(py);
+    map.set_item("after_via", skipped.after_via).unwrap();
+    map.set_item("polygon", skipped.polygon).unwrap();
+    map.set_item("subnet", skipped.subnet).unwrap();
+    map
 }
 
 fn write_def_cache_impl(def_path: &Path, cache_dir: &Path) -> Result<(), String> {
@@ -1573,7 +1597,7 @@ fn write_net_shapes_csv_from_cache_impl(
     net: &str,
     layer: &str,
     output: Option<&Path>,
-) -> Result<(), String> {
+) -> Result<SkippedRoutes, String> {
     read_manifest(cache_dir)?;
     let records = load_net_records_for_net(cache_dir, net)?;
     match output {
@@ -1744,12 +1768,13 @@ fn write_net_shapes_csv_stream<W: Write>(
     net: &[u8],
     layer: &[u8],
     mut out: W,
-) -> Result<(), String> {
+) -> Result<SkippedRoutes, String> {
     writeln!(
         out,
         "net,section,route_status,shape_type,layer,width,x1,y1,x2,y2,llx,lly,urx,ury"
     )
     .map_err(|e| e.to_string())?;
+    let mut skipped = SkippedRoutes::default();
     loop {
         let batch = scanner
             .next_matching_batch(BATCH_SIZE, net)
@@ -1757,7 +1782,8 @@ fn write_net_shapes_csv_stream<W: Write>(
         if batch.is_empty() {
             break;
         }
-        let (shapes, _) = process_net_record_batch(&batch, net, layer)?;
+        let (shapes, batch_skipped) = process_net_record_batch(&batch, net, layer)?;
+        skipped.add(batch_skipped);
         let mut buffer = String::with_capacity(shapes.len() * 128);
         for shape in shapes {
             append_net_shape_csv_row(&mut buffer, &shape);
@@ -1765,7 +1791,8 @@ fn write_net_shapes_csv_stream<W: Write>(
         out.write_all(buffer.as_bytes())
             .map_err(|e| e.to_string())?;
     }
-    out.flush().map_err(|e| e.to_string())
+    out.flush().map_err(|e| e.to_string())?;
+    Ok(skipped)
 }
 
 fn write_net_shapes_records_csv<W: Write>(
@@ -1773,20 +1800,21 @@ fn write_net_shapes_records_csv<W: Write>(
     net: &[u8],
     layer: &[u8],
     mut out: W,
-) -> Result<(), String> {
+) -> Result<SkippedRoutes, String> {
     writeln!(
         out,
         "net,section,route_status,shape_type,layer,width,x1,y1,x2,y2,llx,lly,urx,ury"
     )
     .map_err(|e| e.to_string())?;
-    let (shapes, _) = process_net_record_batch(records, net, layer)?;
+    let (shapes, skipped) = process_net_record_batch(records, net, layer)?;
     let mut buffer = String::with_capacity(shapes.len() * 128);
     for shape in shapes {
         append_net_shape_csv_row(&mut buffer, &shape);
     }
     out.write_all(buffer.as_bytes())
         .map_err(|e| e.to_string())?;
-    out.flush().map_err(|e| e.to_string())
+    out.flush().map_err(|e| e.to_string())?;
+    Ok(skipped)
 }
 
 /// Records per parallel task: large enough to amortize scheduling, small

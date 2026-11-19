@@ -139,6 +139,28 @@ uv run def-tools cache create --def design.def.gz -o design.ldefcache
 uv run def-tools net-shapes --cache-dir design.ldefcache --net VDD --layer met1 -o vdd_met1.csv
 ```
 
+`net-shapes` reads every routed net an OpenROAD or Innovus DEF writes, not
+just vendor-simple ones. Coordinates are integer DBU. `*` repeats the
+previous point's coordinate; three-value points carry a wire extension that
+widens the bbox past the segment endpoint; `VIRTUAL` points update the
+previous point without producing a shape; `MASK`, `TAPER`, `TAPERRULE` and
+`STYLE` are consumed. Each `RECT ( dx1 dy1 dx2 dy2 )` patch becomes a
+`shape_type = "RECT"` row with `width` 0 and its normalized corners in
+`x1,y1,x2,y2`; so does a net-level `+ RECT layer pt pt` (with an empty
+`route_status`). Regular-net wire `width` is always 0 — widths come from
+technology LEF, which this command does not read.
+
+Pieces the reader cannot place on a layer are skipped and counted, never
+attributed to a guessed layer: segments after a via as `after_via` (the
+via's other routing layer needs via definitions), `+ POLYGON` patches on
+the queried layer as `polygon`, and `+ SUBNET` wiring as `subnet`. Net-level
+`+` keywords (`USE`, `VPIN`, `WEIGHT`, …) end the current path so their
+parenthesized values never become route points. When any count is non-zero
+the CLI prints one warning line to stderr; `write_net_shapes_csv` /
+`write_net_shapes_csv_from_cache` return the counts as a dict, and the
+`def_tools.net_shapes` iterator exposes them via `.skipped`. Cache queries
+return identical rows and counts to direct scans.
+
 ## Performance and CPU use
 
 All DEF commands stream: memory does not grow with design size. The scan that

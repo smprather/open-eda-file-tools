@@ -3,8 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
 import def_tools
+from def_tools.cli import main
+from liberty_tools import _native
 
 
 def write_def(tmp_path: Path, nets: str, specialnets: str = "") -> Path:
@@ -146,5 +149,39 @@ def test_net_level_keywords_end_the_path(tmp_path):
     + SUBNET s1 ( u1 A ) ROUTED met1 ( 0 0 ) ( 0 99 ) ;
 """)
     assert rows(design, "c", "met1") == [("", 0, 0, 0, 10, 0, 0, 0, 10, 0)]
+
+
+def test_writers_return_skip_counts(tmp_path):
+    design = write_def(tmp_path, VIAS)
+    counts = _native.write_net_shapes_csv(design, "b", "met2", tmp_path / "s.csv")
+    assert counts == {"after_via": 2, "polygon": 0, "subnet": 0}
+
+
+def test_iterator_exposes_skip_counts(tmp_path):
+    design = write_def(tmp_path, "", specialnets=SPECIAL)
+    shapes = def_tools.net_shapes(design, "VDD", "met1")
+    list(shapes)
+    assert shapes.skipped == {"after_via": 1, "polygon": 0, "subnet": 0}  # the polygon is on met3
+    shapes = def_tools.net_shapes(design, "VDD", "met3")
+    list(shapes)
+    assert shapes.skipped == {"after_via": 1, "polygon": 1, "subnet": 0}
+
+
+def test_cli_warns_about_skipped_pieces(tmp_path):
+    design = write_def(tmp_path, VIAS)
+    result = CliRunner().invoke(main, ["net-shapes", "--def", str(design), "--net", "b", "--layer", "met2"])
+    assert result.exit_code == 0
+    assert "warning: net-shapes skipped route pieces: after_via=2 polygon=0 subnet=0" in result.stderr
+
+
+def test_cache_and_direct_queries_agree_on_new_constructs(tmp_path):
+    design = write_def(tmp_path, ROUTE + VIAS, specialnets=SPECIAL)
+    _native.write_def_cache(design, tmp_path / "cache")
+    for net, layer in (("a", "met2"), ("b", "met1"), ("VDD", "met3")):
+        direct, cached = tmp_path / "d.csv", tmp_path / "c.csv"
+        assert _native.write_net_shapes_csv(design, net, layer, direct) == \
+            _native.write_net_shapes_csv_from_cache(tmp_path / "cache", net, layer, cached)
+        assert direct.read_bytes() == cached.read_bytes()
+
 
 
