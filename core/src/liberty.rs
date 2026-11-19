@@ -3714,9 +3714,16 @@ pub fn cell_attributes(path: &Path) -> Result<CellAttributesIter, ParseLoadError
 }
 
 impl LibraryIndex {
-    /// Index an in-memory Liberty file: `path` may be plain or `.gz`.
+    /// Index an in-memory Liberty file: `path` may be plain or `.gz`. A
+    /// non-UTF-8 path is an error — never silently a different file.
     pub fn open(path: &Path) -> Result<Self, ParseLoadError> {
-        open_library_index(&path.to_string_lossy())
+        let path = path.to_str().ok_or_else(|| {
+            ParseLoadError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "library path is not valid UTF-8",
+            ))
+        })?;
+        open_library_index(path)
     }
 
     pub fn library_name(&self) -> &str {

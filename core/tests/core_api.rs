@@ -283,3 +283,16 @@ fn test_macro_sizes_respects_duplicate_last_wins() {
     } = sizes["M"];
     assert_eq!((width_um, height_um), (2.0, 2.0));
 }
+
+#[test]
+fn test_open_rejects_non_utf8_path() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let path = PathBuf::from(OsStr::from_bytes(b"not-utf8-\xff.lib"));
+    let err = match LibraryIndex::open(&path) {
+        Ok(_) => panic!("non-UTF-8 path must not open"),
+        Err(err) => err,
+    };
+    assert!(format!("{err:?}").contains("not valid UTF-8"), "{err:?}");
+    assert!(cell_attributes(&path).is_err());
+}
