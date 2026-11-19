@@ -569,7 +569,7 @@ let rows = def::scan_instance_bboxes(def_path, &lef_paths)?;
 for row in rows {
     let row = row?;   // row.instance, .macro_name, .status, .orient, .llx..ury
 }
-let dbu_per_micron: i64 = def::dbu_per_micron(def_path)?;   // default 1000
+let dbu_per_micron: i64 = def::dbu_per_micron(def_path)?;   // default 1000; header-only scan, works without COMPONENTS
 let shapes = def::scan_net_shapes(def_path, "VDD", "met1")?;
 let skipped = shapes.skipped();   // SkippedRoutes { after_via, polygon, subnet }
 

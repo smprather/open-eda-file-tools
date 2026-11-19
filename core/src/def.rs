@@ -2565,6 +2565,26 @@ pub fn to_dbu(
     Ok(scaled.round() as i64)
 }
 
+/// Reads the DEF header up to and including the `COMPONENTS` keyword. Returns
+/// the `UNITS DISTANCE MICRONS` value (if any) and whether `COMPONENTS` was
+/// found; the lexer is left just after that keyword. A `-` record of an
+/// earlier section (VIAS, NONDEFAULTRULES, ...) is skipped whole, and every
+/// other token is stepped over one at a time, so a section end such as
+/// `END VIAS` (which has no `;`) never swallows the statement after it.
+fn read_def_header(lexer: &mut Lexer<Box<dyn Read + Send>>) -> io::Result<(Option<i64>, bool)> {
+    let mut dbu_per_micron = None;
+    while let Some(token) = lexer.next_token()? {
+        if token.text == "-" {
+            lexer.skip_until_semicolon()?;
+        } else if token.text.eq_ignore_ascii_case("UNITS") {
+            parse_def_units(lexer, &mut dbu_per_micron)?;
+        } else if token.text.eq_ignore_ascii_case("COMPONENTS") {
+            return Ok((dbu_per_micron, true));
+        }
+    }
+    Ok((dbu_per_micron, false))
+}
+
 pub struct DefScanner {
     lexer: Lexer<Box<dyn Read + Send>>,
     pub dbu_per_micron: i64,
@@ -2575,22 +2595,15 @@ impl DefScanner {
     pub fn from_path(path: &Path) -> io::Result<Self> {
         let input = open_input(path)?;
         let mut lexer = Lexer::new(input);
-        let mut dbu_per_micron = None;
-        while let Some(token) = lexer.next_token()? {
-            if token.text == "-" {
-                // A record of an earlier section (VIAS, NONDEFAULTRULES, ...).
-                lexer.skip_until_semicolon()?;
-            } else if token.text.eq_ignore_ascii_case("UNITS") {
-                parse_def_units(&mut lexer, &mut dbu_per_micron)?;
-            } else if token.text.eq_ignore_ascii_case("COMPONENTS") {
-                let _count = lexer.next_token()?;
-                expect_semicolon(&mut lexer)?;
-                return Ok(Self {
-                    lexer,
-                    dbu_per_micron: dbu_per_micron.unwrap_or(1000),
-                    done: false,
-                });
-            }
+        let (dbu_per_micron, found_components) = read_def_header(&mut lexer)?;
+        if found_components {
+            let _count = lexer.next_token()?;
+            expect_semicolon(&mut lexer)?;
+            return Ok(Self {
+                lexer,
+                dbu_per_micron: dbu_per_micron.unwrap_or(1000),
+                done: false,
+            });
         }
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -3230,17 +3243,7 @@ pub fn scan_instance_bboxes(
 pub fn dbu_per_micron(def: &Path) -> Result<i64, crate::Error> {
     let input = open_input(def)?;
     let mut lexer = Lexer::new(input);
-    let mut dbu_per_micron = None;
-    while let Some(token) = lexer.next_token()? {
-        if token.text.eq_ignore_ascii_case("COMPONENTS") {
-            break;
-        }
-        if token.text.eq_ignore_ascii_case("UNITS") {
-            parse_def_units(&mut lexer, &mut dbu_per_micron)?;
-        } else {
-            lexer.skip_until_semicolon()?;
-        }
-    }
+    let (dbu_per_micron, _) = read_def_header(&mut lexer)?;
     Ok(dbu_per_micron.unwrap_or(1000))
 }
 

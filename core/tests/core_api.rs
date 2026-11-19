@@ -96,6 +96,40 @@ fn test_dbu_per_micron_defaults_to_1000() {
 }
 
 #[test]
+fn test_dbu_per_micron_after_vias_section() {
+    let tmp = temp_dir("core_api");
+    let def = write_def(
+        &tmp,
+        "VERSION 5.8 ;\nDESIGN d ;\nUNITS DISTANCE MICRONS 2000 ;\n\
+         VIAS 1 ;\n  - via1 + RECT Metal1 ( -100 -100 ) ( 100 100 ) + RECT Metal2 ( -100 -100 ) ( 100 100 ) ;\nEND VIAS\n\
+         COMPONENTS 1 ;\n  - u1 INV + PLACED ( 0 0 ) N ;\nEND COMPONENTS\nEND DESIGN\n",
+    );
+    assert_eq!(dbu_per_micron(&def).unwrap(), 2000);
+}
+
+#[test]
+fn test_dbu_per_micron_units_after_section_end() {
+    let tmp = temp_dir("core_api");
+    let def = write_def(
+        &tmp,
+        "VERSION 5.8 ;\nPROPERTYDEFINITIONS\n  COMPONENT weight INTEGER ;\nEND PROPERTYDEFINITIONS\n\
+         UNITS DISTANCE MICRONS 2000 ;\n\
+         COMPONENTS 1 ;\n  - u1 INV + PLACED ( 0 0 ) N ;\nEND COMPONENTS\nEND DESIGN\n",
+    );
+    assert_eq!(dbu_per_micron(&def).unwrap(), 2000);
+}
+
+#[test]
+fn test_dbu_per_micron_without_components() {
+    let tmp = temp_dir("core_api");
+    let def = write_def(
+        &tmp,
+        "VERSION 5.8 ;\nDESIGN d ;\nUNITS DISTANCE MICRONS 4000 ;\nNETS 0 ;\nEND NETS\nEND DESIGN\n",
+    );
+    assert_eq!(dbu_per_micron(&def).unwrap(), 4000);
+}
+
+#[test]
 fn test_scan_without_components_errors() {
     let tmp = temp_dir("core_api");
     let def = write_def(&tmp, "VERSION 5.8 ;\n");
