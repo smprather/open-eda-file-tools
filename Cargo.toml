@@ -1,7 +1,15 @@
-[package]
-name = "open-eda-file-tools-native"
+[workspace]
+members = ["core"]
+resolver = "3"
+
+[workspace.package]
 version = "2026.11.13"
 edition = "2024"
+
+[package]
+name = "open-eda-file-tools-native"
+version.workspace = true
+edition.workspace = true
 
 [lib]
 name = "_native"
@@ -12,6 +20,7 @@ codegen-units = 1
 lto = "thin"
 
 [dependencies]
+open-eda-file-tools-core = { path = "core" }
 arrow = { version = "60.1", default-features = false }
 # zlib-rs backend: pure-Rust, ~2-3x faster inflate than the default miniz_oxide,
 # no C toolchain. Speeds the gzip decompress that dominates LibraryIndex.open.

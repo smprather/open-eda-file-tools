@@ -1,10 +1,10 @@
 //! Native backend for the LEF tool.
 //!
-//! The shared tokenizer lives here as well: `def_tools` links this crate for
-//! its lexer and for the LEF macro sizes used by instance bounding boxes.
+//! The shared tokenizer and the cell-LEF parser live in
+//! `open_eda_file_tools_core::lef`; this module adds the Python classes and
+//! entry point over them.
 
-mod cell_lef;
-mod lexer;
+mod python;
 
-pub use cell_lef::{LefError, LibraryData, MacroData, parse_library, register};
-pub use lexer::{Lexer, Token, open_input};
+pub use open_eda_file_tools_core::lef::*;
+pub use python::register;

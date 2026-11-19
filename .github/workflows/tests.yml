@@ -34,6 +34,9 @@ jobs:
           uv sync --dev
           uv run maturin develop --release
 
+      - name: Rust workspace tests
+        run: cargo test --workspace --offline --locked
+
       - name: Test
         run: uv run pytest -q
 

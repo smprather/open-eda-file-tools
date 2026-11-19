@@ -1,0 +1,19 @@
+# The plain-Rust core of open-eda-file-tools: LEF/DEF readers and the Liberty
+# parser with no Python binding layer.
+#
+# Allowed direct dependencies (keep this list minimal for air-gapped,
+# vendored-mirror consumers; no pyo3, no arrow, no parquet, no C toolchain):
+[package]
+name = "open-eda-file-tools-core"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "open_eda_file_tools_core"
+crate-type = ["rlib"]
+
+[dependencies]
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+memchr = "2.8"
+rayon = "1.11"
+quine-mc_cluskey = "0.2.4"
