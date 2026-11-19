@@ -563,7 +563,8 @@ open-eda-file-tools-core = { git = "https://github.com/smprather/open-eda-file-t
 use open_eda_file_tools_core::{Error, def, lef, liberty, threads};
 
 // DEF COMPONENTS -> instance bboxes in integer DBU, LEF SIZE/ORIGIN and
-// UNITS DISTANCE MICRONS honored. Errors surface per row.
+// UNITS DISTANCE MICRONS honored. A failed row surfaces as the final
+// item (an Err ends the scan); rows already returned are unaffected.
 let rows = def::scan_instance_bboxes(def_path, &lef_paths)?;
 for row in rows {
     let row = row?;   // row.instance, .macro_name, .status, .orient, .llx..ury

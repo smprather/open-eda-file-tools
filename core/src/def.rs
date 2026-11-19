@@ -3158,8 +3158,10 @@ mod tests {
 
 /// Streaming DEF `COMPONENTS` -> instance bounding boxes in DEF database
 /// units, with LEF `SIZE`/`ORIGIN` extents and `UNITS DISTANCE MICRONS`
-/// honored. Errors surface per item so a mid-scan failure does not abort the
-/// rows already produced.
+/// honored. Errors surface as items and end the scan: the first `Err` is the
+/// last item, so a consumer never silently skips past a gap. Rows returned
+/// before the error are unaffected; the error replaces the remaining rows of
+/// its internal batch (up to 65,536 records).
 pub struct InstanceBBoxIter {
     scanner: DefScanner,
     macros: MacroMap,
@@ -3193,7 +3195,10 @@ impl Iterator for InstanceBBoxIter {
             }
             let batch = match self.scanner.next_batch(BATCH_SIZE) {
                 Ok(batch) => batch,
-                Err(err) => return Some(Err(err.into())),
+                Err(err) => {
+                    self.done = true;
+                    return Some(Err(err.into()));
+                }
             };
             if batch.is_empty() {
                 self.done = true;
@@ -3201,7 +3206,10 @@ impl Iterator for InstanceBBoxIter {
             }
             match process_record_batch(&batch, &self.macros) {
                 Ok(converted) => self.pending = converted.into(),
-                Err(err) => return Some(Err(err.into())),
+                Err(err) => {
+                    self.done = true;
+                    return Some(Err(err.into()));
+                }
             }
         }
     }
@@ -3279,7 +3287,10 @@ impl Iterator for NetShapeIter {
             }
             let batch = match self.scanner.next_matching_batch(BATCH_SIZE, &self.net) {
                 Ok(batch) => batch,
-                Err(err) => return Some(Err(err.into())),
+                Err(err) => {
+                    self.done = true;
+                    return Some(Err(err.into()));
+                }
             };
             if batch.is_empty() {
                 self.done = true;
@@ -3290,7 +3301,10 @@ impl Iterator for NetShapeIter {
                     self.skipped.add(skipped);
                     self.pending = shapes.into();
                 }
-                Err(err) => return Some(Err(err.into())),
+                Err(err) => {
+                    self.done = true;
+                    return Some(Err(err.into()));
+                }
             }
         }
     }

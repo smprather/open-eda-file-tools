@@ -115,8 +115,8 @@ fn test_scan_unknown_macro_errors() {
         "VERSION 5.8 ;\nUNITS DISTANCE MICRONS 1000 ;\nCOMPONENTS 1 ;\n  - u1 NOPE + PLACED ( 0 0 ) N ;\nEND COMPONENTS\n",
     );
     let lef = write_lef(&tmp);
-    let err = scan_instance_bboxes(&def, &[lef])
-        .unwrap()
+    let mut iter = scan_instance_bboxes(&def, &[lef]).unwrap();
+    let err = iter
         .next()
         .expect("one row")
         .expect_err("unknown macro must fail");
@@ -125,6 +125,30 @@ fn test_scan_unknown_macro_errors() {
         message.contains("missing LEF macro 'NOPE' for instance 'u1'"),
         "{message}"
     );
+    // The error is the last item: iteration terminates instead of silently
+    // skipping the failed batch's rows.
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn test_net_shapes_terminate_after_error() {
+    let tmp = temp_dir("core_api");
+    let def = write_def(
+        &tmp,
+        "VERSION 5.8 ;\nUNITS DISTANCE MICRONS 1000 ;\nCOMPONENTS 1 ;\n\
+  - u1 INV + PLACED ( 0 0 ) N ;\nEND COMPONENTS\n\
+NETS 1 ;\n  - n1 ( u1 A ) + ROUTED met2 ( 0 0 ) ( bad * ) ;\nEND NETS\n",
+    );
+    let mut iter = scan_net_shapes(&def, "n1", "met2").unwrap();
+    let err = iter
+        .next()
+        .expect("one item")
+        .expect_err("bad coordinate must fail");
+    assert!(
+        err.to_string().contains("invalid route point coordinate"),
+        "{err}"
+    );
+    assert!(iter.next().is_none());
 }
 
 #[test]
