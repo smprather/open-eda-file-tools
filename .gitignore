@@ -258,3 +258,6 @@ def-tools-io-config.toml
 
 # Local-only PEX reference material (GPL/CC BY-SA)
 /docs/pex/local/
+
+# local git worktrees
+.worktrees/
