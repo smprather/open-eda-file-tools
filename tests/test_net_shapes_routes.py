@@ -202,6 +202,17 @@ def test_out_of_range_shapes_are_errors(tmp_path):
             list(def_tools.net_shapes(design, net, "met1"))
 
 
+def test_net_shapes_stops_after_first_error(tmp_path):
+    big = 9223372036854775807  # i64::MAX
+    design = write_def(tmp_path, f"  - r ( u1 Y ) + ROUTED met1 ( {big} 0 ) RECT ( 1 0 2 0 ) ;")
+    iterator = def_tools.net_shapes(design, "r", "met1")
+    with pytest.raises(RuntimeError, match=r"route coordinate out of range near DEF byte \d+"):
+        for _ in iterator:
+            pass
+    with pytest.raises(StopIteration):
+        next(iterator)
+
+
 def test_net_level_keywords_end_the_path(tmp_path):
     design = write_def(tmp_path, """
   - c ( u1 Y ) ( u2 A )

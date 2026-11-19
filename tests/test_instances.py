@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 
+import pytest
 from click.testing import CliRunner
 
 from def_tools import instance_bboxes, net_shapes
@@ -64,6 +65,29 @@ def test_python_iterator_returns_placed_instance_bboxes(tmp_path):
     assert rows[0].as_tuple() == ("u1", "INV", "PLACED", "N", 10, 20, 1210, 2420)
     assert rows[1].as_tuple() == ("u2", "INV", "FIXED", "E", 30, 40, 2430, 1240)
     assert rows[2].as_tuple() == ("u3", "BUF", "COVER", "FS", 5, 6, 3005, 1006)
+
+
+def test_instance_bboxes_stops_after_first_error(tmp_path):
+    lef, _ = write_fixture(tmp_path)
+    design = tmp_path / "big.def"
+    lines = [
+        "VERSION 5.8 ;",
+        "DESIGN big ;",
+        "UNITS DISTANCE MICRONS 1000 ;",
+        "COMPONENTS 70000 ;",
+        "  - u0 INV + PLACED ( 0 0 ) N ;",
+        "  - u1 NOPE + PLACED ( 0 0 ) N ;",
+    ]
+    lines += [f"  - u{i} INV + PLACED ( 0 0 ) N ;" for i in range(2, 70000)]
+    lines += ["END COMPONENTS", "END DESIGN", ""]
+    design.write_text("\n".join(lines), encoding="utf-8")
+
+    iterator = instance_bboxes([lef], design)
+    with pytest.raises(RuntimeError, match="missing LEF macro 'NOPE' for instance 'u1'"):
+        for _ in iterator:
+            pass
+    with pytest.raises(StopIteration):
+        next(iterator)
 
 
 def test_cli_writes_streaming_csv(tmp_path):

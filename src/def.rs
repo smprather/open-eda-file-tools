@@ -4,7 +4,7 @@
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,9 +17,9 @@ use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
 use open_eda_file_tools_core::def::{
-    BATCH_SIZE, ClockObjectInstances, ColumnKind, ColumnSpec, DefScanner,
-    InstanceBBox as CoreInstanceBBox, MacroMap, MacroRole, NetRecordScanner,
-    NetShape as CoreNetShape, SkippedRoutes, parse_columns, parse_lef_files,
+    self as core_def, ClockObjectInstances, ColumnKind, ColumnSpec, DefScanner,
+    InstanceBBox as CoreInstanceBBox, MacroRole, NetShape as CoreNetShape, SkippedRoutes,
+    parse_columns, parse_lef_files,
 };
 
 #[pyclass(frozen, skip_from_py_object)]
@@ -199,20 +199,12 @@ impl NetShape {
 
 #[pyclass(unsendable)]
 struct InstanceBBoxIter {
-    scanner: DefScanner,
-    macros: MacroMap,
-    pending: VecDeque<InstanceBBox>,
-    done: bool,
+    inner: core_def::InstanceBBoxIter,
 }
 
 #[pyclass(unsendable)]
 struct NetShapeIter {
-    scanner: NetRecordScanner,
-    net: Vec<u8>,
-    layer: Vec<u8>,
-    pending: VecDeque<NetShape>,
-    skipped: SkippedRoutes,
-    done: bool,
+    inner: core_def::NetShapeIter,
 }
 
 #[pymethods]
@@ -222,25 +214,10 @@ impl InstanceBBoxIter {
     }
 
     fn __next__(&mut self) -> PyResult<Option<InstanceBBox>> {
-        loop {
-            if let Some(item) = self.pending.pop_front() {
-                return Ok(Some(item));
-            }
-            if self.done {
-                return Ok(None);
-            }
-            let batch = self.scanner.next_batch(BATCH_SIZE).map_err(to_py_err)?;
-            if batch.is_empty() {
-                self.done = true;
-                return Ok(None);
-            }
-            let converted =
-                open_eda_file_tools_core::def::process_record_batch(&batch, &self.macros)
-                    .map_err(to_py_err)?;
-            self.pending = converted
-                .into_iter()
-                .map(|inner| InstanceBBox { inner })
-                .collect();
+        match self.inner.next() {
+            Some(Ok(inner)) => Ok(Some(InstanceBBox { inner })),
+            Some(Err(err)) => Err(to_py_err(err)),
+            None => Ok(None),
         }
     }
 }
@@ -252,61 +229,31 @@ impl NetShapeIter {
     }
 
     fn __next__(&mut self) -> PyResult<Option<NetShape>> {
-        loop {
-            if let Some(item) = self.pending.pop_front() {
-                return Ok(Some(item));
-            }
-            if self.done {
-                return Ok(None);
-            }
-            let batch = self
-                .scanner
-                .next_matching_batch(BATCH_SIZE, &self.net)
-                .map_err(to_py_err)?;
-            if batch.is_empty() {
-                self.done = true;
-                return Ok(None);
-            }
-            let (shapes, skipped) = open_eda_file_tools_core::def::process_net_record_batch(
-                &batch,
-                &self.net,
-                &self.layer,
-            )
-            .map_err(to_py_err)?;
-            self.skipped.add(skipped);
-            self.pending = shapes.into_iter().map(|inner| NetShape { inner }).collect();
+        match self.inner.next() {
+            Some(Ok(inner)) => Ok(Some(NetShape { inner })),
+            Some(Err(err)) => Err(to_py_err(err)),
+            None => Ok(None),
         }
     }
 
     /// Route pieces skipped so far: `after_via`, `polygon`, `subnet`.
     #[getter]
     fn skipped<'py>(&self, py: Python<'py>) -> Bound<'py, PyDict> {
-        skipped_dict(py, self.skipped)
+        skipped_dict(py, self.inner.skipped())
     }
 }
 
 #[pyfunction]
 fn instance_bboxes(lefs: Vec<PathBuf>, def_path: PathBuf) -> PyResult<InstanceBBoxIter> {
-    let scanner = DefScanner::from_path(&def_path).map_err(to_py_err)?;
-    let (macros, _duplicates) =
-        parse_lef_files(&lefs, scanner.dbu_per_micron).map_err(to_py_err)?;
     Ok(InstanceBBoxIter {
-        scanner,
-        macros,
-        pending: VecDeque::new(),
-        done: false,
+        inner: core_def::scan_instance_bboxes(&def_path, &lefs).map_err(to_py_err)?,
     })
 }
 
 #[pyfunction]
 fn net_shapes(def_path: PathBuf, net: String, layer: String) -> PyResult<NetShapeIter> {
     Ok(NetShapeIter {
-        scanner: NetRecordScanner::from_path(&def_path).map_err(to_py_err)?,
-        net: net.into_bytes(),
-        layer: layer.into_bytes(),
-        pending: VecDeque::new(),
-        skipped: SkippedRoutes::default(),
-        done: false,
+        inner: core_def::scan_net_shapes(&def_path, &net, &layer).map_err(to_py_err)?,
     })
 }
 

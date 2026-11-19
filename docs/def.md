@@ -4,6 +4,7 @@
 `.def` and `.def.gz`) through the shared Rust backend.
 
 - Python iterators (`instance_bboxes`, `net_shapes`) return integer **DEF database units (DBU)**.
+  An error ends the iteration: it raises `RuntimeError` once, then the iterator is exhausted.
 - Instance table/CSV/Parquet writers (`def-tools instances`, `write_instance_*`) convert coordinates to **microns** (`DBU / UNITS DISTANCE MICRONS`).
 
 ## `def-tools instances`
