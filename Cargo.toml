@@ -22,11 +22,8 @@ lto = "thin"
 [dependencies]
 open-eda-file-tools-core = { path = "core" }
 arrow = { version = "60.1", default-features = false }
-# zlib-rs backend: pure-Rust, ~2-3x faster inflate than the default miniz_oxide,
-# no C toolchain. Speeds the gzip decompress that dominates LibraryIndex.open.
+# zlib-rs backend: pure-Rust; the writer's .lib.gz output path.
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
-memchr = "2.8"
 parquet = { version = "60.1", default-features = false, features = ["arrow", "zstd"] }
 pyo3 = { version = "=0.28.3", features = ["extension-module"] }
-quine-mc_cluskey = "0.2.4"
 rayon = "1.11"
