@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::lef::{Lexer, open_input};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[doc(hidden)]
 pub enum ColumnKind {
     Instance,
     BaseCell,
@@ -21,12 +22,13 @@ pub enum ColumnKind {
     Ury,
 }
 
+#[doc(hidden)]
 pub struct ColumnSpec {
     pub kind: ColumnKind,
     pub name: String,
 }
 
-pub fn default_columns() -> Vec<ColumnSpec> {
+pub(crate) fn default_columns() -> Vec<ColumnSpec> {
     vec![
         ColumnSpec {
             kind: ColumnKind::Instance,
@@ -64,6 +66,7 @@ pub fn default_columns() -> Vec<ColumnSpec> {
 /// ``is_seq`` and ``is_clock`` are conditional: they exist only when the data
 /// behind them was supplied (a Liberty library and clock-cell set,
 /// respectively).
+#[doc(hidden)]
 pub fn parse_columns(
     columns: Option<Vec<(String, String)>>,
     has_sequential: bool,
@@ -119,23 +122,25 @@ pub fn parse_columns(
     Ok(parsed)
 }
 
-pub const BATCH_SIZE: usize = 65_536;
+pub(crate) const BATCH_SIZE: usize = 65_536;
 /// Byte cap on a batch of net records, which vary from tens of bytes to
 /// hundreds of MB.
-pub const BATCH_BYTES: usize = 64 << 20;
-pub const CACHE_VERSION: u32 = 1;
-pub const CACHE_HEADER_LEN: u64 = 20;
-pub const MANIFEST_MAGIC: &[u8; 8] = b"LDTMAN1\0";
-pub const COMPONENTS_MAGIC: &[u8; 8] = b"LDTCMP1\0";
-pub const NET_DATA_MAGIC: &[u8; 8] = b"LDTNDT1\0";
-pub const NET_INDEX_MAGIC: &[u8; 8] = b"LDTNIX1\0";
-pub const NET_MAP_MAGIC: &[u8; 8] = b"LDTNMP1\0";
-pub const CONNECTIVITY_MAGIC: &[u8; 8] = b"LDTCNX1\0";
-pub const NET_INDEX_ENTRY_LEN: u64 = 25;
+pub(crate) const BATCH_BYTES: usize = 64 << 20;
+pub(crate) const CACHE_VERSION: u32 = 1;
+pub(crate) const CACHE_HEADER_LEN: u64 = 20;
+pub(crate) const MANIFEST_MAGIC: &[u8; 8] = b"LDTMAN1\0";
+pub(crate) const COMPONENTS_MAGIC: &[u8; 8] = b"LDTCMP1\0";
+pub(crate) const NET_DATA_MAGIC: &[u8; 8] = b"LDTNDT1\0";
+pub(crate) const NET_INDEX_MAGIC: &[u8; 8] = b"LDTNIX1\0";
+pub(crate) const NET_MAP_MAGIC: &[u8; 8] = b"LDTNMP1\0";
+pub(crate) const CONNECTIVITY_MAGIC: &[u8; 8] = b"LDTCNX1\0";
+pub(crate) const NET_INDEX_ENTRY_LEN: u64 = 25;
 
+#[doc(hidden)]
 pub type MacroMap = HashMap<String, MacroDef>;
 
 #[derive(Clone, Debug)]
+#[doc(hidden)]
 pub struct MacroDef {
     pub width: i64,
     pub height: i64,
@@ -144,13 +149,14 @@ pub struct MacroDef {
 }
 
 #[derive(Debug)]
+#[doc(hidden)]
 pub struct RawRecord {
     pub bytes: Vec<u8>,
     pub offset: u64,
 }
 
 #[derive(Debug)]
-pub struct NetRecord {
+pub(crate) struct NetRecord {
     pub bytes: Vec<u8>,
     pub offset: u64,
     pub section: &'static str,
@@ -159,6 +165,7 @@ pub struct NetRecord {
 /// A placed component whose names borrow from its record bytes, so the
 /// writers never allocate per instance.
 #[derive(Clone, Copy, Debug)]
+#[doc(hidden)]
 pub struct Component<'a> {
     pub instance: &'a str,
     pub macro_name: &'a str,
@@ -186,7 +193,7 @@ impl Component<'_> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Placement {
+pub(crate) struct Placement {
     pub status: &'static str,
     pub x: i64,
     pub y: i64,
@@ -194,13 +201,13 @@ pub struct Placement {
 }
 
 #[derive(Clone, Debug)]
-pub struct NetConn {
+pub(crate) struct NetConn {
     pub instance: Option<String>,
     pub pin: String,
 }
 
 #[derive(Clone, Debug)]
-pub struct NetInfo {
+pub(crate) struct NetInfo {
     pub name: String,
     pub conns: Vec<NetConn>,
 }
@@ -243,16 +250,17 @@ pub struct NetShape {
 ///   is its clock pin, so an enable pin never carries a clock into it.
 /// * *Clock pins* are the pins a clock is delivered to (`clock : true`,
 ///   `clocked_on`, latch `enable`, `clock_gate_clock_pin`).
+#[doc(hidden)]
 pub type MacroRole = (String, Vec<String>, Vec<String>, bool, Vec<String>);
 
-pub struct RoleRef<'a> {
+pub(crate) struct RoleRef<'a> {
     inputs: &'a [String],
     outputs: &'a [String],
     endpoint: bool,
     clock_pins: &'a [String],
 }
 
-pub fn role_map(macros: &[MacroRole]) -> HashMap<&str, RoleRef<'_>> {
+pub(crate) fn role_map(macros: &[MacroRole]) -> HashMap<&str, RoleRef<'_>> {
     macros
         .iter()
         .map(|(name, inputs, outputs, endpoint, clock_pins)| {
@@ -269,10 +277,11 @@ pub fn role_map(macros: &[MacroRole]) -> HashMap<&str, RoleRef<'_>> {
         .collect()
 }
 
-pub fn has_pin(pins: &[String], pin: &str) -> bool {
+pub(crate) fn has_pin(pins: &[String], pin: &str) -> bool {
     pins.iter().any(|candidate| candidate == pin)
 }
 
+#[doc(hidden)]
 pub fn clock_tree_cells_impl(
     def_path: &Path,
     roots: &[String],
@@ -394,12 +403,14 @@ pub fn clock_tree_cells_impl(
 }
 
 /// DEF escapes `[`, `]` and `/` inside names; other files usually do not.
-pub fn unescaped(name: &str) -> String {
+pub(crate) fn unescaped(name: &str) -> String {
     name.replace('\\', "")
 }
 
+#[doc(hidden)]
 pub type ClockObjectInstances = (Vec<String>, Vec<String>, Vec<(String, String)>, Vec<String>);
 
+#[doc(hidden)]
 pub fn clock_object_instances_impl(
     def_path: &Path,
     clock_nets: &[String],
@@ -502,7 +513,7 @@ pub fn clock_object_instances_impl(
     ))
 }
 
-pub fn collect_root_nets(
+pub(crate) fn collect_root_nets(
     root: &str,
     nets: &[NetInfo],
     net_by_name: &HashMap<&str, usize>,
@@ -556,11 +567,11 @@ pub fn collect_root_nets(
     }
 }
 
-pub fn split_root_pin(path: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_root_pin(path: &str) -> Option<(&str, &str)> {
     path.rsplit_once('/').or_else(|| path.rsplit_once('.'))
 }
 
-pub fn instance_table_widths(
+pub(crate) fn instance_table_widths(
     def_path: &Path,
     columns: &[ColumnSpec],
 ) -> Result<(Option<usize>, Option<usize>), String> {
@@ -618,6 +629,7 @@ pub fn instance_table_widths(
 /// parallel parse; `consume` is told so and must then run its parallel work
 /// with `threads::install_for(true, ..)`, which leaves one CPU to the
 /// scanner. With a budget of one CPU nothing overlaps.
+#[doc(hidden)]
 pub fn for_each_batch<T: Send>(
     mut next: impl FnMut() -> io::Result<Vec<T>> + Send,
     mut consume: impl FnMut(Vec<T>, bool) -> Result<(), String>,
@@ -658,7 +670,7 @@ pub fn for_each_batch<T: Send>(
 ///
 /// Mirrors `parse_component_record`'s placement rules without looking up the
 /// macro: `+ UNPLACED` and records with no placement are skipped.
-pub fn component_name_lengths(record: &RawRecord) -> Result<Option<(usize, usize)>, String> {
+pub(crate) fn component_name_lengths(record: &RawRecord) -> Result<Option<(usize, usize)>, String> {
     let mut tokens = ByteTokens::new(&record.bytes);
     tokens.expect(b"-", record.offset, "component record")?;
     let instance = tokens
@@ -688,7 +700,7 @@ pub fn component_name_lengths(record: &RawRecord) -> Result<Option<(usize, usize
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn write_instance_table_stream<W: Write>(
+pub(crate) fn write_instance_table_stream<W: Write>(
     scanner: &mut DefScanner,
     macros: &MacroMap,
     columns: &[ColumnSpec],
@@ -770,7 +782,7 @@ pub fn write_instance_table_stream<W: Write>(
 
 /// Parse every remaining component batch, render the placed rows in
 /// parallel and write them in file order. Returns the row count.
-pub fn write_component_rows<W: Write>(
+pub(crate) fn write_component_rows<W: Write>(
     scanner: &mut DefScanner,
     macros: &MacroMap,
     render: &(impl Fn(&mut String, &Component<'_>) + Sync),
@@ -794,6 +806,7 @@ pub fn write_component_rows<W: Write>(
     Ok(count)
 }
 
+#[doc(hidden)]
 pub fn write_instance_table_impl(
     lefs: &[PathBuf],
     def_path: &Path,
@@ -843,7 +856,7 @@ pub fn write_instance_table_impl(
     }
 }
 
-pub fn write_instance_bbox_csv_stream<W: Write>(
+pub(crate) fn write_instance_bbox_csv_stream<W: Write>(
     scanner: &mut DefScanner,
     macros: &MacroMap,
     columns: &[ColumnSpec],
@@ -895,6 +908,7 @@ pub fn write_instance_bbox_csv_stream<W: Write>(
     Ok(count)
 }
 
+#[doc(hidden)]
 pub fn write_instance_bbox_csv_impl(
     lefs: &[PathBuf],
     def_path: &Path,
@@ -939,6 +953,7 @@ pub fn write_instance_bbox_csv_impl(
     }
 }
 
+#[doc(hidden)]
 pub fn write_net_shapes_csv_impl(
     def_path: &Path,
     net: &str,
@@ -963,6 +978,7 @@ pub fn write_net_shapes_csv_impl(
 }
 
 /// The skip counts as a Python dict, built with the GIL held.
+#[doc(hidden)]
 pub fn write_def_cache_impl(def_path: &Path, cache_dir: &Path) -> Result<(), String> {
     create_dir_all(cache_dir).map_err(|e| format!("{}: {e}", cache_dir.display()))?;
     write_manifest(cache_dir)?;
@@ -1040,6 +1056,7 @@ pub fn write_def_cache_impl(def_path: &Path, cache_dir: &Path) -> Result<(), Str
     Ok(())
 }
 
+#[doc(hidden)]
 pub fn write_net_shapes_csv_from_cache_impl(
     cache_dir: &Path,
     net: &str,
@@ -1071,6 +1088,7 @@ pub fn write_net_shapes_csv_from_cache_impl(
     }
 }
 
+#[doc(hidden)]
 pub fn write_clock_instances_csv_impl(
     def_path: &Path,
     roots: &[(String, String, String)],
@@ -1112,6 +1130,7 @@ pub fn write_clock_instances_csv_impl(
     }
 }
 
+#[doc(hidden)]
 pub fn write_clock_instances_csv_from_cache_impl(
     cache_dir: &Path,
     roots: &[(String, String, String)],
@@ -1155,7 +1174,7 @@ pub fn write_clock_instances_csv_from_cache_impl(
     }
 }
 
-pub fn write_clock_instances_csv_stream<W: Write>(
+pub(crate) fn write_clock_instances_csv_stream<W: Write>(
     components: &HashMap<String, String>,
     nets: &[NetInfo],
     roots: &[(String, String, String)],
@@ -1211,7 +1230,7 @@ pub fn write_clock_instances_csv_stream<W: Write>(
     out.flush().map_err(|e| e.to_string())
 }
 
-pub fn write_net_shapes_csv_stream<W: Write>(
+pub(crate) fn write_net_shapes_csv_stream<W: Write>(
     scanner: &mut NetRecordScanner,
     net: &[u8],
     layer: &[u8],
@@ -1243,7 +1262,7 @@ pub fn write_net_shapes_csv_stream<W: Write>(
     Ok(skipped)
 }
 
-pub fn write_net_shapes_records_csv<W: Write>(
+pub(crate) fn write_net_shapes_records_csv<W: Write>(
     records: &[NetRecord],
     net: &[u8],
     layer: &[u8],
@@ -1267,26 +1286,29 @@ pub fn write_net_shapes_records_csv<W: Write>(
 
 /// Records per parallel task: large enough to amortize scheduling, small
 /// enough to balance 65k-record batches across many cores.
-pub const CHUNK: usize = 2048;
+pub(crate) const CHUNK: usize = 2048;
 
 /// Parse a batch into placed components, in record order. Chunks parse in
 /// parallel; the first error in record order is reported.
+#[doc(hidden)]
 pub fn parse_components<'a>(
     batch: &'a [RawRecord],
     macros: &MacroMap,
 ) -> Result<Vec<Component<'a>>, String> {
-    let chunks: Vec<Result<Vec<Component<'a>>, String>> = batch
-        .par_chunks(CHUNK)
-        .map(|chunk| {
-            let mut rows = Vec::with_capacity(chunk.len());
-            for record in chunk {
-                if let Some(row) = parse_component_record(record, macros)? {
-                    rows.push(row);
+    let chunks: Vec<Result<Vec<Component<'a>>, String>> = crate::threads::install(|| {
+        batch
+            .par_chunks(CHUNK)
+            .map(|chunk| {
+                let mut rows = Vec::with_capacity(chunk.len());
+                for record in chunk {
+                    if let Some(row) = parse_component_record(record, macros)? {
+                        rows.push(row);
+                    }
                 }
-            }
-            Ok(rows)
-        })
-        .collect();
+                Ok(rows)
+            })
+            .collect()
+    });
     let mut rows = Vec::with_capacity(batch.len());
     for chunk in chunks {
         rows.extend(chunk?);
@@ -1295,19 +1317,24 @@ pub fn parse_components<'a>(
 }
 
 /// Render rows to text in parallel chunks, concatenated in row order.
-pub fn render_rows<T: Sync>(rows: &[T], render: impl Fn(&mut String, &T) + Sync) -> Vec<String> {
-    rows.par_chunks(CHUNK)
-        .map(|chunk| {
-            let mut text = String::with_capacity(chunk.len() * 64);
-            for row in chunk {
-                render(&mut text, row);
-            }
-            text
-        })
-        .collect()
+pub(crate) fn render_rows<T: Sync>(
+    rows: &[T],
+    render: impl Fn(&mut String, &T) + Sync,
+) -> Vec<String> {
+    crate::threads::install(|| {
+        rows.par_chunks(CHUNK)
+            .map(|chunk| {
+                let mut text = String::with_capacity(chunk.len() * 64);
+                for row in chunk {
+                    render(&mut text, row);
+                }
+                text
+            })
+            .collect()
+    })
 }
 
-pub fn process_record_batch(
+pub(crate) fn process_record_batch(
     batch: &[RawRecord],
     macros: &MacroMap,
 ) -> Result<Vec<InstanceBBox>, String> {
@@ -1319,15 +1346,18 @@ pub fn process_record_batch(
     })
 }
 
-pub fn process_net_record_batch(
+pub(crate) fn process_net_record_batch(
     batch: &[NetRecord],
     net: &[u8],
     layer: &[u8],
 ) -> Result<(Vec<NetShape>, SkippedRoutes), String> {
-    let nested: Result<Vec<(Vec<NetShape>, SkippedRoutes)>, String> = batch
-        .par_iter()
-        .map(|record| parse_net_shapes_record(record, net, layer))
-        .collect();
+    let nested: Result<Vec<(Vec<NetShape>, SkippedRoutes)>, String> =
+        crate::threads::install(|| {
+            batch
+                .par_iter()
+                .map(|record| parse_net_shapes_record(record, net, layer))
+                .collect()
+        });
     let mut shapes = Vec::new();
     let mut skipped = SkippedRoutes::default();
     for (mut record_shapes, record_skipped) in nested? {
@@ -1337,7 +1367,7 @@ pub fn process_net_record_batch(
     Ok((shapes, skipped))
 }
 
-pub fn parse_component_record<'a>(
+pub(crate) fn parse_component_record<'a>(
     record: &'a RawRecord,
     macros: &MacroMap,
 ) -> Result<Option<Component<'a>>, String> {
@@ -1427,7 +1457,10 @@ pub fn parse_component_record<'a>(
     }))
 }
 
-pub fn parse_component_identity(bytes: &[u8], offset: u64) -> Result<(String, String), String> {
+pub(crate) fn parse_component_identity(
+    bytes: &[u8],
+    offset: u64,
+) -> Result<(String, String), String> {
     let mut tokens = ByteTokens::new(bytes);
     tokens.expect(b"-", offset, "component record")?;
     let instance = tokens
@@ -1726,14 +1759,14 @@ impl SkippedRoutes {
 
 /// A route coordinate with an optional wire extension value.
 #[derive(Clone, Copy)]
-pub struct RoutePoint {
+pub(crate) struct RoutePoint {
     x: i64,
     y: i64,
     ext: Option<i64>,
 }
 
 /// Everything a shape row needs, filled once per segment.
-pub struct RouteContext<'a> {
+pub(crate) struct RouteContext<'a> {
     net: &'a str,
     section: &'static str,
     status: &'static str,
@@ -1766,7 +1799,7 @@ impl<'a> RouteContext<'a> {
 /// `x|*`, `y|*`, an optional `ext|*`, then `)`. A `*` repeats the previous
 /// point's coordinate (or extension); the first point of a sequence cannot
 /// use one.
-pub fn read_route_point(
+pub(crate) fn read_route_point(
     tokens: &mut ByteTokens<'_>,
     previous: Option<RoutePoint>,
     offset: u64,
@@ -1810,9 +1843,9 @@ pub fn read_route_point(
 /// Connection lists longer than this split into pieces that parse in
 /// parallel: a power net that lists every cell is one record of hundreds of
 /// MB.
-pub const SPLIT_BYTES: usize = 1 << 20;
+pub(crate) const SPLIT_BYTES: usize = 1 << 20;
 
-pub fn parse_net_connections_record(record: &NetRecord) -> Result<NetInfo, String> {
+pub(crate) fn parse_net_connections_record(record: &NetRecord) -> Result<NetInfo, String> {
     let mut tokens = ByteTokens::new(&record.bytes);
     tokens.expect(b"-", record.offset, "net record")?;
     let net = tokens
@@ -1822,10 +1855,12 @@ pub fn parse_net_connections_record(record: &NetRecord) -> Result<NetInfo, Strin
     let body = &record.bytes[tokens.pos..];
     let conns = match split_connection_list(body) {
         Some(pieces) => {
-            let parsed: Vec<Result<Vec<NetConn>, String>> = pieces
-                .par_iter()
-                .map(|piece| parse_connection_list(piece, record.offset))
-                .collect();
+            let parsed: Vec<Result<Vec<NetConn>, String>> = crate::threads::install(|| {
+                pieces
+                    .par_iter()
+                    .map(|piece| parse_connection_list(piece, record.offset))
+                    .collect()
+            });
             let mut conns = Vec::new();
             for piece in parsed {
                 conns.extend(piece?);
@@ -1841,7 +1876,7 @@ pub fn parse_net_connections_record(record: &NetRecord) -> Result<NetInfo, Strin
 }
 
 /// `( instance pin )` / `( PIN port )` pairs up to the first `+`.
-pub fn parse_connection_list(bytes: &[u8], offset: u64) -> Result<Vec<NetConn>, String> {
+pub(crate) fn parse_connection_list(bytes: &[u8], offset: u64) -> Result<Vec<NetConn>, String> {
     let mut tokens = ByteTokens::new(bytes);
     let mut conns = Vec::new();
     while let Some(token) = tokens.next() {
@@ -1901,7 +1936,7 @@ fn net_shape(context: &RouteContext<'_>, ends: [i64; 4], bbox: [i64; 4]) -> NetS
         ury,
     }
 }
-pub fn split_connection_list(body: &[u8]) -> Option<Vec<&[u8]>> {
+pub(crate) fn split_connection_list(body: &[u8]) -> Option<Vec<&[u8]>> {
     let end = memchr::memchr(b'+', body).unwrap_or(body.len());
     let list = &body[..end];
     if list.len() <= SPLIT_BYTES || memchr::memchr(b'"', list).is_some() {
@@ -1986,7 +2021,7 @@ fn make_net_shape(
 /// Only each net's connection list is kept: the routing after the first
 /// `+` is skipped while scanning, never copied. Net records parse in
 /// parallel batches as the scan goes.
-pub fn collect_def_connectivity(
+pub(crate) fn collect_def_connectivity(
     def_path: &Path,
 ) -> Result<(HashMap<String, String>, Vec<NetInfo>), String> {
     let mut lexer = Lexer::new(open_input(def_path).map_err(|e| e.to_string())?);
@@ -2014,7 +2049,7 @@ pub fn collect_def_connectivity(
     Ok((components, nets))
 }
 
-pub fn parse_connectivity_records(records: &[NetRecord]) -> Result<Vec<NetInfo>, String> {
+pub(crate) fn parse_connectivity_records(records: &[NetRecord]) -> Result<Vec<NetInfo>, String> {
     crate::threads::install(|| {
         records
             .par_iter()
@@ -2023,7 +2058,7 @@ pub fn parse_connectivity_records(records: &[NetRecord]) -> Result<Vec<NetInfo>,
     })
 }
 
-pub fn collect_component_section<R: Read>(
+pub(crate) fn collect_component_section<R: Read>(
     lexer: &mut Lexer<R>,
     components: &mut HashMap<String, String>,
 ) -> Result<(), String> {
@@ -2048,7 +2083,7 @@ pub fn collect_component_section<R: Read>(
 }
 
 /// Read one NETS/SPECIALNETS section, keeping each net's connection list.
-pub fn collect_net_connectivity<R: Read>(
+pub(crate) fn collect_net_connectivity<R: Read>(
     lexer: &mut Lexer<R>,
     section: &'static str,
     nets: &mut Vec<NetInfo>,
@@ -2087,7 +2122,7 @@ pub fn collect_net_connectivity<R: Read>(
     Ok(())
 }
 
-pub fn stream_components_to_cache<R: Read, W: Write>(
+pub(crate) fn stream_components_to_cache<R: Read, W: Write>(
     lexer: &mut Lexer<R>,
     out: &mut W,
     count: &mut u64,
@@ -2115,7 +2150,7 @@ pub fn stream_components_to_cache<R: Read, W: Write>(
 }
 
 /// Everything `stream_nets_to_cache` writes, and the running counters.
-pub struct NetCacheWriter<'a, W1: Write, W2: Write, W3: Write> {
+pub(crate) struct NetCacheWriter<'a, W1: Write, W2: Write, W3: Write> {
     data: &'a mut W1,
     index: &'a mut W2,
     connectivity: &'a mut W3,
@@ -2158,7 +2193,7 @@ impl<W1: Write, W2: Write, W3: Write> NetCacheWriter<'_, W1, W2, W3> {
     }
 }
 
-pub fn stream_nets_to_cache<R: Read, W1: Write, W2: Write, W3: Write>(
+pub(crate) fn stream_nets_to_cache<R: Read, W1: Write, W2: Write, W3: Write>(
     lexer: &mut Lexer<R>,
     section: &'static str,
     writer: &mut NetCacheWriter<'_, W1, W2, W3>,
@@ -2192,7 +2227,7 @@ pub fn stream_nets_to_cache<R: Read, W1: Write, W2: Write, W3: Write>(
     writer.flush(&mut batch)
 }
 
-pub fn seed_clock_nets(nets: &[NetInfo], root_type: &str, root_name: &str) -> Vec<usize> {
+pub(crate) fn seed_clock_nets(nets: &[NetInfo], root_type: &str, root_name: &str) -> Vec<usize> {
     let mut seeds = Vec::new();
     for (index, net) in nets.iter().enumerate() {
         if net.name == root_name {
@@ -2222,7 +2257,7 @@ pub fn seed_clock_nets(nets: &[NetInfo], root_type: &str, root_name: &str) -> Ve
     seeds
 }
 
-pub fn traverse_clock_instances(
+pub(crate) fn traverse_clock_instances(
     components: &HashMap<String, String>,
     nets: &[NetInfo],
     instance_to_nets: &HashMap<&str, Vec<usize>>,
@@ -2270,16 +2305,16 @@ pub fn traverse_clock_instances(
     rows
 }
 
-pub fn split_pin_name(name: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_pin_name(name: &str) -> Option<(&str, &str)> {
     name.rsplit_once('/').or_else(|| name.rsplit_once('.'))
 }
 
-pub fn is_clock_cell(macro_name: &str, patterns: &[String]) -> bool {
+pub(crate) fn is_clock_cell(macro_name: &str, patterns: &[String]) -> bool {
     let lower = macro_name.to_ascii_lowercase();
     patterns.iter().any(|pattern| lower.contains(pattern))
 }
 
-pub fn write_manifest(cache_dir: &Path) -> Result<(), String> {
+pub(crate) fn write_manifest(cache_dir: &Path) -> Result<(), String> {
     let file = File::create(cache_dir.join("manifest.bin"))
         .map_err(|e| format!("{}: {e}", cache_dir.join("manifest.bin").display()))?;
     let mut out = BufWriter::new(file);
@@ -2287,7 +2322,7 @@ pub fn write_manifest(cache_dir: &Path) -> Result<(), String> {
     out.flush().map_err(|e| e.to_string())
 }
 
-pub fn read_manifest(cache_dir: &Path) -> Result<(), String> {
+pub(crate) fn read_manifest(cache_dir: &Path) -> Result<(), String> {
     let file = File::open(cache_dir.join("manifest.bin"))
         .map_err(|e| format!("{}: {e}", cache_dir.join("manifest.bin").display()))?;
     let mut input = BufReader::new(file);
@@ -2295,7 +2330,7 @@ pub fn read_manifest(cache_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn load_components_bin(cache_dir: &Path) -> Result<HashMap<String, String>, String> {
+pub(crate) fn load_components_bin(cache_dir: &Path) -> Result<HashMap<String, String>, String> {
     let file = File::open(cache_dir.join("components.bin"))
         .map_err(|e| format!("{}: {e}", cache_dir.join("components.bin").display()))?;
     let mut input = BufReader::new(file);
@@ -2309,7 +2344,7 @@ pub fn load_components_bin(cache_dir: &Path) -> Result<HashMap<String, String>, 
     Ok(components)
 }
 
-pub fn write_net_map_bin_from_map(
+pub(crate) fn write_net_map_bin_from_map(
     cache_dir: &Path,
     by_net: &HashMap<String, Vec<u64>>,
 ) -> Result<(), String> {
@@ -2329,7 +2364,10 @@ pub fn write_net_map_bin_from_map(
     out.flush().map_err(|e| e.to_string())
 }
 
-pub fn load_net_records_for_net(cache_dir: &Path, net: &str) -> Result<Vec<NetRecord>, String> {
+pub(crate) fn load_net_records_for_net(
+    cache_dir: &Path,
+    net: &str,
+) -> Result<Vec<NetRecord>, String> {
     let wanted = load_net_record_indices(cache_dir, net)?;
     if wanted.is_empty() {
         return Ok(Vec::new());
@@ -2368,7 +2406,7 @@ pub fn load_net_records_for_net(cache_dir: &Path, net: &str) -> Result<Vec<NetRe
     Ok(records)
 }
 
-pub fn load_net_record_indices(cache_dir: &Path, net: &str) -> Result<Vec<u64>, String> {
+pub(crate) fn load_net_record_indices(cache_dir: &Path, net: &str) -> Result<Vec<u64>, String> {
     let file = File::open(cache_dir.join("net_index.bin"))
         .map_err(|e| format!("{}: {e}", cache_dir.join("net_index.bin").display()))?;
     let mut input = BufReader::new(file);
@@ -2390,7 +2428,7 @@ pub fn load_net_record_indices(cache_dir: &Path, net: &str) -> Result<Vec<u64>, 
     Ok(Vec::new())
 }
 
-pub fn write_net_info<W: Write>(out: &mut W, net: &NetInfo) -> Result<(), String> {
+pub(crate) fn write_net_info<W: Write>(out: &mut W, net: &NetInfo) -> Result<(), String> {
     write_string(out, &net.name)?;
     write_u64(out, net.conns.len() as u64)?;
     for conn in &net.conns {
@@ -2408,7 +2446,7 @@ pub fn write_net_info<W: Write>(out: &mut W, net: &NetInfo) -> Result<(), String
     Ok(())
 }
 
-pub fn load_connectivity_bin(cache_dir: &Path) -> Result<Vec<NetInfo>, String> {
+pub(crate) fn load_connectivity_bin(cache_dir: &Path) -> Result<Vec<NetInfo>, String> {
     let file = File::open(cache_dir.join("connectivity.bin"))
         .map_err(|e| format!("{}: {e}", cache_dir.join("connectivity.bin").display()))?;
     let mut input = BufReader::new(file);
@@ -2433,13 +2471,17 @@ pub fn load_connectivity_bin(cache_dir: &Path) -> Result<Vec<NetInfo>, String> {
     Ok(nets)
 }
 
-pub fn write_header<W: Write>(out: &mut W, magic: &[u8; 8], count: u64) -> Result<(), String> {
+pub(crate) fn write_header<W: Write>(
+    out: &mut W,
+    magic: &[u8; 8],
+    count: u64,
+) -> Result<(), String> {
     out.write_all(magic).map_err(|e| e.to_string())?;
     write_u32(out, CACHE_VERSION)?;
     write_u64(out, count)
 }
 
-pub fn read_header<R: Read>(input: &mut R, magic: &[u8; 8]) -> Result<u64, String> {
+pub(crate) fn read_header<R: Read>(input: &mut R, magic: &[u8; 8]) -> Result<u64, String> {
     let mut got = [0u8; 8];
     input.read_exact(&mut got).map_err(|e| e.to_string())?;
     if &got != magic {
@@ -2452,7 +2494,7 @@ pub fn read_header<R: Read>(input: &mut R, magic: &[u8; 8]) -> Result<u64, Strin
     read_u64(input)
 }
 
-pub fn patch_header_count(path: &Path, count: u64) -> Result<(), String> {
+pub(crate) fn patch_header_count(path: &Path, count: u64) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .write(true)
         .open(path)
@@ -2462,55 +2504,55 @@ pub fn patch_header_count(path: &Path, count: u64) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-pub fn write_string<W: Write>(out: &mut W, value: &str) -> Result<(), String> {
+pub(crate) fn write_string<W: Write>(out: &mut W, value: &str) -> Result<(), String> {
     write_u64(out, value.len() as u64)?;
     out.write_all(value.as_bytes()).map_err(|e| e.to_string())
 }
 
-pub fn read_string<R: Read>(input: &mut R) -> Result<String, String> {
+pub(crate) fn read_string<R: Read>(input: &mut R) -> Result<String, String> {
     let len = read_u64(input)?;
     let mut bytes = vec![0; len as usize];
     input.read_exact(&mut bytes).map_err(|e| e.to_string())?;
     String::from_utf8(bytes).map_err(|e| e.to_string())
 }
 
-pub fn write_u8<W: Write>(out: &mut W, value: u8) -> Result<(), String> {
+pub(crate) fn write_u8<W: Write>(out: &mut W, value: u8) -> Result<(), String> {
     out.write_all(&[value]).map_err(|e| e.to_string())
 }
 
-pub fn read_u8<R: Read>(input: &mut R) -> Result<u8, String> {
+pub(crate) fn read_u8<R: Read>(input: &mut R) -> Result<u8, String> {
     let mut bytes = [0u8; 1];
     input.read_exact(&mut bytes).map_err(|e| e.to_string())?;
     Ok(bytes[0])
 }
 
-pub fn write_u32<W: Write>(out: &mut W, value: u32) -> Result<(), String> {
+pub(crate) fn write_u32<W: Write>(out: &mut W, value: u32) -> Result<(), String> {
     out.write_all(&value.to_le_bytes())
         .map_err(|e| e.to_string())
 }
 
-pub fn read_u32<R: Read>(input: &mut R) -> Result<u32, String> {
+pub(crate) fn read_u32<R: Read>(input: &mut R) -> Result<u32, String> {
     let mut bytes = [0u8; 4];
     input.read_exact(&mut bytes).map_err(|e| e.to_string())?;
     Ok(u32::from_le_bytes(bytes))
 }
 
-pub fn write_u64<W: Write>(out: &mut W, value: u64) -> Result<(), String> {
+pub(crate) fn write_u64<W: Write>(out: &mut W, value: u64) -> Result<(), String> {
     out.write_all(&value.to_le_bytes())
         .map_err(|e| e.to_string())
 }
 
-pub fn read_u64<R: Read>(input: &mut R) -> Result<u64, String> {
+pub(crate) fn read_u64<R: Read>(input: &mut R) -> Result<u64, String> {
     let mut bytes = [0u8; 8];
     input.read_exact(&mut bytes).map_err(|e| e.to_string())?;
     Ok(u64::from_le_bytes(bytes))
 }
 
-pub fn section_id(section: &str) -> u8 {
+pub(crate) fn section_id(section: &str) -> u8 {
     if section == "SPECIALNETS" { 2 } else { 1 }
 }
 
-pub fn section_name(id: u8) -> Result<&'static str, String> {
+pub(crate) fn section_name(id: u8) -> Result<&'static str, String> {
     match id {
         1 => Ok("NETS"),
         2 => Ok("SPECIALNETS"),
@@ -2518,7 +2560,7 @@ pub fn section_name(id: u8) -> Result<&'static str, String> {
     }
 }
 
-pub fn record_net_name(bytes: &[u8], offset: u64) -> Result<String, String> {
+pub(crate) fn record_net_name(bytes: &[u8], offset: u64) -> Result<String, String> {
     let mut tokens = ByteTokens::new(bytes);
     tokens.expect(b"-", offset, "net record")?;
     let net = tokens
@@ -2530,6 +2572,7 @@ pub fn record_net_name(bytes: &[u8], offset: u64) -> Result<String, String> {
 /// Parse cell LEF into the shared micron model, then convert macro size and
 /// origin into the DEF's database units for instance bounding boxes. Pin and
 /// port geometry is not materialized on this path.
+#[doc(hidden)]
 pub fn parse_lef_files(
     paths: &[PathBuf],
     dbu_per_micron: i64,
@@ -2562,7 +2605,7 @@ fn load_lef_macros(
     Ok((macros, library.duplicates))
 }
 
-pub fn to_dbu(
+pub(crate) fn to_dbu(
     microns: f64,
     dbu_per_micron: i64,
     macro_name: &str,
@@ -2597,6 +2640,7 @@ fn read_def_header(lexer: &mut Lexer<Box<dyn Read + Send>>) -> io::Result<(Optio
     Ok((dbu_per_micron, false))
 }
 
+#[doc(hidden)]
 pub struct DefScanner {
     lexer: Lexer<Box<dyn Read + Send>>,
     pub dbu_per_micron: i64,
@@ -2662,7 +2706,7 @@ impl DefScanner {
     }
 }
 
-pub struct NetRecordScanner {
+pub(crate) struct NetRecordScanner {
     lexer: Lexer<Box<dyn Read + Send>>,
     section: Option<&'static str>,
     done: bool,
@@ -2772,7 +2816,7 @@ impl NetRecordScanner {
     }
 }
 
-pub fn parse_def_units<R: Read>(
+pub(crate) fn parse_def_units<R: Read>(
     lexer: &mut Lexer<R>,
     dbu_per_micron: &mut Option<i64>,
 ) -> io::Result<()> {
@@ -2795,11 +2839,11 @@ pub fn parse_def_units<R: Read>(
     consume_until_semicolon_io(lexer)
 }
 
-pub fn expect_semicolon<R: Read>(lexer: &mut Lexer<R>) -> io::Result<()> {
+pub(crate) fn expect_semicolon<R: Read>(lexer: &mut Lexer<R>) -> io::Result<()> {
     expect_text(lexer, ";")
 }
 
-pub fn expect_text<R: Read>(lexer: &mut Lexer<R>, expected: &str) -> io::Result<()> {
+pub(crate) fn expect_text<R: Read>(lexer: &mut Lexer<R>, expected: &str) -> io::Result<()> {
     let token = lexer.next_token()?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -2816,7 +2860,7 @@ pub fn expect_text<R: Read>(lexer: &mut Lexer<R>, expected: &str) -> io::Result<
     }
 }
 
-pub fn consume_until_semicolon_io<R: Read>(lexer: &mut Lexer<R>) -> io::Result<()> {
+pub(crate) fn consume_until_semicolon_io<R: Read>(lexer: &mut Lexer<R>) -> io::Result<()> {
     while let Some(token) = lexer.next_token()? {
         if token.text == ";" {
             break;
@@ -2825,7 +2869,7 @@ pub fn consume_until_semicolon_io<R: Read>(lexer: &mut Lexer<R>) -> io::Result<(
     Ok(())
 }
 
-pub struct ByteTokens<'a> {
+pub(crate) struct ByteTokens<'a> {
     bytes: &'a [u8],
     pos: usize,
 }
@@ -2958,11 +3002,11 @@ impl<'a> ByteTokens<'a> {
     }
 }
 
-pub fn eq_token(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn eq_token(left: &[u8], right: &[u8]) -> bool {
     left.eq_ignore_ascii_case(right)
 }
 
-pub fn parse_i64_bytes(bytes: &[u8]) -> Option<i64> {
+pub(crate) fn parse_i64_bytes(bytes: &[u8]) -> Option<i64> {
     if bytes.is_empty() {
         return None;
     }
@@ -2987,12 +3031,16 @@ pub fn parse_i64_bytes(bytes: &[u8]) -> Option<i64> {
     value.checked_mul(sign)
 }
 
-pub fn token_to_str<'a>(token: &'a [u8], offset: u64, context: &str) -> Result<&'a str, String> {
+pub(crate) fn token_to_str<'a>(
+    token: &'a [u8],
+    offset: u64,
+    context: &str,
+) -> Result<&'a str, String> {
     std::str::from_utf8(token)
         .map_err(|_| format!("invalid UTF-8 in {context} near DEF byte {offset}"))
 }
 
-pub fn placement_status(token: &[u8]) -> &'static str {
+pub(crate) fn placement_status(token: &[u8]) -> &'static str {
     match token {
         b"FIXED" => "FIXED",
         b"COVER" => "COVER",
@@ -3000,7 +3048,7 @@ pub fn placement_status(token: &[u8]) -> &'static str {
     }
 }
 
-pub fn route_status(token: &[u8]) -> &'static str {
+pub(crate) fn route_status(token: &[u8]) -> &'static str {
     match token {
         b"FIXED" => "FIXED",
         b"COVER" => "COVER",
@@ -3009,7 +3057,7 @@ pub fn route_status(token: &[u8]) -> &'static str {
     }
 }
 
-pub fn orientation(token: &[u8]) -> Option<&'static str> {
+pub(crate) fn orientation(token: &[u8]) -> Option<&'static str> {
     match token {
         b"N" => Some("N"),
         b"S" => Some("S"),
@@ -3023,7 +3071,7 @@ pub fn orientation(token: &[u8]) -> Option<&'static str> {
     }
 }
 
-pub fn append_net_shape_csv_row(out: &mut String, shape: &NetShape) {
+pub(crate) fn append_net_shape_csv_row(out: &mut String, shape: &NetShape) {
     append_csv_field(out, &shape.net);
     out.push(',');
     append_csv_field(out, &shape.section);
@@ -3048,7 +3096,7 @@ pub fn append_net_shape_csv_row(out: &mut String, shape: &NetShape) {
     );
 }
 
-pub fn append_csv_field(out: &mut String, value: &str) {
+pub(crate) fn append_csv_field(out: &mut String, value: &str) {
     if value
         .bytes()
         .any(|byte| matches!(byte, b',' | b'"' | b'\n' | b'\r'))
@@ -3068,7 +3116,7 @@ pub fn append_csv_field(out: &mut String, value: &str) {
 
 /// Write a micron value the way Python's `str(float)` does: shortest
 /// round-trip, but keep the `.0` on integral values.
-pub fn append_csv_micron(out: &mut String, value: f64) {
+pub(crate) fn append_csv_micron(out: &mut String, value: f64) {
     let start = out.len();
     let _ = write!(out, "{value}");
     if !out[start..].contains('.') {

@@ -1973,15 +1973,15 @@ impl LibraryIndex {
 
     #[getter]
     fn library_name(&self) -> String {
-        self.inner.library_name.clone()
+        self.inner.library_name().to_string()
     }
 
     fn cell_names(&self) -> Vec<String> {
-        self.inner.order.clone()
+        self.inner.cell_names()
     }
 
     fn num_cells(&self) -> usize {
-        self.inner.order.len()
+        self.inner.num_cells()
     }
 
     fn cell(&self, py: Python<'_>, name: &str) -> PyResult<Cell> {
@@ -2002,26 +2002,26 @@ impl LibraryIndex {
     // -- library header pass-throughs (parsed once at open) --
     #[getter]
     fn voltage_unit(&self) -> Option<String> {
-        self.inner.header.voltage_unit.clone()
+        self.inner.voltage_unit()
     }
     #[getter]
     fn current_unit(&self) -> Option<String> {
-        self.inner.header.current_unit.clone()
+        self.inner.current_unit()
     }
     #[getter]
     fn time_unit(&self) -> Option<String> {
-        self.inner.header.time_unit.clone()
+        self.inner.time_unit()
     }
     #[getter]
     fn capacitive_load_unit(&self) -> Option<String> {
-        self.inner.header.capacitive_load_unit.clone()
+        self.inner.capacitive_load_unit()
     }
     fn energy_unit_joules(&self) -> Option<f64> {
-        self.inner.header.energy_unit_joules()
+        self.inner.energy_unit_joules()
     }
     fn templates<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let map = PyDict::new(py);
-        for (name, vars) in &self.inner.header.templates {
+        for (name, vars) in &self.inner.templates() {
             let list = PyList::empty(py);
             for v in vars {
                 list.append(v.as_deref())?;
@@ -2031,14 +2031,12 @@ impl LibraryIndex {
         Ok(map)
     }
     fn attributes(&self) -> Vec<(String, String)> {
-        self.inner.header.attributes.clone()
+        self.inner.attributes()
     }
     fn driver_waveforms(&self) -> Vec<TimingTable> {
         self.inner
-            .header
-            .driver_waveforms
-            .iter()
-            .cloned()
+            .driver_waveforms()
+            .into_iter()
             .map(TimingTable::from)
             .collect()
     }

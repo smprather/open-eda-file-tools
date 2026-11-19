@@ -599,6 +599,14 @@ index.attributes();                   // Vec<(String, String)>
 threads::set_threads(Some(4)).unwrap();
 ```
 
+**Visibility tiers.** Only the items shown above (and the types they return or
+expose: the Liberty data model under `CellData`, `UnitContext`, `CellAttributesIter`,
+the Liberty error types) are the supported API: plain `pub`, shown by `cargo doc`.
+Items marked `#[doc(hidden)]` exist for the Python bindings in this repository,
+are not supported and may change in any release; everything else is
+crate-private. Every public entry point that runs parallel work installs itself
+inside the CPU limit (`set_threads`), and nested installs keep the outer budget.
+
 DEF and LEF errors are `core::Error`, an enum: `Error::Io(io::Error)` keeps
 the I/O error (match `e.kind()` for `NotFound` vs `PermissionDenied`; the
 message is unchanged) and `Error::Message(String)` carries every other

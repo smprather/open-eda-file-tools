@@ -54,6 +54,7 @@ impl UnitContext {
 
 /// The kind of group that owns a pin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[doc(hidden)]
 pub enum ContainerKind {
     Bus,
     Bundle,
@@ -71,7 +72,7 @@ impl ContainerKind {
 
 /// What makes an edited attribute unique: the cell, the pin, the container
 /// that owns the pin and the attribute's key.
-pub type EditKey = (
+pub(crate) type EditKey = (
     String,
     Option<String>,
     Option<(ContainerKind, String)>,
@@ -82,6 +83,7 @@ pub type EditKey = (
 /// `Pin::set_attribute`. The writer replays these against the original
 /// source text.
 #[derive(Clone, Debug)]
+#[doc(hidden)]
 pub struct AttrEdit {
     pub cell: String,
     /// `None` for a cell-level attribute, `Some(pin)` for a pin attribute.
@@ -93,6 +95,7 @@ pub struct AttrEdit {
 }
 
 #[derive(Clone)]
+#[doc(hidden)]
 pub struct Document {
     pub library_name: String,
     pub voltage_unit: Option<String>,
@@ -260,6 +263,7 @@ pub struct BundleData {
 }
 
 #[derive(Clone)]
+#[doc(hidden)]
 pub struct BusTypeData {
     pub name: String,
     pub attributes: Vec<(String, String)>,
@@ -307,6 +311,7 @@ pub struct TimingTableData {
     pub vectors: Vec<TimingTableData>,
 }
 
+#[doc(hidden)]
 pub fn parse_file_document(
     path: &str,
     filter: Option<HashSet<String>>,
@@ -323,6 +328,7 @@ pub fn parse_file_document(
 /// for symbols). Comments and whitespace are not tokens, so two files with
 /// equal token streams parse identically — the basis for `liberty-format`'s
 /// functional-transparency guarantee.
+#[doc(hidden)]
 pub fn lex_all(reader: Box<dyn Read>) -> Result<Vec<String>, ParseError> {
     let mut lexer = Lexer::new(reader)?;
     let mut out = Vec::new();
@@ -335,6 +341,7 @@ pub fn lex_all(reader: Box<dyn Read>) -> Result<Vec<String>, ParseError> {
     Ok(out)
 }
 
+#[doc(hidden)]
 pub fn table_position(table: &TimingTableData, idx: usize) -> (usize, usize, usize) {
     if !table.index_3.is_empty() {
         let n3 = table.index_3.len();
@@ -351,14 +358,17 @@ pub fn table_position(table: &TimingTableData, idx: usize) -> (usize, usize, usi
     }
 }
 
+#[doc(hidden)]
 pub fn matches_opt(filter: Option<&str>, actual: &str) -> bool {
     filter.map_or(true, |value| value == actual)
 }
 
+#[doc(hidden)]
 pub fn matches_opt_opt(filter: Option<&str>, actual: Option<&str>) -> bool {
     filter.map_or(true, |value| actual == Some(value))
 }
 
+#[doc(hidden)]
 pub struct WhenFilter {
     pub query: Option<BoolExpr>,
 }
@@ -386,6 +396,7 @@ impl WhenFilter {
 }
 
 #[derive(Clone, Debug)]
+#[doc(hidden)]
 pub enum BoolExpr {
     Var(String),
     Const(bool),
@@ -424,6 +435,7 @@ impl BoolExpr {
     }
 }
 
+#[doc(hidden)]
 pub fn bool_implies(actual: &BoolExpr, query: &BoolExpr) -> bool {
     let mut vars = Vec::new();
     actual.collect_vars(&mut vars);
@@ -447,6 +459,7 @@ pub fn bool_implies(actual: &BoolExpr, query: &BoolExpr) -> bool {
     true
 }
 
+#[doc(hidden)]
 pub fn parse_bool_expr(input: &str) -> Result<BoolExpr, String> {
     let mut parser = BoolParser::new(input);
     let expr = parser.parse_or()?;
@@ -458,7 +471,7 @@ pub fn parse_bool_expr(input: &str) -> Result<BoolExpr, String> {
     }
 }
 
-pub struct BoolParser<'a> {
+pub(crate) struct BoolParser<'a> {
     input: &'a str,
     pos: usize,
 }
@@ -615,11 +628,12 @@ impl<'a> BoolParser<'a> {
 // support size. Real Liberty `function`/`when` expressions use a handful of
 // variables; 12 is a generous ceiling and keeps both the truth-table and the
 // Quine-McCluskey minimizer fast.
+#[doc(hidden)]
 pub const BOOL_VAR_CAP: usize = 12;
 
 /// Render one product term: literals sorted alphabetically by variable name,
 /// each as `VAR` or `!VAR`, joined by `*`.
-pub fn render_term(mut lits: Vec<(String, bool)>) -> String {
+pub(crate) fn render_term(mut lits: Vec<(String, bool)>) -> String {
     lits.sort_by(|a, b| a.0.cmp(&b.0));
     lits.into_iter()
         .map(|(name, neg)| if neg { format!("!{name}") } else { name })
@@ -632,6 +646,7 @@ pub fn render_term(mut lits: Vec<(String, bool)>) -> String {
 /// support, the sorted product-term strings, and their `+`-joined canonical
 /// string. Tautology -> "1", contradiction -> "0". `mentioned` must be the
 /// sorted, cap-checked list of variables the expression names.
+#[doc(hidden)]
 pub fn canonical_minterm_parts(
     expr: &BoolExpr,
     mentioned: &[String],
@@ -708,7 +723,7 @@ pub fn canonical_minterm_parts(
 /// Convert our `BoolExpr` into the minimizer crate's `Bool`, mapping variable
 /// names to indices by their position in `mentioned` (XOR is expanded since the
 /// crate has no XOR node).
-pub fn boolexpr_to_qmc(expr: &BoolExpr, mentioned: &[String]) -> quine_mc_cluskey::Bool {
+pub(crate) fn boolexpr_to_qmc(expr: &BoolExpr, mentioned: &[String]) -> quine_mc_cluskey::Bool {
     use quine_mc_cluskey::Bool;
     match expr {
         BoolExpr::Const(true) => Bool::True,
@@ -736,7 +751,7 @@ pub fn boolexpr_to_qmc(expr: &BoolExpr, mentioned: &[String]) -> quine_mc_cluske
     }
 }
 
-pub fn collect_qmc_literals(
+pub(crate) fn collect_qmc_literals(
     b: &quine_mc_cluskey::Bool,
     mentioned: &[String],
     out: &mut Vec<(String, bool)>,
@@ -756,7 +771,7 @@ pub fn collect_qmc_literals(
     }
 }
 
-pub fn render_qmc_sop(b: &quine_mc_cluskey::Bool, mentioned: &[String]) -> String {
+pub(crate) fn render_qmc_sop(b: &quine_mc_cluskey::Bool, mentioned: &[String]) -> String {
     use quine_mc_cluskey::Bool;
     match b {
         Bool::True => "1".to_string(),
@@ -784,6 +799,7 @@ pub fn render_qmc_sop(b: &quine_mc_cluskey::Bool, mentioned: &[String]) -> Strin
 /// Minimized sum-of-products (Quine-McCluskey). `simplify()` can return several
 /// equally-minimal covers; render each and pick the lexicographically smallest
 /// so the result is deterministic. Constants short-circuit via `canonical`.
+#[doc(hidden)]
 pub fn minimized_sop(expr: &BoolExpr, mentioned: &[String], canonical: &str) -> String {
     if canonical == "0" || canonical == "1" {
         return canonical.to_string();
@@ -800,6 +816,7 @@ pub fn minimized_sop(expr: &BoolExpr, mentioned: &[String], canonical: &str) -> 
         .unwrap_or_else(|| canonical.to_string())
 }
 
+#[doc(hidden)]
 pub fn open_input(path: &str) -> io::Result<Box<dyn Read>> {
     let file = File::open(path)?;
     let reader = BufReader::with_capacity(128 * 1024, file);
@@ -817,18 +834,18 @@ pub fn open_input(path: &str) -> io::Result<Box<dyn Read>> {
 // at a time instead of parsing the entire file up front. The scanner is lexer-
 // faithful about strings/comments but does *not* build any AST.
 
-pub fn read_to_memory(path: &str) -> io::Result<Vec<u8>> {
+pub(crate) fn read_to_memory(path: &str) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     open_input(path)?.read_to_end(&mut buf)?;
     Ok(buf)
 }
 
-pub fn is_index_symbol(b: u8) -> bool {
+pub(crate) fn is_index_symbol(b: u8) -> bool {
     matches!(b, b'(' | b')' | b'{' | b'}' | b':' | b';' | b',')
 }
 
 /// Skip whitespace, `#`/`//`/`* */` comments, and `\`+newline continuations.
-pub fn skip_trivia(d: &[u8], mut i: usize) -> usize {
+pub(crate) fn skip_trivia(d: &[u8], mut i: usize) -> usize {
     let n = d.len();
     loop {
         while i < n && d[i].is_ascii_whitespace() {
@@ -859,7 +876,7 @@ pub fn skip_trivia(d: &[u8], mut i: usize) -> usize {
 
 /// Consume a quoted string starting at `d[i] == quote`; return index after the
 /// closing quote, honoring backslash escapes.
-pub fn skip_quoted(d: &[u8], mut i: usize) -> usize {
+pub(crate) fn skip_quoted(d: &[u8], mut i: usize) -> usize {
     let n = d.len();
     let quote = d[i];
     i += 1;
@@ -877,7 +894,7 @@ pub fn skip_quoted(d: &[u8], mut i: usize) -> usize {
 }
 
 /// Read one token (bare word or quoted string) at `i`; return (value, next).
-pub fn read_token(d: &[u8], i: usize) -> (String, usize) {
+pub(crate) fn read_token(d: &[u8], i: usize) -> (String, usize) {
     let n = d.len();
     if i < n && (d[i] == b'"' || d[i] == b'\'') {
         let end = skip_quoted(d, i);
@@ -894,7 +911,7 @@ pub fn read_token(d: &[u8], i: usize) -> (String, usize) {
 
 /// At `d[i] == '('`, read the comma-separated args (quotes stripped); return
 /// (args, index after the matching ')').
-pub fn read_paren_args(d: &[u8], mut i: usize) -> (Vec<String>, usize) {
+pub(crate) fn read_paren_args(d: &[u8], mut i: usize) -> (Vec<String>, usize) {
     let n = d.len();
     i += 1; // past '('
     let mut args = Vec::new();
@@ -935,7 +952,7 @@ pub fn read_paren_args(d: &[u8], mut i: usize) -> (Vec<String>, usize) {
 
 /// At `d[i] == '{'`, return the index just past the matching `}` (string/comment
 /// aware).
-pub fn match_braces(d: &[u8], mut i: usize) -> usize {
+pub(crate) fn match_braces(d: &[u8], mut i: usize) -> usize {
     let n = d.len();
     let mut depth = 0usize;
     while i < n {
@@ -975,7 +992,7 @@ pub fn match_braces(d: &[u8], mut i: usize) -> usize {
     i
 }
 
-pub fn skip_to_semicolon(d: &[u8], mut i: usize) -> usize {
+pub(crate) fn skip_to_semicolon(d: &[u8], mut i: usize) -> usize {
     let n = d.len();
     while i < n {
         match d[i] {
@@ -988,7 +1005,7 @@ pub fn skip_to_semicolon(d: &[u8], mut i: usize) -> usize {
 }
 
 /// The top-level structure of a Liberty file, found by a byte-level scan.
-pub struct LibraryScan {
+pub(crate) struct LibraryScan {
     /// Name of the library group.
     pub name: String,
     /// Byte range of the library body before the first cell group.
@@ -1006,7 +1023,7 @@ pub struct LibraryScan {
 /// The scan also records the top-level items that follow the first cell:
 /// a library may declare its units or its lookup-table templates *after*
 /// the cells that use them, and `parse_file` resolves them there too.
-pub fn index_cells(d: &[u8]) -> LibraryScan {
+pub(crate) fn index_cells(d: &[u8]) -> LibraryScan {
     let n = d.len();
     let mut i = skip_trivia(d, 0);
     let (_kw, j) = read_token(d, i);
@@ -1090,7 +1107,7 @@ pub fn index_cells(d: &[u8]) -> LibraryScan {
     }
 }
 
-pub fn parse_slice_as_library(
+pub(crate) fn parse_slice_as_library(
     name: &str,
     body: &[u8],
     skip_tables: bool,
@@ -1106,11 +1123,11 @@ pub fn parse_slice_as_library(
 /// Cell-offset index over an in-memory Liberty file: list cells cheaply, parse
 /// one cell at a time. Built for multi-GB files where a full parse is too slow.
 pub struct LibraryIndex {
-    pub data: Vec<u8>,
-    pub library_name: String,
-    pub order: Vec<String>,
-    pub ranges: HashMap<String, (usize, usize)>,
-    pub header: Document,
+    pub(crate) data: Vec<u8>,
+    pub(crate) library_name: String,
+    pub(crate) order: Vec<String>,
+    pub(crate) ranges: HashMap<String, (usize, usize)>,
+    pub(crate) header: Document,
 }
 
 impl LibraryIndex {
@@ -1142,6 +1159,7 @@ impl LibraryIndex {
     }
 }
 
+#[doc(hidden)]
 pub fn open_library_index(path: &str) -> Result<LibraryIndex, ParseLoadError> {
     let data = read_to_memory(path).map_err(ParseLoadError::Io)?;
     let scan = index_cells(&data);
@@ -1177,13 +1195,13 @@ pub fn open_library_index(path: &str) -> Result<LibraryIndex, ParseLoadError> {
 }
 
 #[derive(Debug, Clone)]
-pub enum TokenKind {
+pub(crate) enum TokenKind {
     Word(String),
     Symbol(u8),
 }
 
 #[derive(Debug, Clone)]
-pub struct Token {
+pub(crate) struct Token {
     kind: TokenKind,
     line: usize,
     column: usize,
@@ -1193,7 +1211,7 @@ pub struct Token {
     end: usize,
 }
 
-pub struct Lexer {
+pub(crate) struct Lexer {
     reader: Box<dyn Read>,
     peeked: VecDeque<u8>,
     line: usize,
@@ -1206,8 +1224,8 @@ pub struct Lexer {
     hash: u64,
 }
 
-pub const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-pub const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+pub(crate) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+pub(crate) const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 impl Lexer {
     pub fn new(reader: Box<dyn Read>) -> Result<Self, ParseError> {
@@ -1497,7 +1515,7 @@ impl Lexer {
 }
 
 #[derive(Default)]
-pub struct LibraryUnits {
+pub(crate) struct LibraryUnits {
     voltage: Option<String>,
     current: Option<String>,
     time: Option<String>,
@@ -1510,7 +1528,7 @@ pub struct LibraryUnits {
     driver_waveforms: Vec<TimingTableData>,
 }
 
-pub struct Parser {
+pub(crate) struct Parser {
     lexer: Lexer,
     current: Option<Token>,
     cell_filter: Option<HashSet<String>>,
@@ -2689,7 +2707,7 @@ impl Parser {
     }
 }
 
-pub fn is_symbol(byte: u8) -> bool {
+pub(crate) fn is_symbol(byte: u8) -> bool {
     matches!(
         byte,
         b',' | b'{' | b'}' | b'(' | b')' | b'[' | b']' | b';' | b':'
@@ -2699,14 +2717,14 @@ pub fn is_symbol(byte: u8) -> bool {
 /// Reassemble a value that carries an index suffix. The lexer splits
 /// `A[0]` into the words `A` and `0` and the symbols `[` and `]`; the value
 /// is put back together the same way everywhere.
-pub fn indexed_value(base: &str, index: Option<&str>) -> String {
+pub(crate) fn indexed_value(base: &str, index: Option<&str>) -> String {
     match index {
         Some(index) => format!("{base}[{index}]"),
         None => base.to_string(),
     }
 }
 
-pub fn is_timing_table_group(name: &str) -> bool {
+pub(crate) fn is_timing_table_group(name: &str) -> bool {
     matches!(
         name,
         "cell_rise"
@@ -2733,7 +2751,7 @@ pub fn is_timing_table_group(name: &str) -> bool {
     )
 }
 
-pub fn is_ccsn_stage_group(name: &str) -> bool {
+pub(crate) fn is_ccsn_stage_group(name: &str) -> bool {
     matches!(
         name,
         "ccsn_first_stage"
@@ -2745,12 +2763,13 @@ pub fn is_ccsn_stage_group(name: &str) -> bool {
     )
 }
 
-pub fn is_power_table_group(name: &str) -> bool {
+pub(crate) fn is_power_table_group(name: &str) -> bool {
     matches!(name, "rise_power" | "fall_power" | "power")
 }
 
 /// Parse a Liberty unit string (e.g. "1mA", "1ps", "1V") into its SI scale.
 /// Returns magnitude * SI-prefix factor; "1mA" -> 1e-3, "1ps" -> 1e-12.
+#[doc(hidden)]
 pub fn unit_scale(value: &str) -> Option<f64> {
     let value = value.trim();
     let split = value.find(|ch: char| ch.is_ascii_alphabetic())?;
@@ -2775,12 +2794,13 @@ pub fn unit_scale(value: &str) -> Option<f64> {
     Some(magnitude * prefix_factor)
 }
 
-pub fn parse_number(value: &str) -> Option<f64> {
+pub(crate) fn parse_number(value: &str) -> Option<f64> {
     value.parse::<f64>().ok()
 }
 
 /// Position of a coordinate on an axis, allowing for floating point noise.
 /// Returns None when the coordinate is not on the axis.
+#[doc(hidden)]
 pub fn find_axis_position(values: &[f64], target: f64) -> Option<usize> {
     values.iter().position(|value| {
         let tolerance = 1e-12 + 1e-9 * value.abs().max(target.abs());
@@ -2790,6 +2810,7 @@ pub fn find_axis_position(values: &[f64], target: f64) -> Option<usize> {
 
 /// Flat position of a grid point in the flat `values` list: `index_3` varies
 /// fastest, then `index_2`, then `index_1`.
+#[doc(hidden)]
 pub fn flat_index(
     index_1: usize,
     index_2: usize,
@@ -2805,7 +2826,7 @@ pub fn flat_index(
 /// The axis-variable names a keyword belongs to. Two names in the same group
 /// mean the same physical quantity, so a load axis named
 /// `output_capacitance` matches one named `total_output_net_capacitance`.
-pub fn role_synonyms(name: &str) -> &'static [&'static str] {
+pub(crate) fn role_synonyms(name: &str) -> &'static [&'static str] {
     match name {
         "load"
         | "cap"
@@ -2832,6 +2853,7 @@ pub fn role_synonyms(name: &str) -> &'static [&'static str] {
 /// Does an axis role answer to the given keyword? Accepts the exact template
 /// variable name, its synonyms and the usual shorthands (`load`, `transition`,
 /// `slew`, …).
+#[doc(hidden)]
 pub fn role_matches_role(role: &str, keyword: &str) -> bool {
     if role == keyword {
         return true;
@@ -2841,6 +2863,7 @@ pub fn role_matches_role(role: &str, keyword: &str) -> bool {
 }
 
 /// Value of an attribute list entry, or None if the key is absent.
+#[doc(hidden)]
 pub fn attribute_value(attributes: &[(String, String)], key: &str) -> Option<String> {
     attributes
         .iter()
@@ -2851,6 +2874,7 @@ pub fn attribute_value(attributes: &[(String, String)], key: &str) -> Option<Str
 /// Parse the first number of an attribute value. Complex attributes are stored
 /// as `"1.0, 2.0"`; the leading value is the one that carries the meaning for
 /// the scalar accessors.
+#[doc(hidden)]
 pub fn parse_first_number(value: &str) -> Option<f64> {
     value
         .split(',')
@@ -2859,7 +2883,7 @@ pub fn parse_first_number(value: &str) -> Option<f64> {
 }
 
 /// FNV-1a hash of a byte slice (must match the lexer's running hash).
-pub fn fnv1a(data: &[u8]) -> u64 {
+pub(crate) fn fnv1a(data: &[u8]) -> u64 {
     let mut hash = FNV_OFFSET;
     for byte in data {
         hash ^= *byte as u64;
@@ -2947,6 +2971,7 @@ impl Document {
 ///
 /// Pure Rust — no Python token is involved — so the caller can run it with
 /// the GIL released.
+#[doc(hidden)]
 pub fn write_source_text(path: &str, text: &str) -> Result<(), WriteError> {
     let bytes = text.as_bytes();
     if path.ends_with(".gz") {
@@ -2969,6 +2994,7 @@ pub fn write_source_text(path: &str, text: &str) -> Result<(), WriteError> {
 ///
 /// Pure Rust: it takes no Python token, so the caller can run it with the GIL
 /// released.
+#[doc(hidden)]
 pub fn read_source_text(
     source_path: Option<&str>,
     source_len: usize,
@@ -2991,6 +3017,7 @@ pub fn read_source_text(
 ///
 /// Pure Rust: it takes no Python token, so the caller can run it with the GIL
 /// released.
+#[doc(hidden)]
 pub fn apply_edits_to_source(
     source: String,
     cell_spans: &[(String, usize, usize)],
@@ -3057,6 +3084,7 @@ pub fn apply_edits_to_source(
 
 /// Replace an attribute's value in an ordered attribute list, or append it
 /// when the key is not present yet.
+#[doc(hidden)]
 pub fn set_attribute_in(attributes: &mut Vec<(String, String)>, key: &str, value: &str) {
     if let Some(entry) = attributes.iter_mut().find(|(name, _)| name == key) {
         entry.1 = value.to_string();
@@ -3066,7 +3094,7 @@ pub fn set_attribute_in(attributes: &mut Vec<(String, String)>, key: &str, value
 }
 
 /// A group header found in a cell's source text.
-pub struct SourceGroup {
+pub(crate) struct SourceGroup {
     keyword: String,
     arg: Option<String>,
     /// Byte offset of the group's header (its keyword).
@@ -3077,7 +3105,7 @@ pub struct SourceGroup {
 
 /// The first argument of a group header, reassembled the way the parser does
 /// it: `A[0]` is lexed as the words `A` and `0` and the symbols `[` and `]`.
-pub fn group_argument(tokens: &[Token], first: usize) -> Option<String> {
+pub(crate) fn group_argument(tokens: &[Token], first: usize) -> Option<String> {
     let base = match tokens.get(first).map(|token| &token.kind) {
         Some(TokenKind::Word(value)) => value.clone(),
         _ => return None,
@@ -3093,7 +3121,7 @@ pub fn group_argument(tokens: &[Token], first: usize) -> Option<String> {
 }
 
 /// A simple or complex attribute found in a cell's source text.
-pub struct SourceAttribute {
+pub(crate) struct SourceAttribute {
     /// Index into the group stack.
     group: usize,
     key: String,
@@ -3104,7 +3132,7 @@ pub struct SourceAttribute {
 }
 
 /// Scan one cell group's source text and return its groups and attributes.
-pub fn scan_source_groups(
+pub(crate) fn scan_source_groups(
     text: &str,
 ) -> Result<(Vec<SourceGroup>, Vec<SourceAttribute>), ParseError> {
     let mut lexer = Lexer::new(Box::new(io::Cursor::new(text.as_bytes().to_vec())))?;
@@ -3221,7 +3249,7 @@ pub fn scan_source_groups(
 /// Quoting by a safe pattern rather than by a blacklist of dangerous
 /// characters keeps the rule closed: a value with a `:`, a bracket or any
 /// other punctuation in it still parses back to itself.
-pub fn render_attribute_value(value: &str) -> String {
+pub(crate) fn render_attribute_value(value: &str) -> String {
     let is_plain = !value.is_empty()
         && value
             .chars()
@@ -3246,7 +3274,7 @@ pub fn render_attribute_value(value: &str) -> String {
 /// "0.1, 0.2" becomes `(0.1, 0.2)`, not a single quoted string. Each part is
 /// quoted with the same rule as a simple value, so that the arguments parse
 /// back to the same parts.
-pub fn render_complex_attribute_value(value: &str) -> String {
+pub(crate) fn render_complex_attribute_value(value: &str) -> String {
     let parts: Vec<String> = value
         .split(',')
         .map(|part| render_attribute_value(part.trim()))
@@ -3261,7 +3289,7 @@ pub fn render_complex_attribute_value(value: &str) -> String {
 /// without a container is patched in the only pin group of that name in the
 /// cell: when the name matches more than one group the write fails instead
 /// of patching an arbitrary one.
-pub fn resolve_pin_group(
+pub(crate) fn resolve_pin_group(
     groups: &[SourceGroup],
     cell_name: &str,
     pin: &str,
@@ -3321,7 +3349,7 @@ pub fn resolve_pin_group(
 
 /// Where the candidate pin groups live, for the ambiguity message: the
 /// innermost group that contains them (`bus (A)`, `bundle (B)`, …).
-pub fn describe_pin_locations(groups: &[SourceGroup], candidates: &[usize]) -> String {
+pub(crate) fn describe_pin_locations(groups: &[SourceGroup], candidates: &[usize]) -> String {
     candidates
         .iter()
         .map(|&index| {
@@ -3348,7 +3376,7 @@ pub fn describe_pin_locations(groups: &[SourceGroup], candidates: &[usize]) -> S
 /// Every edit is turned into a `(start, end, text)` range against the
 /// *original* text — an insertion is an empty range — and all of them are
 /// applied in a single back-to-front pass, so no edit can shift another.
-pub fn patch_cell_text(
+pub(crate) fn patch_cell_text(
     cell_text: &str,
     cell_name: &str,
     edits: &[&AttrEdit],
@@ -3473,7 +3501,7 @@ pub fn patch_cell_text(
 
 /// Attach the library's unit scales to every cell and pin, so that scalar
 /// accessors can report values with their scale attached.
-pub fn apply_units(cells: &mut [CellData], ctx: UnitContext) {
+pub(crate) fn apply_units(cells: &mut [CellData], ctx: UnitContext) {
     for cell in cells {
         cell.units = ctx;
         for pin in &mut cell.pins {
@@ -3493,7 +3521,7 @@ pub fn apply_units(cells: &mut [CellData], ctx: UnitContext) {
 }
 
 /// Look up a table template by name and return its axis variable names.
-pub fn template_vars(
+pub(crate) fn template_vars(
     templates: &[(String, [Option<String>; 3])],
     name: &Option<String>,
 ) -> Option<[Option<String>; 3]> {
@@ -3506,7 +3534,7 @@ pub fn template_vars(
 
 /// Resolve the axis variable names of every table in a list (recursively, so
 /// CCS `vector` sub-tables are covered too).
-pub fn resolve_axis_vars_in(
+pub(crate) fn resolve_axis_vars_in(
     tables: &mut [TimingTableData],
     templates: &[(String, [Option<String>; 3])],
 ) {
@@ -3517,7 +3545,10 @@ pub fn resolve_axis_vars_in(
 }
 
 /// Resolve the axis variable names of every table reachable from the cells.
-pub fn resolve_axis_vars(cells: &mut [CellData], templates: &[(String, [Option<String>; 3])]) {
+pub(crate) fn resolve_axis_vars(
+    cells: &mut [CellData],
+    templates: &[(String, [Option<String>; 3])],
+) {
     pub fn resolve_arcs(arcs: &mut [TimingArcData], templates: &[(String, [Option<String>; 3])]) {
         for arc in arcs.iter_mut() {
             resolve_axis_vars_in(&mut arc.tables, templates);
@@ -3560,7 +3591,7 @@ pub fn resolve_axis_vars(cells: &mut [CellData], templates: &[(String, [Option<S
     }
 }
 
-pub fn parse_float_list(value: Option<&String>) -> Vec<f64> {
+pub(crate) fn parse_float_list(value: Option<&String>) -> Vec<f64> {
     value
         .map(|items| {
             items
@@ -3571,7 +3602,7 @@ pub fn parse_float_list(value: Option<&String>) -> Vec<f64> {
         .unwrap_or_default()
 }
 
-pub fn parse_float_args(values: &[String]) -> Vec<f64> {
+pub(crate) fn parse_float_args(values: &[String]) -> Vec<f64> {
     values
         .iter()
         .flat_map(|items| items.split(','))
@@ -3579,7 +3610,7 @@ pub fn parse_float_args(values: &[String]) -> Vec<f64> {
         .collect()
 }
 
-pub fn members_from_args(args: &[String]) -> Vec<String> {
+pub(crate) fn members_from_args(args: &[String]) -> Vec<String> {
     args.iter()
         .flat_map(|arg| arg.split_whitespace())
         .map(str::trim)
@@ -3738,21 +3769,6 @@ impl From<io::Error> for ParseError {
 /// Public aliases matching the issue #12 API sketch; the canonical data names
 /// keep their `Data` suffix internally.
 pub type Cell = CellData;
-pub type Pin = PinData;
-pub type InternalPower = InternalPowerData;
-pub type Bus = BusData;
-pub type Bundle = BundleData;
-pub type BusType = BusTypeData;
-pub type TimingArc = TimingArcData;
-pub type CcsnStage = CcsnStageData;
-pub type TimingTable = TimingTableData;
-pub type PgPin = PgPinData;
-pub type LeakagePower = LeakagePowerData;
-pub type Ff = FfData;
-pub type Latch = LatchData;
-pub type DynamicCurrent = DynamicCurrentData;
-pub type SwitchingGroup = SwitchingGroupData;
-pub type PgCurrent = PgCurrentData;
 
 // ---------------------------------------------------------------------------
 // Public Rust API (issue #12): attribute-only Liberty + indexed cell access.
@@ -3885,6 +3901,13 @@ impl LibraryIndex {
 
     pub fn attributes(&self) -> Vec<(String, String)> {
         self.header.attributes()
+    }
+
+    /// `normalized_driver_waveform` tables of the library header (used by the
+    /// Python bindings).
+    #[doc(hidden)]
+    pub fn driver_waveforms(&self) -> Vec<TimingTableData> {
+        self.header.driver_waveforms()
     }
 }
 

@@ -18,6 +18,7 @@ static LIMIT: AtomicUsize = AtomicUsize::new(0);
 static POOLS: Mutex<Vec<(usize, Arc<ThreadPool>)>> = Mutex::new(Vec::new());
 
 /// The CPU budget for a parallel call: the limit, or the global pool size.
+#[doc(hidden)]
 pub fn budget() -> usize {
     match LIMIT.load(Ordering::Relaxed) {
         0 => rayon::current_num_threads().max(1),
@@ -43,8 +44,24 @@ fn pool(threads: usize) -> Arc<ThreadPool> {
     pool
 }
 
+/// Whether the current thread is a worker of one of our pools.
+fn inside_pool() -> bool {
+    let pools = POOLS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    pools
+        .iter()
+        .any(|(_, pool)| pool.current_thread_index().is_some())
+}
+
 /// Run `work` (and every rayon call inside it) on `workers` threads.
+///
+/// Re-entrant: inside one of our pools `work` runs as is, so a nested call
+/// keeps the outer budget and never starts a second pool.
 fn run_on<R: Send>(workers: usize, work: impl FnOnce() -> R + Send) -> R {
+    if inside_pool() {
+        return work();
+    }
     if LIMIT.load(Ordering::Relaxed) == 0 && workers == rayon::current_num_threads() {
         return work();
     }
@@ -52,6 +69,7 @@ fn run_on<R: Send>(workers: usize, work: impl FnOnce() -> R + Send) -> R {
 }
 
 /// Run `work`, and every rayon call inside it, within the CPU budget.
+#[doc(hidden)]
 pub fn install<R: Send>(work: impl FnOnce() -> R + Send) -> R {
     run_on(budget(), work)
 }
@@ -59,11 +77,13 @@ pub fn install<R: Send>(work: impl FnOnce() -> R + Send) -> R {
 /// Run parallel work while one extra thread (a sequential scanner) is also
 /// busy: the parallel part gets one CPU fewer. Callers overlap only when
 /// `may_overlap()` is true.
+#[doc(hidden)]
 pub fn install_beside_scanner<R: Send>(work: impl FnOnce() -> R + Send) -> R {
     run_on(budget().saturating_sub(1).max(1), work)
 }
 
 /// `install_beside_scanner` when a scanner thread overlaps, else `install`.
+#[doc(hidden)]
 pub fn install_for<R: Send>(overlapped: bool, work: impl FnOnce() -> R + Send) -> R {
     if overlapped {
         install_beside_scanner(work)
@@ -73,6 +93,7 @@ pub fn install_for<R: Send>(overlapped: bool, work: impl FnOnce() -> R + Send) -
 }
 
 /// Whether a reader may run a scanner thread beside its parallel workers.
+#[doc(hidden)]
 pub fn may_overlap() -> bool {
     budget() > 1
 }
@@ -97,8 +118,12 @@ pub fn set_threads(threads: Option<usize>) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// Both tests write the process-wide `LIMIT`; run them one at a time.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
     #[test]
     fn limit_controls_the_pool_size() {
+        let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
         LIMIT.store(3, Ordering::Relaxed);
         assert_eq!(budget(), 3);
         assert_eq!(install(rayon::current_num_threads), 3);
@@ -113,5 +138,16 @@ mod tests {
             install(rayon::current_num_threads),
             rayon::current_num_threads()
         );
+    }
+
+    #[test]
+    fn nested_install_keeps_the_outer_pool() {
+        let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        LIMIT.store(3, Ordering::Relaxed);
+        let nested = install_beside_scanner(|| install(rayon::current_num_threads));
+        let nested_for = install_for(true, || install_for(false, rayon::current_num_threads));
+        LIMIT.store(0, Ordering::Relaxed);
+        assert_eq!(nested, 2);
+        assert_eq!(nested_for, 2);
     }
 }

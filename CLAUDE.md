@@ -315,6 +315,17 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   rayon's global pool has started (`RAYON_NUM_THREADS` does not). A new
   `par_iter` outside it silently ignores the user's limit. CLIs call
   `set_threads` before any native work, Liberty parsing included.
+  `install`/`install_for` are re-entrant: on a thread that already belongs to
+  one of our pools they run the work as is, so a nested install keeps the
+  outer budget and never starts a second pool. Hence every `pub` helper that
+  runs rayon work installs itself (`parse_components`, `render_rows`,
+  `process_net_record_batch`, ...) with no cost when the caller already did.
+- **The core crate has three visibility tiers.** Documented API (plain `pub`,
+  listed in `docs/ai-api.md` section 8); items the bindings use but that are
+  not supported API (`#[doc(hidden)] pub`, free to change in any release); and
+  everything else, `pub(crate)` or private. A new item starts in the third
+  tier; promote it only when the bindings or the documented API need it, and
+  a type that appears in a documented signature or field is documented too.
 - **Scan and parse overlap only within the limit.** `for_each_batch`
   (`src/def.rs`) runs the sequential scanner on its own thread one batch ahead
   and gives the parallel part `n - 1` workers; with `n = 1` nothing overlaps.

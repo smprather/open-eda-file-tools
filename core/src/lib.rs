@@ -3,6 +3,12 @@
 //!
 //! The Python extension (`open-eda-file-tools-native`, the `_native` module)
 //! wraps these types behind pyo3; nothing here requires Python.
+//!
+//! The documented items are the supported API. Items hidden from the docs
+//! (`#[doc(hidden)]`) exist for the Python bindings in this repository, are
+//! not part of the supported API and may change in any release. Everything
+//! else is crate-private. Every public entry point that runs parallel work
+//! does so inside the [`threads`] CPU limit.
 
 pub mod def;
 pub mod lef;
