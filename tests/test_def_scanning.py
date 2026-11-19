@@ -71,6 +71,15 @@ def write_design(tmp_path: Path, components: int, power_conns: int = 0) -> tuple
     return lef, design
 
 
+# Output of the reference build (e98bd32) on the same DEF.
+CACHE_ROUND_TRIP_CSV = (
+    "clock,root_type,root_name,instance,macro,net,is_clock_cell\n"
+    "clk,port,clk,ghost,,clk,false\n"
+    "clk,port,clk,u0,INV,clk,true\n"
+    "clk,port,clk,u1,CLKBUF,n1,false\n"
+)
+
+
 def test_set_threads_limits_and_resets() -> None:
     default = _native.get_threads()
     assert default >= 1
@@ -153,6 +162,69 @@ def test_nets_before_components(tmp_path: Path) -> None:
     )
 
     assert cells == ["u0", "u1", "u2"]
+
+
+HEADER = 'VERSION 5.8 ;\nDIVIDERCHAR "/" ;\nDESIGN s ;\nUNITS DISTANCE MICRONS 1000 ;\n'
+COMP = "COMPONENTS 3 ;\n  - u0 INV + PLACED ( 0 0 ) N ;\n  - u1 INV + PLACED ( 10 0 ) N ;\n  - u2 INV + PLACED ( 20 0 ) N ;\nEND COMPONENTS\n"
+NETS = (
+    "NETS 3 ;\n  - clk ( PIN clk ) ( u0 A ) ;\n  - n1 ( u0 Y ) ( u1 A ) ;\n"
+    "  - n2 ( u1 Y ) ( u2 A ) ;\nEND NETS\n"
+)
+SPECIAL = "SPECIALNETS 1 ;\n  - VDD ( u0 VDD ) ( u1 VDD ) + USE POWER ;\nEND SPECIALNETS\n"
+INV_ROLES = [("INV", ["A"], ["Y"], False, [])]
+
+
+def _trace(design: Path) -> list[str]:
+    return _native.clock_tree_cells(design, ["port:clk"], INV_ROLES, False)
+
+
+def test_specialnets_before_components(tmp_path: Path) -> None:
+    design = tmp_path / "d.def"
+    design.write_text(HEADER + SPECIAL + NETS + COMP + "END DESIGN\n", encoding="utf-8")
+
+    assert _trace(design) == ["u0", "u1", "u2"]
+
+
+def test_nets_without_components_section(tmp_path: Path) -> None:
+    # Instances known only from nets have no macro, so no role: same as the
+    # reference build, which returns no cells.
+    design = tmp_path / "d.def"
+    design.write_text(HEADER + NETS + "END DESIGN\n", encoding="utf-8")
+
+    assert _trace(design) == []
+
+
+def test_components_after_nets_is_an_error_with_a_byte_offset(tmp_path: Path) -> None:
+    text = HEADER + COMP + NETS + COMP + "END DESIGN\n"
+    design = tmp_path / "d.def"
+    design.write_text(text, encoding="utf-8")
+    second = text.rindex("COMPONENTS 3")
+
+    with pytest.raises(Exception, match=rf"COMPONENTS section near DEF byte {second} follows NETS"):
+        _trace(design)
+
+
+def test_cache_round_trip_with_duplicate_and_unknown_instances(tmp_path: Path) -> None:
+    components = (
+        "COMPONENTS 3 ;\n  - u0 INV + PLACED ( 0 0 ) N ;\n  - u1 INV + PLACED ( 10 0 ) N ;\n"
+        "  - u1 CLKBUF + PLACED ( 10 0 ) N ;\nEND COMPONENTS\n"
+    )
+    nets = (
+        "NETS 2 ;\n  - clk ( PIN clk ) ( u0 A ) ( ghost A ) ;\n"
+        "  - n1 ( u0 Y ) ( u1 A ) ;\nEND NETS\n"
+    )
+    design = tmp_path / "d.def"
+    design.write_text(HEADER + components + nets + "END DESIGN\n", encoding="utf-8")
+    cache = tmp_path / "cache"
+    roots = [("clk", "port", "clk")]
+
+    def_tools.write_def_cache(design, cache)
+    def_tools.write_clock_instances_csv(design, roots, ["inv"], tmp_path / "def.csv")
+    def_tools.write_clock_instances_csv_from_cache(cache, roots, ["inv"], tmp_path / "cache.csv")
+
+    from_def = (tmp_path / "def.csv").read_text(encoding="utf-8")
+    assert (tmp_path / "cache.csv").read_text(encoding="utf-8") == from_def
+    assert from_def == CACHE_ROUND_TRIP_CSV
 
 
 def test_long_connection_lists_parse_in_pieces(tmp_path: Path) -> None:

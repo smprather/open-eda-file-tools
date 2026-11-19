@@ -2083,7 +2083,10 @@ pub(crate) fn collect_def_connectivity(def_path: &Path) -> Result<Connectivity, 
             let _count = lexer.next_token().map_err(|e| e.to_string())?;
             expect_semicolon(&mut lexer).map_err(|e| e.to_string())?;
             if scan.nets_added {
-                return Err("COMPONENTS section after NETS data was resolved".to_string());
+                return Err(format!(
+                    "COMPONENTS section near DEF byte {} follows NETS/SPECIALNETS that were already read; COMPONENTS must come before the nets it follows",
+                    token.offset
+                ));
             }
             collect_component_section(&mut lexer, &mut scan.builder)?;
             scan.components_seen = true;
@@ -2117,7 +2120,7 @@ impl ConnectivityScan {
     fn add_records(&mut self, records: &[NetRecord]) -> Result<(), String> {
         let nets = parse_connectivity_records(records)?;
         self.builder.add_nets(&nets);
-        self.nets_added = true;
+        self.nets_added |= !nets.is_empty();
         Ok(())
     }
 
