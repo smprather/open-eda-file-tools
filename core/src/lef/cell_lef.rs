@@ -45,6 +45,15 @@ fn io_error(path: &Path, err: io::Error) -> LefError {
     ))
 }
 
+impl From<LefError> for crate::Error {
+    fn from(err: LefError) -> Self {
+        match err {
+            LefError::Io(err) => crate::Error::Io(err),
+            LefError::Value(message) => crate::Error::Message(message),
+        }
+    }
+}
+
 type LefResult<T> = Result<T, LefError>;
 
 /// `"cells.lef: MACRO BUF "` or `"cells.lef: MACRO BUF PIN A: "`.
@@ -637,10 +646,7 @@ pub struct MacroSize {
 /// Parse `paths` in order and return every macro's size in microns. The last
 /// definition of a duplicated macro wins.
 pub fn macro_sizes(paths: &[PathBuf]) -> Result<HashMap<String, MacroSize>, crate::Error> {
-    let library = parse_library(paths, None, false).map_err(|err| match err {
-        LefError::Io(err) => crate::Error::Io(err),
-        LefError::Value(message) => crate::Error::Message(message),
-    })?;
+    let library = parse_library(paths, None, false)?;
     Ok(library
         .macros
         .iter()

@@ -4,11 +4,14 @@
 
 use std::path::{Path, PathBuf};
 
+use open_eda_file_tools_core::Error;
 use open_eda_file_tools_core::def::{
     SkippedRoutes, dbu_per_micron, scan_instance_bboxes, scan_net_shapes,
 };
 use open_eda_file_tools_core::lef::{MacroSize, macro_sizes};
-use open_eda_file_tools_core::liberty::{CellAttributes, LibraryIndex, cell_attributes};
+use open_eda_file_tools_core::liberty::{
+    CellAttributes, LibraryIndex, ParseLoadError, cell_attributes,
+};
 use open_eda_file_tools_core::threads::{self, set_threads};
 
 /// A per-test scratch directory under the system temp dir (the core crate has
@@ -133,10 +136,7 @@ fn test_scan_without_components_errors() {
     let tmp = temp_dir("core_api");
     let def = write_def(&tmp, "VERSION 5.8 ;\n");
     let lef = write_lef(&tmp);
-    let err = match scan_instance_bboxes(&def, &[lef]) {
-        Ok(_) => panic!("expected an error for a DEF without COMPONENTS"),
-        Err(err) => err,
-    };
+    let err = scan_instance_bboxes(&def, &[lef]).unwrap_err();
     assert_eq!(err.to_string(), "DEF missing COMPONENTS section");
 }
 
@@ -255,6 +255,19 @@ MACRO BUF\n  SIZE 2.0 BY 2.4 ;\nEND BUF\n",
         let three = rows();
         (one, three)
     });
+    set_threads(None).unwrap();
+    // The error is a real `std::error::Error` (what `anyhow` requires), not a
+    // bare `String`.
+    fn into_error<E: std::error::Error + Send + Sync + 'static>(
+        result: Result<(), E>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(result?)
+    }
+    let rejected = into_error(set_threads(Some(5000))).expect_err("5000 must be rejected");
+    assert_eq!(
+        rejected.to_string(),
+        "threads must be between 1 and 4096, got 5000"
+    );
     set_threads(None).unwrap();
     let (one, three) = outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     assert_eq!(default, one);
@@ -392,10 +405,7 @@ fn test_open_rejects_non_utf8_path() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
     let path = PathBuf::from(OsStr::from_bytes(b"not-utf8-\xff.lib"));
-    let err = match LibraryIndex::open(&path) {
-        Ok(_) => panic!("non-UTF-8 path must not open"),
-        Err(err) => err,
-    };
+    let err = LibraryIndex::open(&path).unwrap_err();
     assert!(format!("{err:?}").contains("not valid UTF-8"), "{err:?}");
     assert!(cell_attributes(&path).is_err());
 }
@@ -421,10 +431,21 @@ fn dbu_of(path: &Path) -> Result<i64, Box<dyn std::error::Error>> {
 fn test_errors_convert_to_box_dyn_error() {
     let tmp = temp_dir("box_err");
     let missing = tmp.join("missing");
-    let open_err = open_index(&missing).err().unwrap();
-    assert!(open_err.source().is_some());
+    // The wrappers are transparent: the I/O failure is reachable by
+    // downcasting, and is not repeated as `source()` (anyhow's `{:#}` would
+    // print the same text twice).
+    let open_err = open_index(&missing).unwrap_err();
+    match open_err.downcast_ref::<ParseLoadError>() {
+        Some(ParseLoadError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
+        other => panic!("expected ParseLoadError::Io, got {other:?}"),
+    }
+    assert!(open_err.source().is_none());
     let dbu_err = dbu_of(&missing).unwrap_err();
-    assert!(dbu_err.source().is_some());
+    match dbu_err.downcast_ref::<Error>() {
+        Some(Error::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
+        other => panic!("expected Error::Io, got {other:?}"),
+    }
+    assert!(dbu_err.source().is_none());
 
     let lib = write(&tmp, "tiny.lib", LIB);
     let index = LibraryIndex::open(&lib).unwrap();
@@ -440,8 +461,6 @@ fn test_errors_convert_to_box_dyn_error() {
 
 #[test]
 fn test_missing_files_report_not_found() {
-    use open_eda_file_tools_core::Error;
-    use open_eda_file_tools_core::liberty::ParseLoadError;
     use std::io::ErrorKind;
 
     let tmp = temp_dir("not_found");
@@ -451,21 +470,19 @@ fn test_missing_files_report_not_found() {
     fn kind(err: Error) -> ErrorKind {
         match err {
             Error::Io(e) => e.kind(),
-            Error::Message(m) => panic!("expected an io error, got message {m:?}"),
+            other => panic!("expected an io error, got {other:?}"),
         }
     }
-    let err = scan_instance_bboxes(&missing, &[lef]).err().unwrap();
+    let err = scan_instance_bboxes(&missing, &[lef]).unwrap_err();
     assert_eq!(kind(err), ErrorKind::NotFound);
     let def = write_def(&tmp, DEF);
-    let err = scan_instance_bboxes(&def, std::slice::from_ref(&missing))
-        .err()
-        .unwrap();
+    let err = scan_instance_bboxes(&def, std::slice::from_ref(&missing)).unwrap_err();
     assert_eq!(kind(err), ErrorKind::NotFound);
     assert_eq!(
         kind(dbu_per_micron(&missing).unwrap_err()),
         ErrorKind::NotFound
     );
-    let err = scan_net_shapes(&missing, "n", "M1").err().unwrap();
+    let err = scan_net_shapes(&missing, "n", "M1").unwrap_err();
     assert_eq!(kind(err), ErrorKind::NotFound);
     assert_eq!(
         kind(macro_sizes(&[missing.clone()]).unwrap_err()),
@@ -473,12 +490,12 @@ fn test_missing_files_report_not_found() {
     );
 
     for result in [
-        LibraryIndex::open(&missing).err().unwrap(),
-        cell_attributes(&missing).err().unwrap(),
+        LibraryIndex::open(&missing).unwrap_err(),
+        cell_attributes(&missing).unwrap_err(),
     ] {
         match result {
             ParseLoadError::Io(e) => assert_eq!(e.kind(), ErrorKind::NotFound),
-            ParseLoadError::Parse(e) => panic!("expected an io error, got {e}"),
+            other => panic!("expected an io error, got {other}"),
         }
     }
 }

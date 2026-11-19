@@ -2586,10 +2586,7 @@ fn load_lef_macros(
     paths: &[PathBuf],
     dbu_per_micron: i64,
 ) -> Result<(MacroMap, Vec<String>), crate::Error> {
-    let library = crate::lef::parse_library(paths, None, false).map_err(|err| match err {
-        crate::lef::LefError::Io(err) => crate::Error::Io(err),
-        crate::lef::LefError::Value(message) => crate::Error::Message(message),
-    })?;
+    let library = crate::lef::parse_library(paths, None, false)?;
     let mut macros = HashMap::with_capacity(library.macros.len());
     for item in &library.macros {
         macros.insert(
@@ -3242,6 +3239,15 @@ pub struct InstanceBBoxIter {
     done: bool,
 }
 
+impl std::fmt::Debug for InstanceBBoxIter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstanceBBoxIter")
+            .field("pending", &self.pending.len())
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
+}
+
 impl InstanceBBoxIter {
     pub fn from_path(def: &Path, lefs: &[PathBuf]) -> Result<Self, crate::Error> {
         let scanner = DefScanner::from_path(def)?;
@@ -3297,9 +3303,10 @@ pub fn scan_instance_bboxes(
 }
 
 /// The DEF's `UNITS DISTANCE MICRONS` value (default 1000): the scale
-/// consumers need to convert the DBU integer bbox fields to microns. Scans
-/// only the header; a DEF with no `UNITS` line yields 1000, and one without a
-/// `COMPONENTS` section is fine here.
+/// consumers need to convert the DBU integer bbox fields to microns. Reads up
+/// to the `COMPONENTS` section (the whole file when there is none); a DEF with
+/// no `UNITS` line yields 1000, and one without a `COMPONENTS` section is fine
+/// here.
 pub fn dbu_per_micron(def: &Path) -> Result<i64, crate::Error> {
     let input = open_input(def)?;
     let mut lexer = Lexer::new(input);
@@ -3317,6 +3324,16 @@ pub struct NetShapeIter {
     pending: VecDeque<NetShape>,
     skipped: SkippedRoutes,
     done: bool,
+}
+
+impl std::fmt::Debug for NetShapeIter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetShapeIter")
+            .field("net", &String::from_utf8_lossy(&self.net))
+            .field("layer", &String::from_utf8_lossy(&self.layer))
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
 }
 
 impl NetShapeIter {

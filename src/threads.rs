@@ -12,7 +12,8 @@ use pyo3::prelude::*;
 #[pyfunction]
 #[pyo3(signature = (threads = None))]
 fn set_threads(threads: Option<usize>) -> PyResult<()> {
-    open_eda_file_tools_core::threads::set_threads(threads).map_err(PyValueError::new_err)
+    open_eda_file_tools_core::threads::set_threads(threads)
+        .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
 /// The number of CPUs native readers will use.

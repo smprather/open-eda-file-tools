@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 /// Unit scales resolved from the library header and inherited by every cell
 /// and pin, so that scalar accessors can report values with their scale
 /// attached (and SI-converted variants where useful).
-#[derive(Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct UnitContext {
     /// Seconds per library time unit (`time_unit : "1ns"` -> 1e-9).
     pub time: Option<f64>,
@@ -22,7 +22,7 @@ pub struct UnitContext {
 }
 
 impl UnitContext {
-    pub fn from_library(
+    pub(crate) fn from_library(
         voltage: Option<&str>,
         current: Option<&str>,
         time: Option<&str>,
@@ -94,7 +94,7 @@ pub struct AttrEdit {
     pub value: String,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[doc(hidden)]
 pub struct Document {
     pub library_name: String,
@@ -139,7 +139,7 @@ pub struct Document {
 /// switching **energy** (joules in SI), not power; scale = voltage * current *
 /// time unit (see `Document::energy_unit_joules`).
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct CellData {
     pub name: String,
     pub area: Option<f64>,
@@ -157,7 +157,7 @@ pub struct CellData {
 
 /// A `pg_pin` group (power/ground rail): name + its simple attributes
 /// (pg_type, voltage_name, …).
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PgPinData {
     pub name: String,
     pub attributes: Vec<(String, String)>,
@@ -165,7 +165,7 @@ pub struct PgPinData {
 
 /// A `leakage_power` group: a state-dependent (or default) static leakage value,
 /// optionally per power rail.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct LeakagePowerData {
     pub value: Option<f64>,
     pub when: Option<String>,
@@ -174,7 +174,7 @@ pub struct LeakagePowerData {
 
 /// A flip-flop (`ff` / `ff_bank`) group. The two header args are the
 /// state-variable names (e.g. `IQ, IQN`); the rest are boolean expressions.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct FfData {
     pub variable1: Option<String>,
     pub variable2: Option<String>,
@@ -187,7 +187,7 @@ pub struct FfData {
 }
 
 /// A latch (`latch` / `latch_bank`) group.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct LatchData {
     pub variable1: Option<String>,
     pub variable2: Option<String>,
@@ -198,7 +198,7 @@ pub struct LatchData {
 }
 
 /// CCS power (`dynamic_current`): per-condition power/ground current waveforms.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DynamicCurrentData {
     pub related_inputs: Option<String>,
     pub related_outputs: Option<String>,
@@ -206,14 +206,14 @@ pub struct DynamicCurrentData {
     pub switching_groups: Vec<SwitchingGroupData>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SwitchingGroupData {
     pub input_switching_condition: Option<String>,
     pub output_switching_condition: Option<String>,
     pub pg_currents: Vec<PgCurrentData>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PgCurrentData {
     pub pg_pin: Option<String>,
     /// One `vector` per (slew, cap): a current-vs-time wave (reuses the timing
@@ -221,7 +221,7 @@ pub struct PgCurrentData {
     pub vectors: Vec<TimingTableData>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PinData {
     pub name: String,
     pub direction: Option<String>,
@@ -234,7 +234,7 @@ pub struct PinData {
     pub units: UnitContext,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct InternalPowerData {
     pub related_pin: Option<String>,
     pub related_pg_pin: Option<String>,
@@ -242,7 +242,7 @@ pub struct InternalPowerData {
     pub tables: Vec<TimingTableData>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct BusData {
     pub name: String,
     pub direction: Option<String>,
@@ -252,7 +252,7 @@ pub struct BusData {
     pub timing_arcs: Vec<TimingArcData>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct BundleData {
     pub name: String,
     pub direction: Option<String>,
@@ -262,14 +262,14 @@ pub struct BundleData {
     pub timing_arcs: Vec<TimingArcData>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[doc(hidden)]
 pub struct BusTypeData {
     pub name: String,
     pub attributes: Vec<(String, String)>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TimingArcData {
     pub related_pin: Option<String>,
     pub timing_type: Option<String>,
@@ -280,7 +280,7 @@ pub struct TimingArcData {
     pub ccsn_stages: Vec<CcsnStageData>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct CcsnStageData {
     pub name: String,
     pub is_inverting: Option<String>,
@@ -296,7 +296,7 @@ pub struct CcsnStageData {
     pub output_voltage_fall: Vec<TimingTableData>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TimingTableData {
     pub name: String,
     pub index_1: Vec<f64>,
@@ -1130,8 +1130,24 @@ pub struct LibraryIndex {
     pub(crate) header: Document,
 }
 
+impl fmt::Debug for LibraryIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LibraryIndex")
+            .field("library", &self.library_name)
+            .field("cells", &self.order.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl LibraryIndex {
-    pub fn parse_cell_by_name(&self, name: &str) -> Result<Cell, CellLookupError> {
+    /// The library's lookup-table templates in declaration order (used by the
+    /// Python bindings).
+    #[doc(hidden)]
+    pub fn templates_in_order(&self) -> &[(String, [Option<String>; 3])] {
+        &self.header.templates
+    }
+
+    pub(crate) fn parse_cell_by_name(&self, name: &str) -> Result<Cell, CellLookupError> {
         let &(start, end) = self
             .ranges
             .get(name)
@@ -1150,7 +1166,7 @@ impl LibraryIndex {
             .ok_or_else(|| CellLookupError::Empty(name.to_string()))
     }
 
-    pub fn cell_source_by_name(&self, name: &str) -> Result<String, CellSourceError> {
+    pub(crate) fn cell_source_by_name(&self, name: &str) -> Result<String, CellSourceError> {
         let &(start, end) = self
             .ranges
             .get(name)
@@ -3637,6 +3653,7 @@ impl ParseError {
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ParseLoadError {
     Io(io::Error),
     Parse(ParseError),
@@ -3663,16 +3680,19 @@ impl fmt::Display for ParseLoadError {
     }
 }
 
+/// `Display` prints the wrapped error, so `source()` skips it and returns the
+/// wrapped error's own source (no doubled text in an error chain).
 impl std::error::Error for ParseLoadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            ParseLoadError::Io(err) => Some(err),
-            ParseLoadError::Parse(err) => Some(err),
+            ParseLoadError::Io(err) => err.source(),
+            ParseLoadError::Parse(err) => err.source(),
         }
     }
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum CellLookupError {
     Unknown(String),
     Parse(ParseError),
@@ -3692,13 +3712,14 @@ impl fmt::Display for CellLookupError {
 impl std::error::Error for CellLookupError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            CellLookupError::Parse(err) => Some(err),
+            CellLookupError::Parse(err) => err.source(),
             _ => None,
         }
     }
 }
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum CellSourceError {
     Unknown(String),
 }
@@ -3719,6 +3740,8 @@ impl std::error::Error for CellSourceError {}
 /// itself: it reports the failure with this plain enum and the caller
 /// converts it to a `PyErr` outside the detached closure.
 #[derive(Debug)]
+#[doc(hidden)]
+#[non_exhaustive]
 pub enum WriteError {
     /// The document was not parsed from a file.
     NoSource,
@@ -3754,7 +3777,7 @@ impl fmt::Display for WriteError {
 impl std::error::Error for WriteError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            WriteError::Parse(err) => Some(err),
+            WriteError::Parse(err) => err.source(),
             _ => None,
         }
     }
@@ -3789,6 +3812,15 @@ pub struct CellAttributes {
 pub struct CellAttributesIter {
     index: LibraryIndex,
     position: usize,
+}
+
+impl fmt::Debug for CellAttributesIter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CellAttributesIter")
+            .field("index", &self.index)
+            .field("position", &self.position)
+            .finish_non_exhaustive()
+    }
 }
 
 impl CellAttributesIter {

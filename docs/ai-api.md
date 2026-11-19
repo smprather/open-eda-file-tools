@@ -345,6 +345,8 @@ for shape in def_tools.net_shapes(def_path: str | Path, net: str, layer: str):
 # after iterating (or at any point), route pieces the parser skipped because it
 # could not place them on a layer:
 shapes.skipped -> dict[str, int]  # {"after_via": n, "polygon": n, "subnet": n}
+# An error ends the iteration: the exception is raised once, then the iterator
+# is exhausted (rows before the error are unaffected).
 
 # Native writers (coordinates in MICRONS = DBU / UNITS DISTANCE MICRONS):
 # columns: optional list of (source_name, output_name) pairs.
@@ -569,7 +571,7 @@ let rows = def::scan_instance_bboxes(def_path, &lef_paths)?;
 for row in rows {
     let row = row?;   // row.instance, .macro_name, .status, .orient, .llx..ury
 }
-let dbu_per_micron: i64 = def::dbu_per_micron(def_path)?;   // default 1000; header-only scan, works without COMPONENTS
+let dbu_per_micron: i64 = def::dbu_per_micron(def_path)?;   // default 1000; reads up to COMPONENTS (whole file if none), works without it
 let shapes = def::scan_net_shapes(def_path, "VDD", "met1")?;
 let skipped = shapes.skipped();   // SkippedRoutes { after_via, polygon, subnet }
 
@@ -596,7 +598,7 @@ index.templates();                    // HashMap<String, Vec<Option<String>>>
 index.attributes();                   // Vec<(String, String)>
 
 // CPU limit for every parallel reader (same as def_tools.set_threads):
-threads::set_threads(Some(4)).unwrap();
+threads::set_threads(Some(4))?;   // Result<(), Error>; > 4096 is Error::Message
 ```
 
 **Visibility tiers.** Only the items shown above (and the types they return or
@@ -607,13 +609,21 @@ are not supported and may change in any release; everything else is
 crate-private. Every public entry point that runs parallel work installs itself
 inside the CPU limit (`set_threads`), and nested installs keep the outer budget.
 
-DEF and LEF errors are `core::Error`, an enum: `Error::Io(io::Error)` keeps
-the I/O error (match `e.kind()` for `NotFound` vs `PermissionDenied`; the
-message is unchanged) and `Error::Message(String)` carries every other
-failure; it has `From<String>` and `From<io::Error>`. The Liberty APIs use
-`ParseLoadError` (`Io` / `Parse`), `CellLookupError`, `CellSourceError`,
-`ParseError` and `WriteError`. Every error type implements `Debug`, `Display`
-and `std::error::Error` (`source()` is the inner `io::Error` / `ParseError`),
-so `?` into `Box<dyn std::error::Error>` works. `Display` is the text the
+DEF and LEF errors (and `set_threads`) are `core::Error`, an enum:
+`Error::Io(io::Error)` is any failure that surfaced as an `io::Error`, which
+includes malformed input reported by the tokenizer (`InvalidData` for
+"DEF missing COMPONENTS section", `UnexpectedEof` for an unterminated record) as
+well as unreadable files, so branch on `e.kind()` (`NotFound`,
+`PermissionDenied`) rather than on the variant alone; the message is
+unchanged. `Error::Message(String)` carries the failures that were never an
+`io::Error`; it has `From<String>` and `From<io::Error>`. The Liberty APIs use
+`ParseLoadError` (`Io` / `Parse`), `CellLookupError`, `CellSourceError` and
+`ParseError`. `Error` and these enums are `#[non_exhaustive]`: keep a `_` arm
+when matching. Every error type implements `Debug`, `Display` and
+`std::error::Error`; a wrapper whose `Display` is the inner error's text
+(`Error::Io`, `ParseLoadError`, `CellLookupError::Parse`) is transparent, so
+its `source()` is the inner error's own source (not the inner error again) and
+`anyhow`'s `{:#}` does not print the text twice. `?` into
+`Box<dyn std::error::Error>` works. `Display` is the text the
 Python bindings raise (for example `unknown cell "X"`). Python-side behavior
 is untouched: the extension wraps these same types.

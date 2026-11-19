@@ -122,15 +122,16 @@ tests/                     Pytest integration tests (inline fixture strings, no 
 
 ### Rust layer (`core/src/liberty.rs`)
 
-The Liberty machinery is a single core file (the pyo3 shell in `src/lib.rs`
-wraps it); it contains:
+The Liberty machinery is a single core file (plain Rust; the pyo3 shell in
+`src/lib.rs` wraps it); it contains:
 - **`Lexer`** — byte-level streaming tokenizer; handles `#`, `//`, `/* */` comments, quoted strings, backslash line continuation
 - **`Parser`** — recursive descent; builds `*Data` structs (plain Rust) by consuming tokens
 - **`BoolParser` / `BoolExpr` / `bool_implies`** — Liberty Boolean expression parser and implication checker for `when` filters; uses brute-force truth-table enumeration
-- **`#[pyclass]` types** (`Document`, `Cell`, `Pin`, `Bus`, `Bundle`, `BusType`, `TimingArc`, `TimingTable`) — own `Vec<*Data>` and expose methods to Python; registered in `_native` module
-- **`parse_file` `#[pyfunction]`** — entry point; opens `.lib` or `.lib.gz`, constructs parser with optional cell filter
+- **`*Data` types, `Document`, `LibraryIndex`** — the parsed data model and the cell-offset index (`LibraryIndex::open`, `cell`, `cell_source`, ...)
 
-There are two parallel type hierarchies: `*Data` (plain Rust structs, no PyO3 overhead) used during parse, and `#[pyclass]` types that wrap/clone them when returned to Python. This avoids PyO3 GIL overhead during bulk parse.
+`src/lib.rs` (the `_native` module) holds the pyo3 side: the `#[pyclass]` types (`Document`, `Cell`, `Pin`, `Bus`, `Bundle`, `BusType`, `TimingArc`, `TimingTable`) that own `Vec<*Data>` and expose methods to Python, and the `parse_file` `#[pyfunction]` (opens `.lib` or `.lib.gz`, constructs the parser with an optional cell filter).
+
+There are two parallel type hierarchies: `*Data` (plain Rust structs in core, no PyO3 overhead) used during parse, and `#[pyclass]` types in `src/lib.rs` that wrap/clone them when returned to Python. This avoids PyO3 GIL overhead during bulk parse.
 
 ### Python layer (`liberty_tools/__init__.py`)
 
@@ -230,7 +231,7 @@ lef_tools/           Python wrapper and `lef-tools` CLI
 
 ```
 core/src/def.rs           DEF parser, streaming reads, binary cache
-src/def.rs                DEF pyclasses/pyfunctions, Parquet/CSV/table writers
+src/def.rs                DEF pyclasses/pyfunctions and the Arrow/Parquet writer (CSV/table writers are core's `write_*_impl`)
 def_tools/cli.py          click CLI (`def-tools <command>`)
 def_tools/instances.py    instance bbox dumper (`def-tools instances`, CSV/Parquet/table in microns)
 def_tools/sdc.py          clock roots for `clock-instances` (adapter over `sdc_tools.clocks`)
@@ -302,7 +303,7 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   any record is a clock record (real per-edge files tag every clock net as
   data too).
 - **Clock net -> its drivers; clock pin -> its instance; endpoints excluded.**
-  `clock_object_instances` (`core/src/def.rs`) marks non-endpoint instances with an
+  `clock_object_instances_impl` (`core/src/def.rs`) marks non-endpoint instances with an
   output on a clock net, or with a clock pin that is an output or
   clock-through input. Names compare with DEF backslash escapes removed.
 - **The binary cache is versioned.** Magic headers and `CACHE_VERSION` guard

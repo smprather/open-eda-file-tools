@@ -93,9 +93,11 @@ pub fn install_for<R: Send>(overlapped: bool, work: impl FnOnce() -> R + Send) -
 }
 
 /// Whether a reader may run a scanner thread beside its parallel workers.
+/// Never inside one of our pools: the pool already uses the whole budget, so a
+/// nested scanner would make `n + 1` busy threads.
 #[doc(hidden)]
 pub fn may_overlap() -> bool {
-    budget() > 1
+    budget() > 1 && !inside_pool()
 }
 
 /// The number of CPUs native readers will use.
@@ -105,10 +107,12 @@ pub fn get_threads() -> usize {
 
 /// Limit native readers to `threads` CPUs; `None` or 0 removes the limit.
 /// Values above 4096 are rejected.
-pub fn set_threads(threads: Option<usize>) -> Result<(), String> {
+pub fn set_threads(threads: Option<usize>) -> Result<(), crate::Error> {
     let value = threads.unwrap_or(0);
     if value > 4096 {
-        return Err(format!("threads must be between 1 and 4096, got {value}"));
+        return Err(crate::Error::Message(format!(
+            "threads must be between 1 and 4096, got {value}"
+        )));
     }
     LIMIT.store(value, Ordering::Relaxed);
     Ok(())
@@ -129,6 +133,9 @@ mod tests {
         assert_eq!(install(rayon::current_num_threads), 3);
         assert_eq!(install_beside_scanner(rayon::current_num_threads), 2);
         assert!(may_overlap());
+        // Inside one of our pools a nested reader must not add a scanner
+        // thread beside the full pool.
+        assert!(!install(may_overlap));
         LIMIT.store(1, Ordering::Relaxed);
         assert_eq!(install(rayon::current_num_threads), 1);
         assert_eq!(install_beside_scanner(rayon::current_num_threads), 1);

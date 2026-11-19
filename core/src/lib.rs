@@ -15,13 +15,19 @@ pub mod lef;
 pub mod liberty;
 pub mod threads;
 
-/// A plain failure from the core API. An I/O failure keeps its
-/// `io::Error` (and so its `ErrorKind`); every other failure is its text.
+/// A plain failure from the core API. A failure that surfaced as an
+/// `io::Error` keeps it (and so its `ErrorKind`); every other failure is its
+/// text.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
-    /// A file could not be opened or read; `Display` is the `io::Error`'s text.
+    /// Any failure that surfaced as an `io::Error`: an unreadable file, and
+    /// also malformed input reported by the tokenizer (`InvalidData`,
+    /// `UnexpectedEof`). `Display` is the `io::Error`'s text. Branch on
+    /// `kind()` (`NotFound`, `PermissionDenied`, ...) rather than on the
+    /// variant alone.
     Io(std::io::Error),
-    /// Any other failure, as a message.
+    /// A failure that never was an `io::Error`, as a message.
     Message(String),
 }
 
@@ -34,10 +40,12 @@ impl std::fmt::Display for Error {
     }
 }
 
+/// `Display` prints the wrapped `io::Error`, so `source()` returns that
+/// error's own source rather than repeating it in an error chain.
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Error::Io(err) => Some(err),
+            Error::Io(err) => err.source(),
             Error::Message(_) => None,
         }
     }
