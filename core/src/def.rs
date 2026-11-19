@@ -1875,7 +1875,8 @@ pub(crate) fn parse_net_connections_record(record: &NetRecord) -> Result<NetInfo
     })
 }
 
-/// `( instance pin )` / `( PIN port )` pairs up to the first `+`.
+/// `( instance pin )` / `( PIN port )` pairs up to the first `+` outside
+/// parentheses. A connection may carry `+ SYNTHESIZED` before its `)`.
 pub(crate) fn parse_connection_list(bytes: &[u8], offset: u64) -> Result<Vec<NetConn>, String> {
     let mut tokens = ByteTokens::new(bytes);
     let mut conns = Vec::new();
@@ -1892,7 +1893,20 @@ pub(crate) fn parse_connection_list(bytes: &[u8], offset: u64) -> Result<Vec<Net
         let Some(second) = tokens.next() else {
             break;
         };
-        tokens.expect(b")", offset, "net connection")?;
+        match tokens.next() {
+            Some(b")") => {}
+            Some(b"+") => {
+                tokens.expect(b"SYNTHESIZED", offset, "net connection")?;
+                tokens.expect(b")", offset, "net connection")?;
+            }
+            Some(other) => {
+                return Err(format!(
+                    "expected ')' for net connection, got '{}' near DEF byte {offset}",
+                    String::from_utf8_lossy(other)
+                ));
+            }
+            None => return Err(format!("expected net connection near DEF byte {offset}")),
+        }
         if first == b"PIN" {
             conns.push(NetConn {
                 instance: None,
@@ -1911,7 +1925,7 @@ pub(crate) fn parse_connection_list(bytes: &[u8], offset: u64) -> Result<Vec<Net
 /// Cut a long connection list into pieces that parse independently, or
 /// `None` to parse it whole.
 ///
-/// The list ends at the first `+`. Pieces start at a `(` whose previous
+/// The list ends at the first `+` outside parentheses. Pieces start at a `(` whose previous
 /// non-blank byte is `)`: a parse with no error is between connections
 /// there, and a misaligned parse is an error inside the piece before. Lists
 /// with quotes are never split, since `(`, `)` and `+` inside a quoted token
@@ -1936,8 +1950,25 @@ fn net_shape(context: &RouteContext<'_>, ends: [i64; 4], bbox: [i64; 4]) -> NetS
         ury,
     }
 }
+/// Offset of the first `+` outside parentheses and quotes, or the length.
+fn connection_list_end(body: &[u8]) -> usize {
+    let mut depth = 0usize;
+    let mut in_quote = false;
+    for (index, &byte) in body.iter().enumerate() {
+        match byte {
+            b'"' => in_quote = !in_quote,
+            _ if in_quote => {}
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b'+' if depth == 0 => return index,
+            _ => {}
+        }
+    }
+    body.len()
+}
+
 pub(crate) fn split_connection_list(body: &[u8]) -> Option<Vec<&[u8]>> {
-    let end = memchr::memchr(b'+', body).unwrap_or(body.len());
+    let end = connection_list_end(body);
     let list = &body[..end];
     if list.len() <= SPLIT_BYTES || memchr::memchr(b'"', list).is_some() {
         return None;

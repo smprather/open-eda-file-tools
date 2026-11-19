@@ -210,3 +210,12 @@ def test_threads_must_be_positive(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 2
+
+
+def test_synthesized_connections_are_kept(tmp_path):
+    lef, design = write_design(tmp_path, components=3)
+    text = design.read_text(encoding="utf-8").replace("( u1 A )", "( u1 A + SYNTHESIZED )")
+    design.write_text(text, encoding="utf-8")
+    cells = _native.clock_tree_cells(design, ["port:clk"], [("INV", ["A"], ["Y"], False, [])], False)
+    assert cells == ["u0", "u1", "u2"]
+    _native.write_def_cache(design, tmp_path / "cache")  # must not raise

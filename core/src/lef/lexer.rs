@@ -216,8 +216,9 @@ impl<R: Read> Lexer<R> {
     }
 
     /// Like `read_until_semicolon`, but stop after the first `+` outside
-    /// quotes. Returns `true` when it stopped at a `+`: the record continues
-    /// and the caller must consume the rest.
+    /// quotes and outside parentheses (`( inst pin + SYNTHESIZED )` is part of
+    /// the connection list). Returns `true` when it stopped at a `+`: the
+    /// record continues and the caller must consume the rest.
     pub fn read_until_plus_or_semicolon(&mut self, out: &mut Vec<u8>) -> io::Result<bool> {
         self.scan_record(Some(out), true)
     }
@@ -229,6 +230,7 @@ impl<R: Read> Lexer<R> {
     ) -> io::Result<bool> {
         let mut in_quote = false;
         let mut in_comment = false;
+        let mut depth = 0usize;
         loop {
             if self.pos >= self.end && !self.refill()? {
                 return Err(io::Error::new(
@@ -265,7 +267,7 @@ impl<R: Read> Lexer<R> {
             let hit = if stop_at_plus {
                 chunk
                     .iter()
-                    .position(|&byte| matches!(byte, b';' | b'"' | b'#' | b'+'))
+                    .position(|&byte| matches!(byte, b';' | b'"' | b'#' | b'+' | b'(' | b')'))
             } else {
                 memchr3(b';', b'"', b'#', chunk)
             };
@@ -278,10 +280,28 @@ impl<R: Read> Lexer<R> {
                             out.push(b'"');
                         }
                     }
+                    if matches!(byte, b'(' | b')') {
+                        // Parentheses are record text: copy them through.
+                        if let Some(out) = out.as_deref_mut() {
+                            out.push(byte);
+                        }
+                        depth = if byte == b'(' {
+                            depth + 1
+                        } else {
+                            depth.saturating_sub(1)
+                        };
+                        self.pos += index + 1;
+                        continue;
+                    }
                     self.pos += index + 1;
                     match byte {
                         b';' => return Ok(false),
-                        b'+' => return Ok(true),
+                        b'+' if depth == 0 => return Ok(true),
+                        b'+' => {
+                            if let Some(out) = out.as_deref_mut() {
+                                out.push(b'+');
+                            }
+                        }
                         b'"' => in_quote = true,
                         _ => in_comment = true,
                     }
@@ -397,6 +417,18 @@ mod tests {
             let mut second = Vec::new();
             assert!(!lexer.read_until_plus_or_semicolon(&mut second).unwrap());
             assert_eq!(second, b"- n2 ( u2 Z ) ");
+        }
+    }
+
+    #[test]
+    fn connection_part_skips_plus_inside_parentheses() {
+        let data: &[u8] = b"- n1 ( u1 A + SYNTHESIZED ) ( u2 B ) + ROUTED M1 ( 0 0 ) ;";
+        for step in [1, 2, 3, 5, data.len()] {
+            let mut lexer = Lexer::new(Trickle { data, step });
+            let mut out = Vec::new();
+            assert!(lexer.read_until_plus_or_semicolon(&mut out).unwrap());
+            assert_eq!(out, b"- n1 ( u1 A + SYNTHESIZED ) ( u2 B ) ", "step {step}");
+            lexer.skip_until_semicolon().unwrap();
         }
     }
 
