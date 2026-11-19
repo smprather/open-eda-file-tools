@@ -11,9 +11,6 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
-use pyo3::prelude::*;
-
 use super::lexer::{Lexer, Token, open_input};
 
 // ---------------------------------------------------------------------------
@@ -35,29 +32,20 @@ impl fmt::Display for LefError {
     }
 }
 
-impl From<LefError> for PyErr {
-    fn from(err: LefError) -> PyErr {
-        match err {
-            LefError::Io(err) => PyErr::from(err),
-            LefError::Value(msg) => PyValueError::new_err(msg),
-        }
-    }
-}
-
-type LefResult<T> = Result<T, LefError>;
-
 fn value_error<T>(msg: String) -> LefResult<T> {
     Err(LefError::Value(msg))
 }
 
-/// Keep the `io::ErrorKind` so PyO3 still maps to the right `OSError` subclass
-/// while the message carries the offending path.
+/// Keep the `io::ErrorKind` so the Python bindings still map to the right
+/// `OSError` subclass while the message carries the offending path.
 fn io_error(path: &Path, err: io::Error) -> LefError {
     LefError::Io(io::Error::new(
         err.kind(),
         format!("{}: {err}", path.display()),
     ))
 }
+
+type LefResult<T> = Result<T, LefError>;
 
 /// `"cells.lef: MACRO BUF "` or `"cells.lef: MACRO BUF PIN A: "`.
 fn context(path: &Path, macro_name: &str, pin_name: Option<&str>) -> String {
@@ -72,26 +60,26 @@ fn context(path: &Path, macro_name: &str, pin_name: Option<&str>) -> String {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-pub(crate) struct RectData {
-    layer: String,
-    x0: f64,
-    y0: f64,
-    x1: f64,
-    y1: f64,
+pub struct RectData {
+    pub layer: String,
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct PortData {
-    rects: Vec<Arc<RectData>>,
-    unsupported: bool,
+pub struct PortData {
+    pub rects: Vec<Arc<RectData>>,
+    pub unsupported: bool,
 }
 
 #[derive(Debug)]
-pub(crate) struct PinData {
-    name: String,
-    direction: Option<String>,
-    use_kind: Option<String>,
-    ports: Vec<Arc<PortData>>,
+pub struct PinData {
+    pub name: String,
+    pub direction: Option<String>,
+    pub use_kind: Option<String>,
+    pub ports: Vec<Arc<PortData>>,
 }
 
 #[derive(Debug)]
@@ -101,14 +89,14 @@ pub struct MacroData {
     pub height: f64,
     pub origin_x: f64,
     pub origin_y: f64,
-    pins: Vec<Arc<PinData>>,
-    pin_index: HashMap<String, usize>,
+    pub pins: Vec<Arc<PinData>>,
+    pub pin_index: HashMap<String, usize>,
 }
 
 #[derive(Debug, Default)]
 pub struct LibraryData {
     pub macros: Vec<Arc<MacroData>>,
-    macro_index: HashMap<String, usize>,
+    pub macro_index: HashMap<String, usize>,
     pub duplicates: Vec<String>,
 }
 
@@ -524,288 +512,6 @@ fn parse_coordinate<F: Fn() -> String>(token: &Token, ctx: &F) -> LefResult<f64>
     }
 }
 
-// ---------------------------------------------------------------------------
-// Python classes
-// ---------------------------------------------------------------------------
-
-/// Render an optional string the way Python's own `repr` would.
-fn optional_repr(value: Option<&str>) -> String {
-    match value {
-        Some(text) => format!("{text:?}"),
-        None => "None".to_string(),
-    }
-}
-
-#[pyclass(frozen, name = "LefRect", module = "lef_tools")]
-pub struct LefRect {
-    inner: Arc<RectData>,
-}
-
-#[pymethods]
-impl LefRect {
-    #[getter]
-    fn layer(&self) -> String {
-        self.inner.layer.clone()
-    }
-
-    #[getter]
-    fn x0_microns(&self) -> f64 {
-        self.inner.x0
-    }
-
-    #[getter]
-    fn y0_microns(&self) -> f64 {
-        self.inner.y0
-    }
-
-    #[getter]
-    fn x1_microns(&self) -> f64 {
-        self.inner.x1
-    }
-
-    #[getter]
-    fn y1_microns(&self) -> f64 {
-        self.inner.y1
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "LefRect(layer={:?}, x0_microns={}, y0_microns={}, x1_microns={}, y1_microns={})",
-            self.inner.layer, self.inner.x0, self.inner.y0, self.inner.x1, self.inner.y1
-        )
-    }
-}
-
-#[pyclass(frozen, name = "LefPort", module = "lef_tools")]
-pub struct LefPort {
-    inner: Arc<PortData>,
-}
-
-#[pymethods]
-impl LefPort {
-    fn rects(&self) -> Vec<LefRect> {
-        self.inner
-            .rects
-            .iter()
-            .map(|rect| LefRect {
-                inner: Arc::clone(rect),
-            })
-            .collect()
-    }
-
-    #[getter]
-    fn has_unsupported_geometry(&self) -> bool {
-        self.inner.unsupported
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "LefPort(rects={}, has_unsupported_geometry={})",
-            self.inner.rects.len(),
-            if self.inner.unsupported {
-                "True"
-            } else {
-                "False"
-            }
-        )
-    }
-}
-
-#[pyclass(frozen, name = "LefPin", module = "lef_tools")]
-pub struct LefPin {
-    inner: Arc<PinData>,
-}
-
-#[pymethods]
-impl LefPin {
-    #[getter]
-    fn name(&self) -> String {
-        self.inner.name.clone()
-    }
-
-    #[getter]
-    fn direction(&self) -> Option<String> {
-        self.inner.direction.clone()
-    }
-
-    #[getter]
-    #[pyo3(name = "use")]
-    fn use_kind(&self) -> Option<String> {
-        self.inner.use_kind.clone()
-    }
-
-    fn ports(&self) -> Vec<LefPort> {
-        self.inner
-            .ports
-            .iter()
-            .map(|port| LefPort {
-                inner: Arc::clone(port),
-            })
-            .collect()
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "LefPin(name={:?}, direction={}, use={}, ports={})",
-            self.inner.name,
-            optional_repr(self.inner.direction.as_deref()),
-            optional_repr(self.inner.use_kind.as_deref()),
-            self.inner.ports.len()
-        )
-    }
-}
-
-#[pyclass(frozen, name = "LefMacro", module = "lef_tools")]
-pub struct LefMacro {
-    inner: Arc<MacroData>,
-}
-
-#[pymethods]
-impl LefMacro {
-    #[getter]
-    fn name(&self) -> String {
-        self.inner.name.clone()
-    }
-
-    #[getter]
-    fn width_microns(&self) -> f64 {
-        self.inner.width
-    }
-
-    #[getter]
-    fn height_microns(&self) -> f64 {
-        self.inner.height
-    }
-
-    #[getter]
-    fn origin_x_microns(&self) -> f64 {
-        self.inner.origin_x
-    }
-
-    #[getter]
-    fn origin_y_microns(&self) -> f64 {
-        self.inner.origin_y
-    }
-
-    fn pin_names(&self) -> Vec<String> {
-        self.inner.pins.iter().map(|pin| pin.name.clone()).collect()
-    }
-
-    fn pins(&self) -> Vec<LefPin> {
-        self.inner
-            .pins
-            .iter()
-            .map(|pin| LefPin {
-                inner: Arc::clone(pin),
-            })
-            .collect()
-    }
-
-    fn pin(&self, name: &str) -> PyResult<LefPin> {
-        match self.inner.pin_index.get(name) {
-            Some(&index) => Ok(LefPin {
-                inner: Arc::clone(&self.inner.pins[index]),
-            }),
-            None => Err(PyKeyError::new_err(name.to_string())),
-        }
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "LefMacro(name={:?}, width_microns={}, height_microns={}, pins={})",
-            self.inner.name,
-            self.inner.width,
-            self.inner.height,
-            self.inner.pins.len()
-        )
-    }
-}
-
-#[pyclass(frozen, name = "LefLibrary", module = "lef_tools")]
-pub struct LefLibrary {
-    inner: Arc<LibraryData>,
-}
-
-#[pymethods]
-impl LefLibrary {
-    fn macro_names(&self) -> Vec<String> {
-        self.inner
-            .macros
-            .iter()
-            .map(|item| item.name.clone())
-            .collect()
-    }
-
-    fn macros(&self) -> Vec<LefMacro> {
-        self.inner
-            .macros
-            .iter()
-            .map(|item| LefMacro {
-                inner: Arc::clone(item),
-            })
-            .collect()
-    }
-
-    #[pyo3(name = "macro")]
-    fn get_macro(&self, name: &str) -> PyResult<LefMacro> {
-        match self.inner.macro_index.get(name) {
-            Some(&index) => Ok(LefMacro {
-                inner: Arc::clone(&self.inner.macros[index]),
-            }),
-            None => Err(PyKeyError::new_err(name.to_string())),
-        }
-    }
-
-    fn duplicate_macro_names(&self) -> Vec<String> {
-        self.inner.duplicates.clone()
-    }
-
-    fn __repr__(&self) -> String {
-        format!("LefLibrary(macros={})", self.inner.macros.len())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
-
-fn extract_paths(paths: &Bound<'_, PyAny>) -> PyResult<Vec<PathBuf>> {
-    if let Ok(single) = paths.extract::<PathBuf>() {
-        return Ok(vec![single]);
-    }
-    paths.extract::<Vec<PathBuf>>().map_err(|_| {
-        PyTypeError::new_err("paths must be a path or a sequence of paths".to_string())
-    })
-}
-
-#[pyfunction]
-#[pyo3(signature = (paths, *, macros = None))]
-pub fn parse_lef(
-    py: Python<'_>,
-    paths: &Bound<'_, PyAny>,
-    macros: Option<Vec<String>>,
-) -> PyResult<LefLibrary> {
-    let paths = extract_paths(paths)?;
-    if paths.is_empty() {
-        return Err(PyValueError::new_err("no LEF paths given"));
-    }
-    let selection: Option<HashSet<String>> = macros.map(|names| names.into_iter().collect());
-    let data = py.detach(|| parse_library(&paths, selection.as_ref(), true))?;
-    Ok(LefLibrary {
-        inner: Arc::new(data),
-    })
-}
-
-pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<LefLibrary>()?;
-    m.add_class::<LefMacro>()?;
-    m.add_class::<LefPin>()?;
-    m.add_class::<LefPort>()?;
-    m.add_class::<LefRect>()?;
-    m.add_function(wrap_pyfunction!(parse_lef, m)?)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -915,4 +621,34 @@ mod tests {
         assert_eq!(library.macros.len(), 1);
         assert_eq!(library.macros[0].name, "KEEP");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Public Rust API (issue #12)
+// ---------------------------------------------------------------------------
+
+/// A LEF macro's size in microns (`SIZE w BY h`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MacroSize {
+    pub width_um: f64,
+    pub height_um: f64,
+}
+
+/// Parse `paths` in order and return every macro's size in microns. The last
+/// definition of a duplicated macro wins.
+pub fn macro_sizes(paths: &[PathBuf]) -> Result<HashMap<String, MacroSize>, crate::Error> {
+    let library = parse_library(paths, None, false).map_err(|err| crate::Error(err.to_string()))?;
+    Ok(library
+        .macros
+        .iter()
+        .map(|item| {
+            (
+                item.name.clone(),
+                MacroSize {
+                    width_um: item.width,
+                    height_um: item.height,
+                },
+            )
+        })
+        .collect())
 }

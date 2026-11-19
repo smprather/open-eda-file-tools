@@ -18,12 +18,19 @@ libraries and command-line tools under the `open-eda-file-tools` umbrella:
 ## Repository Layout
 
 ```
-pyproject.toml, Cargo.toml  Single project manifest and Rust crate
-src/
-  lib.rs                    Liberty lexer/parser/evaluator + PyO3 module `_native`
-  lef/lexer.rs              Shared LEF/DEF streaming tokenizer
-  lef/cell_lef.rs           LEF MACRO / PIN / PORT / RECT parser
-  def.rs                    DEF parser, binary cache, geometry kernels, Parquet/CSV/table writers
+pyproject.toml, Cargo.toml  Single project manifest; Cargo.toml is a workspace root
+                            (members = ["core"]) and the bindings crate
+core/                       Plain-Rust rlib `open-eda-file-tools-core` (issue #12):
+core/src/lib.rs             Liberty lexer/parser/evaluator/data model + LibraryIndex + public API
+core/src/def.rs             DEF scanner, bbox/net-shape/clock logic, cache (no Arrow)
+core/src/lef/               Shared LEF/DEF tokenizer + cell LEF parser
+core/src/threads.rs         Process-wide CPU limit (`set_threads`)
+src/                        The `_native` cdylib (pyo3 shell over core):
+src/lib.rs                  Liberty pyclasses/pyfunctions + pymodule registration
+src/def.rs                  DEF pyclasses/pyfunctions + the Arrow/Parquet writer
+src/lef/                    LEF pyclasses/pyfunctions (python.rs)
+src/pex.rs, src/otw.rs      SPEF/DSPF and OTW readers (pyo3)
+src/threads.rs              `set_threads`/`get_threads` pyfunctions over core
 liberty_tools/              Liberty Python wrapper and comparison module
 viewer/, liberty_format/, logic2svg/
                             Browser viewer (`liberty-view`), formatter (`liberty-tools format`), symbol layout
@@ -31,10 +38,8 @@ lef_tools/                  Cell LEF Python package and `lef-tools` CLI
 def_tools/                  DEF Python package, `def-tools` CLI, SDC reader, IO configurator
 sdc_tools/                  SDC clock extraction, `sdc-tools` CLI (Tcl stub evaluator)
 pex_tools/                  SPEF/DSPF parser, `pex-tools` CLI
-src/pex.rs                  SPEF/DSPF parser (parallel + streaming modes)
-src/otw.rs                  OTW (Open Timing Windows) line-oriented reader and CSV dump
-src/threads.rs              Process-wide CPU limit (`set_threads`) for every parallel native reader
 tests/                      Unified pytest suite (Liberty, LEF, DEF, SDC, PEX, and `tests/gen/design_gen.py`)
+core/tests/core_api.rs      Rust integration tests for the plain-Rust public API
 otw-design/                 Design workspace for the next OTW version (non-normative; `docs/otw.md` is the spec)
 docs/                       AI-agent and per-tool Markdown documentation (`docs/ai-api.md`, `docs/cli.md`, `docs/*.md`)
 ```
@@ -64,9 +69,9 @@ uv run maturin develop --release   # required after any Rust change
 
 # Tests
 uv run pytest -q                   # Python tests across Liberty, LEF, and DEF (testpaths = tests/)
-cargo test                         # Rust unit tests
+cargo test --workspace              # Rust unit tests (core + bindings)
 cargo fmt --all --check            # Rust format check
-cargo check                        # Rust type check
+cargo check --workspace             # Rust type check
 
 # Single test
 uv run pytest tests/test_extraction_api.py::test_1d_2d_and_3d_table_extraction -q
@@ -93,19 +98,28 @@ When the user says "look at the grab" or references a current screen grab, view 
 
 ## Architecture
 
-This is a **maturin/PyO3 hybrid**: all parsing and data storage lives in Rust (`src/lib.rs`); Python is a thin wrapper.
+This is a **maturin/PyO3 hybrid over a plain-Rust core**: all parsing and
+data storage lives in `core/` (`open-eda-file-tools-core`, an rlib with no
+pyo3/Arrow/Parquet); the root crate is the thin `_native` cdylib whose
+pyclasses delegate to or convert from core types. **The bindings never
+re-implement parser logic** — they call `core::def`/`core::lef`/
+`core::liberty`; a handful of 5-line accessors exist on both sides because
+pymethods call them on the pyclass. The Liberty writer machinery (surgical
+attribute edits) stays in the bindings; it is Python-surface only.
 
 ```
-src/lib.rs                 Rust: lexer, parser, boolean evaluator, PyO3 #[pyclass] types
+core/src/lib.rs            Rust: Liberty lexer, parser, boolean evaluator, data model, LibraryIndex
+src/lib.rs                 pyo3: pyclasses/pyfunctions wrapping core, module `_native`
 liberty_tools/__init__.py  Python wrapper classes (LibertyDocument, Cell, Pin, …)
 liberty_tools/comparison.py  Python library comparison (arc matching, grid alignment)
 liberty_tools/__init__.pyi Type stubs
 tests/                     Pytest integration tests (inline fixture strings, no large files)
 ```
 
-### Rust layer (`src/lib.rs`)
+### Rust layer (`core/src/lib.rs`)
 
-Single file containing:
+The Liberty machinery is a single core file (the pyo3 shell in `src/lib.rs`
+wraps it); it contains:
 - **`Lexer`** — byte-level streaming tokenizer; handles `#`, `//`, `/* */` comments, quoted strings, backslash line continuation
 - **`Parser`** — recursive descent; builds `*Data` structs (plain Rust) by consuming tokens
 - **`BoolParser` / `BoolExpr` / `bool_implies`** — Liberty Boolean expression parser and implication checker for `when` filters; uses brute-force truth-table enumeration

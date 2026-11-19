@@ -41,6 +41,23 @@ builds the Rust crate and wheel offline; keep it green when touching `Cargo.toml
 
 ## Offline builds
 
+### Workspace layout: the extension and the plain-Rust core
+
+The repo is a Cargo workspace with two crates:
+
+| Crate | Manifest | Kind | Depends on |
+| --- | --- | --- | --- |
+| `open-eda-file-tools-core` | `core/Cargo.toml` | `rlib` | flate2 (zlib-rs), memchr, rayon, quine-mc_cluskey — **no pyo3, no Arrow/Parquet, no C toolchain** |
+| `open-eda-file-tools-native` | `Cargo.toml` (root) | `cdylib` `_native` | core + pyo3, arrow, parquet (zstd → zstd-sys → a C compiler) |
+
+The core crate holds the LEF/DEF readers, the Liberty parser and
+`LibraryIndex` as plain Rust; the root crate is the Python extension shell.
+Maturin builds the root manifest (default discovery), so `pyproject.toml`
+and `run_example_offline.sh` are unchanged. For a pure-Rust consumer on an
+air-gapped host, depend on the core crate via a git/path reference and
+`cargo vendor` its (already-minimal) tree; the C compiler requirement
+applies only to the wheel/Parquet path.
+
 ### What is vendored and what the environment supplies
 
 `vendor/cargo/` plus `Cargo.lock` contain every Rust **package dependency**.

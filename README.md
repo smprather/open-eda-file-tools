@@ -19,6 +19,10 @@ tool for each. One package, one version, one install.
 
 Liberty, LEF, DEF and SPEF/DSPF inputs are read plain or gzipped.
 
+**Rust consumers:** the same readers ship as a plain Rust rlib with no
+Python dependency — `open-eda-file-tools-core` (workspace member `core/`),
+see [docs/ai-api.md §8](docs/ai-api.md).
+
 **Using this from an AI coding agent?** Read [docs/ai-api.md](docs/ai-api.md)
 first. It is a single page with a task-to-entry-point table, every typed
 signature, and the invariants that are easy to get wrong.

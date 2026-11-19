@@ -545,3 +545,60 @@ for net in pex.nets:
     net.caps -> list[pex_tools.PexCap]      # .id, .node1, .node2 (None=ground), .value, .ext
     net.res -> list[pex_tools.PexRes]       # .id, .node1, .node2, .value, .ext
 ```
+
+## 8. Rust core (`open-eda-file-tools-core`) — plain Rust, no Python
+
+The repo is a Cargo workspace: the root `Cargo.toml` is the Python extension
+(`_native`), and `core/` is `open-eda-file-tools-core`, an **rlib** with no
+pyo3, Arrow or Parquet in its dependency graph (flate2/zlib-rs, memchr,
+rayon, quine-mc_cluskey only — builds fully offline from a vendored mirror,
+no C toolchain). Downstream Rust tools depend on it directly:
+
+```toml
+[dependencies]
+open-eda-file-tools-core = { git = "https://github.com/smprather/open-eda-file-tools", branch = "rust-rlib-core" }
+```
+
+```rust
+use open_eda_file_tools_core::{Error, def, lef, liberty, threads};
+
+// DEF COMPONENTS -> instance bboxes in integer DBU, LEF SIZE/ORIGIN and
+// UNITS DISTANCE MICRONS honored. Errors surface per row.
+let rows = def::scan_instance_bboxes(def_path, &lef_paths)?;
+for row in rows {
+    let row = row?;   // row.instance, .macro_name, .status, .orient, .llx..ury
+}
+let dbu_per_micron: i64 = def::dbu_per_micron(def_path)?;   // default 1000
+let shapes = def::scan_net_shapes(def_path, "VDD", "met1")?;
+let skipped = shapes.skipped();   // SkippedRoutes { after_via, polygon, subnet }
+
+// LEF macro sizes in microns (last duplicate definition wins):
+let sizes: HashMap<String, lef::MacroSize> = lef::macro_sizes(&lef_paths)?;
+
+// Liberty attribute-only scan: lazy per-cell parse with table bodies
+// skipped; is_sequential = the cell has an ff or latch group.
+for cell in liberty::cell_attributes(lib_path)? {
+    let cell: liberty::CellAttributes = cell?;   // .name, .attributes, .is_sequential
+}
+
+// Indexed access: open once (plain or .gz), then fetch cells on demand.
+let index = liberty::LibraryIndex::open(lib_path)?;
+index.library_name();                 // &str
+index.cell_names();                   // Vec<String>
+index.num_cells();                    // usize
+index.cell("AND2")?;                  // full parse: pins/arcs/tables/units
+index.cell_attributes("AND2")?;       // structural only (skip_tables)
+index.cell_source("AND2")?;           // raw source slice of that cell
+index.voltage_unit(); index.current_unit(); index.time_unit();
+index.capacitive_load_unit(); index.energy_unit_joules();
+index.templates();                    // HashMap<String, Vec<Option<String>>>
+index.attributes();                   // Vec<(String, String)>
+
+// CPU limit for every parallel reader (same as def_tools.set_threads):
+threads::set_threads(Some(4)).unwrap();
+```
+
+All core errors are `core::Error(String)` (with `From<String>` and
+`From<io::Error>`); the indexed APIs use their own `ParseLoadError` /
+`CellLookupError` / `CellSourceError`. Python-side behavior is untouched:
+the extension wraps these same types.
