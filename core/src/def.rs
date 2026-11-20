@@ -1023,6 +1023,7 @@ pub fn write_def_cache_impl(def_path: &Path, cache_dir: &Path) -> Result<(), Str
 
     let mut lexer = Lexer::new(open_input(def_path).map_err(|e| e.to_string())?);
     let mut component_count = 0u64;
+    let mut components_seen = false;
     let mut net_count = 0u64;
     let mut connectivity_count = 0u64;
     let mut data_offset = CACHE_HEADER_LEN;
@@ -1044,6 +1045,10 @@ pub fn write_def_cache_impl(def_path: &Path, cache_dir: &Path) -> Result<(), Str
         } else if token.text.eq_ignore_ascii_case("COMPONENTS") {
             let _count = lexer.next_token().map_err(|e| e.to_string())?;
             expect_semicolon(&mut lexer).map_err(|e| e.to_string())?;
+            if components_seen && *writer.net_count > 0 {
+                return Err(second_components_error(token.offset));
+            }
+            components_seen = true;
             stream_components_to_cache(&mut lexer, &mut components, &mut component_count)?;
         } else if token.text.eq_ignore_ascii_case("NETS") {
             let _count = lexer.next_token().map_err(|e| e.to_string())?;
@@ -2053,10 +2058,7 @@ pub(crate) fn collect_def_connectivity(def_path: &Path) -> Result<Connectivity, 
             let _count = lexer.next_token().map_err(|e| e.to_string())?;
             expect_semicolon(&mut lexer).map_err(|e| e.to_string())?;
             if scan.nets_added {
-                return Err(format!(
-                    "COMPONENTS section near DEF byte {} follows NETS/SPECIALNETS that were already read; COMPONENTS must come before the nets it follows",
-                    token.offset
-                ));
+                return Err(second_components_error(token.offset));
             }
             collect_component_section(&mut lexer, &mut scan.builder)?;
             scan.components_seen = true;
@@ -2073,6 +2075,14 @@ pub(crate) fn collect_def_connectivity(def_path: &Path) -> Result<Connectivity, 
     }
     scan.release_held()?;
     Ok(scan.builder.finish())
+}
+
+/// The error for a second COMPONENTS section once nets were resolved; the
+/// DEF-backed readers and `write_def_cache` report it identically.
+fn second_components_error(offset: u64) -> String {
+    format!(
+        "second COMPONENTS section near DEF byte {offset}: a DEF has one COMPONENTS section, and nets were already resolved against the first"
+    )
 }
 
 /// The builder plus the net records waiting for COMPONENTS.
@@ -2670,8 +2680,16 @@ pub(crate) fn read_string_into<R: Read>(input: &mut R, buf: &mut String) -> Resu
     let len = read_u64(input)?;
     let mut bytes = std::mem::take(buf).into_bytes();
     bytes.clear();
-    bytes.resize(len as usize, 0);
-    input.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+    // `read_to_end` grows as bytes arrive, so a corrupt length fails at EOF
+    // instead of touching `len` bytes first.
+    input
+        .by_ref()
+        .take(len)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 != len {
+        return Err("failed to fill whole buffer".to_string());
+    }
     *buf = String::from_utf8(bytes).map_err(|e| e.to_string())?;
     Ok(())
 }

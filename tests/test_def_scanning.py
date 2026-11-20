@@ -218,9 +218,25 @@ def test_components_after_nets_is_an_error_with_a_byte_offset(tmp_path: Path) ->
     second = text.rindex("COMPONENTS 3")
 
     with pytest.raises(
-        Exception, match=rf"COMPONENTS section near DEF byte {second} follows NETS"
+        Exception, match=rf"second COMPONENTS section near DEF byte {second}:"
     ):
         _trace(design)
+
+
+def test_cache_create_refuses_a_second_components_section_after_nets(
+    tmp_path: Path,
+) -> None:
+    # The cache path rejects the same input, with the same error, as the
+    # DEF-backed readers.
+    text = HEADER + COMP + NETS + COMP + "END DESIGN\n"
+    design = tmp_path / "d.def"
+    design.write_text(text, encoding="utf-8")
+    second = text.rindex("COMPONENTS 3")
+
+    with pytest.raises(
+        Exception, match=rf"second COMPONENTS section near DEF byte {second}:"
+    ):
+        def_tools.write_def_cache(design, tmp_path / "cache")
 
 
 def test_cache_round_trip_with_duplicate_and_unknown_instances(tmp_path: Path) -> None:
@@ -485,3 +501,48 @@ def test_fanout_clock_cell_traversal_memory_is_bounded(tmp_path: Path) -> None:
         timeout=120,
     )
     assert result.returncode == 0, result.stderr[-2000:]
+
+
+# Item 7: roots whose instance is not a plain, unique component. Expected
+# values are the output of the reference build (e98bd32) on the same DEFs.
+ONLY_IN_NETS_DEF = (
+    HEADER
+    + "COMPONENTS 2 ;\n  - u0 INV + PLACED ( 0 0 ) N ;\n  - u1 INV + PLACED ( 10 0 ) N ;\n"
+    + "END COMPONENTS\nNETS 2 ;\n  - n1 ( g Y ) ( u0 A ) ;\n  - n2 ( u0 Y ) ( u1 A ) ;\n"
+    + "END NETS\nEND DESIGN\n"
+)
+DUPLICATE_DEF = (
+    HEADER
+    + "COMPONENTS 4 ;\n  - u1 INV + PLACED ( 0 0 ) N ;\n  - u1 BUF + PLACED ( 0 0 ) N ;\n"
+    + "  - u2 INV + PLACED ( 10 0 ) N ;\n  - u3 INV + PLACED ( 20 0 ) N ;\nEND COMPONENTS\n"
+    + "NETS 3 ;\n  - n1 ( u1 Y ) ( u2 A ) ;\n  - n2 ( u1 Z ) ( u3 A ) ;\n"
+    + "  - n0 ( u1 I ) ( u1 A ) ;\nEND NETS\nEND DESIGN\n"
+)
+BUF_ROLE = ("BUF", ["I"], ["Z"], False, [])
+
+
+def test_pin_root_on_an_instance_that_only_appears_in_nets(tmp_path: Path) -> None:
+    design = tmp_path / "d.def"
+    design.write_text(ONLY_IN_NETS_DEF, encoding="utf-8")
+
+    cells = _native.clock_tree_cells(design, ["pin:g/Y"], INV_ROLES, False)
+    pruned = _native.clock_tree_cells(design, ["pin:g/Y"], INV_ROLES, True)
+
+    assert cells == ["u0", "u1"]
+    assert pruned == []
+
+
+def test_cell_root_on_a_duplicated_component_uses_the_last_definition(
+    tmp_path: Path,
+) -> None:
+    # u1 is defined as INV, then as BUF; nets resolve to the BUF definition, so
+    # only its I -> Z arc (not INV's A -> Y) carries the clock.
+    design = tmp_path / "d.def"
+    design.write_text(DUPLICATE_DEF, encoding="utf-8")
+
+    def trace(roles: list[Any]) -> list[str]:
+        return _native.clock_tree_cells(design, ["cell:u1"], roles, False)
+
+    assert trace(INV_ROLES + [BUF_ROLE]) == ["u3"]
+    assert trace(INV_ROLES) == []
+    assert trace([BUF_ROLE]) == []
