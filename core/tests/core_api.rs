@@ -1,14 +1,15 @@
 //! Integration tests for the public plain-Rust API of `open_eda_file_tools_core`
-//! (issue #12): DEF instance bboxes, LEF macro sizes, and the Liberty
-//! attribute-only / LibraryIndex surface.
+//! DEF instance bboxes and clock objects, LEF cells, and Liberty
+//! attributes and LibraryIndex.
 
 use std::path::{Path, PathBuf};
 
 use open_eda_file_tools_core::Error;
 use open_eda_file_tools_core::def::{
-    SkippedRoutes, dbu_per_micron, scan_instance_bboxes, scan_net_shapes,
+    ClockObjectResolution, MacroPinRole, SkippedRoutes, clock_object_instances, dbu_per_micron,
+    scan_instance_bboxes, scan_instance_bboxes_with_library, scan_net_shapes,
 };
-use open_eda_file_tools_core::lef::{MacroSize, macro_sizes};
+use open_eda_file_tools_core::lef::{MacroSize, macro_sizes, parse_cell_lef};
 use open_eda_file_tools_core::liberty::{
     CellAttributes, LibraryIndex, ParseLoadError, cell_attributes,
 };
@@ -193,6 +194,149 @@ fn test_macro_sizes_microns() {
     assert_eq!(
         sizes.get("INV").map(|size| (size.width_um, size.height_um)),
         Some((1.2, 2.4))
+    );
+}
+
+#[test]
+fn test_cell_lef_exposes_pin_metadata_from_last_macro_definition() {
+    let tmp = temp_dir("cell_lef");
+    let first = write_lef(&tmp);
+    let second = write(
+        &tmp,
+        "updated.lef",
+        "MACRO INV\n\
+         ORIGIN -0.2 0.3 ;\nSIZE 1.25 BY 2.5 ;\n\
+         PIN A\nDIRECTION INPUT ;\nEND A\n\
+         PIN Y\nDIRECTION OUTPUT TRISTATE ;\nEND Y\n\
+         PIN VPWR\nDIRECTION INOUT ;\nUSE POWER ;\nEND VPWR\n\
+         PIN VGND\nUSE GROUND ;\nEND VGND\n\
+         END INV\n",
+    );
+
+    let library = parse_cell_lef(&[first, second]).unwrap();
+    assert_eq!(library.macros().len(), 1);
+    assert_eq!(library.duplicate_macro_names(), ["INV"]);
+    let cell = library.macro_by_name("INV").unwrap();
+    assert_eq!(cell.name, "INV");
+    assert_eq!(
+        (cell.width, cell.height, cell.origin_x, cell.origin_y),
+        (1.25, 2.5, -0.2, 0.3)
+    );
+    let pins: Vec<_> = cell
+        .pins()
+        .iter()
+        .map(|pin| {
+            (
+                pin.name.as_str(),
+                pin.direction.as_deref(),
+                pin.use_kind.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        pins,
+        [
+            ("A", Some("input"), None),
+            ("Y", Some("output"), None),
+            ("VPWR", Some("inout"), Some("power")),
+            ("VGND", None, Some("ground")),
+        ]
+    );
+    assert_eq!(cell.pin("VPWR").unwrap().use_kind.as_deref(), Some("power"));
+}
+
+#[test]
+fn test_scan_instance_bboxes_reuses_lef_after_source_is_removed() {
+    let tmp = temp_dir("bbox_library");
+    let lef = write_lef(&tmp);
+    let def = write_def(&tmp, DEF);
+    let def_2000 = write(&tmp, "other.def", &DEF.replace("1000", "2000"));
+    let library = parse_cell_lef(std::slice::from_ref(&lef)).unwrap();
+    let path_rows: Vec<_> = scan_instance_bboxes(&def, std::slice::from_ref(&lef))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    std::fs::remove_file(lef).unwrap();
+
+    let shared_rows: Vec<_> = scan_instance_bboxes_with_library(&def, &library)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(shared_rows, path_rows);
+    let scaled_rows: Vec<_> = scan_instance_bboxes_with_library(&def_2000, &library)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!((scaled_rows[0].urx, scaled_rows[0].ury), (2410, 4820));
+    assert_eq!((scaled_rows[1].urx, scaled_rows[1].ury), (4830, 2440));
+}
+
+#[test]
+fn test_clock_object_resolution_classifies_explicit_nets_and_pins() {
+    let tmp = temp_dir("clock_objects");
+    let path = write_def(
+        &tmp,
+        r"COMPONENTS 5 ;
+  - u\[0\] BUF ;
+  - z\/buf BUF ;
+  - sink BUF ;
+  - ff FF ;
+  - unknown NO_ROLE ;
+END COMPONENTS
+NETS 1 ;
+  - n\/1 ( u\[0\] Y ) ( sink A ) ( ff Q ) ( unknown X ) ( PIN clk ) ;
+END NETS
+",
+    );
+    let macros = [
+        MacroPinRole {
+            macro_name: "BUF".into(),
+            inputs: vec!["A".into()],
+            outputs: vec!["Y".into()],
+            endpoint: false,
+            clock_pins: vec![],
+        },
+        MacroPinRole {
+            macro_name: "FF".into(),
+            inputs: vec!["CK".into()],
+            outputs: vec!["Q".into()],
+            endpoint: true,
+            clock_pins: vec!["CK".into()],
+        },
+    ];
+    let nets = ["missing_z".into(), "n/1".into(), "missing_a".into()];
+    let pins = [
+        ("z/buf".into(), "A".into()),
+        (r"z\/buf".into(), "Y".into()),
+        ("u[0]".into(), "UNKNOWN_PIN".into()),
+        ("ff".into(), "CK".into()),
+        ("-".into(), "clk".into()),
+        ("gone".into(), "A".into()),
+        ("-".into(), "missing_port".into()),
+    ];
+    let resolution = clock_object_instances(&path, &nets, &pins, &macros).unwrap();
+    assert_eq!(
+        resolution,
+        ClockObjectResolution {
+            instances: vec![r"u\[0\]".into(), r"z\/buf".into()],
+            unmatched_nets: vec!["missing_z".into(), "missing_a".into()],
+            unmatched_pins: vec![
+                ("gone".into(), "A".into()),
+                ("-".into(), "missing_port".into()),
+            ],
+            unclassified: vec!["unknown".into()],
+        }
+    );
+}
+
+#[test]
+fn test_clock_object_resolution_keeps_tokenizer_errors_typed() {
+    let tmp = temp_dir("clock_error");
+    let path = write_def(&tmp, "NETS 1 ;\n  - n ( PIN A ) + ROUTED M1 ( 1 2 )");
+    let err = clock_object_instances(&path, &[], &[], &[]).unwrap_err();
+    assert!(
+        matches!(&err, Error::Io(io) if io.kind() == std::io::ErrorKind::UnexpectedEof),
+        "{err:?}"
     );
 }
 
@@ -486,6 +630,14 @@ fn test_missing_files_report_not_found() {
     assert_eq!(kind(err), ErrorKind::NotFound);
     assert_eq!(
         kind(macro_sizes(&[missing.clone()]).unwrap_err()),
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        kind(parse_cell_lef(std::slice::from_ref(&missing)).unwrap_err()),
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        kind(clock_object_instances(&missing, &[], &[], &[]).unwrap_err()),
         ErrorKind::NotFound
     );
 

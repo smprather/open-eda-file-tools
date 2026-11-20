@@ -1,5 +1,5 @@
-//! The plain-Rust core of open-eda-file-tools: LEF/DEF readers and the
-//! Liberty parser with no pyo3, Arrow or Parquet in scope.
+//! The plain-Rust core of open-eda-file-tools: LEF, DEF, Liberty, SPEF, and
+//! DSPF readers with no pyo3, Arrow, or Parquet in scope.
 //!
 //! The Python extension (`open-eda-file-tools-native`, the `_native` module)
 //! wraps these types behind pyo3; nothing here requires Python.
@@ -14,6 +14,7 @@ pub(crate) mod connectivity;
 pub mod def;
 pub mod lef;
 pub mod liberty;
+pub mod pex;
 pub mod threads;
 
 /// A plain failure from the core API. A failure that surfaced as an

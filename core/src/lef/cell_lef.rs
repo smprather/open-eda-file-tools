@@ -68,48 +68,97 @@ fn context(path: &Path, macro_name: &str, pin_name: Option<&str>) -> String {
 // Micron-domain model
 // ---------------------------------------------------------------------------
 
+/// A pin-port rectangle in LEF microns.
 #[derive(Debug)]
 pub struct RectData {
+    /// LEF layer name.
     pub layer: String,
+    /// Lower x coordinate.
     pub x0: f64,
+    /// Lower y coordinate.
     pub y0: f64,
+    /// Upper x coordinate.
     pub x1: f64,
+    /// Upper y coordinate.
     pub y1: f64,
 }
 
+/// One LEF `PORT` group.
 #[derive(Debug, Default)]
 pub struct PortData {
+    /// Supported `RECT` geometries in file order.
     pub rects: Vec<Arc<RectData>>,
+    /// Whether the port contained geometry the parser skipped.
     pub unsupported: bool,
 }
 
+/// A LEF macro pin and its metadata.
 #[derive(Debug)]
 pub struct PinData {
+    /// Name from the `PIN` declaration.
     pub name: String,
+    /// Lowercase `DIRECTION` keyword (for example, `"inout"`), if present.
     pub direction: Option<String>,
+    /// Lowercase `USE` keyword (for example, `"power"`), if present.
     pub use_kind: Option<String>,
+    /// Port groups in file order.
     pub ports: Vec<Arc<PortData>>,
 }
 
+/// A cell macro with dimensions and origin in LEF microns.
 #[derive(Debug)]
 pub struct MacroData {
+    /// Name from the `MACRO` declaration.
     pub name: String,
+    /// Width from `SIZE`.
     pub width: f64,
+    /// Height from `SIZE`.
     pub height: f64,
+    /// Origin x coordinate, or zero if omitted.
     pub origin_x: f64,
+    /// Origin y coordinate, or zero if omitted.
     pub origin_y: f64,
-    pub pins: Vec<Arc<PinData>>,
-    pub pin_index: HashMap<String, usize>,
+    pins: Vec<Arc<PinData>>,
+    pin_index: HashMap<String, usize>,
 }
 
+impl MacroData {
+    /// Pins in LEF declaration order.
+    pub fn pins(&self) -> &[Arc<PinData>] {
+        &self.pins
+    }
+
+    /// Look up a pin by its case-sensitive LEF name.
+    pub fn pin(&self, name: &str) -> Option<&Arc<PinData>> {
+        self.pin_index.get(name).map(|&index| &self.pins[index])
+    }
+}
+
+/// Cell macros parsed from one or more LEF files.
 #[derive(Debug, Default)]
 pub struct LibraryData {
-    pub macros: Vec<Arc<MacroData>>,
-    pub macro_index: HashMap<String, usize>,
-    pub duplicates: Vec<String>,
+    macros: Vec<Arc<MacroData>>,
+    macro_index: HashMap<String, usize>,
+    pub(crate) duplicates: Vec<String>,
 }
 
 impl LibraryData {
+    /// Macros in first-seen order, with the last definition of each name.
+    pub fn macros(&self) -> &[Arc<MacroData>] {
+        &self.macros
+    }
+
+    /// Look up a macro by its case-sensitive LEF name.
+    pub fn macro_by_name(&self, name: &str) -> Option<&Arc<MacroData>> {
+        self.macro_index.get(name).map(|&index| &self.macros[index])
+    }
+
+    /// Names of macros defined more than once, listed once each in the order
+    /// the duplicates were encountered.
+    pub fn duplicate_macro_names(&self) -> &[String] {
+        &self.duplicates
+    }
+
     /// Last definition wins; the macro keeps its first-seen position so macro
     /// order stays deterministic across files.
     fn insert(&mut self, data: MacroData) {
@@ -633,8 +682,37 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// Public Rust API (issue #12)
+// Public Rust API
 // ---------------------------------------------------------------------------
+
+/// Read cell macros, pin metadata, and supported pin-port geometry from plain
+/// or gzipped LEF files, in path order. Duplicate macros use the last
+/// definition. An empty path list yields an empty library.
+///
+/// All dimensions and coordinates are in LEF microns. Pass the same library to
+/// [`crate::def::scan_instance_bboxes_with_library`] to scan a DEF using that
+/// design's database units.
+///
+/// ```no_run
+/// use std::path::{Path, PathBuf};
+/// use open_eda_file_tools_core::{def, lef};
+///
+/// # fn main() -> Result<(), open_eda_file_tools_core::Error> {
+/// let library = lef::parse_cell_lef(&[PathBuf::from("cells.lef")])?;
+/// if let Some(cell) = library.macro_by_name("BUF") {
+///     for pin in cell.pins() {
+///         println!("{} {:?} {:?}", pin.name, pin.direction, pin.use_kind);
+///     }
+/// }
+/// for bbox in def::scan_instance_bboxes_with_library(Path::new("chip.def"), &library)? {
+///     println!("{:?}", bbox?);
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub fn parse_cell_lef(paths: &[PathBuf]) -> Result<LibraryData, crate::Error> {
+    Ok(parse_library(paths, None, true)?)
+}
 
 /// A LEF macro's size in microns (`SIZE w BY h`).
 #[derive(Clone, Copy, Debug, PartialEq)]

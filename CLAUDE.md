@@ -25,12 +25,14 @@ core/src/lib.rs             Crate root: public re-exports and `Error`
 core/src/liberty.rs         Liberty lexer/parser/evaluator/data model + LibraryIndex + public API
 core/src/def.rs             DEF scanner, bbox/net-shape/clock logic, cache (no Arrow)
 core/src/lef/               Shared LEF/DEF tokenizer (`lexer.rs`) + cell LEF parser (`cell_lef.rs`)
+core/src/pex.rs             SPEF/DSPF parser, summaries, and per-net RC data
 core/src/threads.rs         Process-wide CPU limit (`set_threads`)
 src/                        The `_native` cdylib (pyo3 shell over core):
 src/lib.rs                  Liberty pyclasses/pyfunctions + pymodule registration
 src/def.rs                  DEF pyclasses/pyfunctions + the Arrow/Parquet writer
 src/lef/                    LEF pyclasses/pyfunctions (python.rs)
-src/pex.rs, src/otw.rs      SPEF/DSPF and OTW readers (pyo3)
+src/pex.rs                  SPEF/DSPF pyclasses and pyfunctions
+src/otw.rs                  OTW reader and Python bindings
 src/threads.rs              `set_threads`/`get_threads` pyfunctions over core
 liberty_tools/              Liberty Python wrapper and comparison module
 viewer/, liberty_format/, logic2svg/
@@ -40,7 +42,7 @@ def_tools/                  DEF Python package, `def-tools` CLI, SDC reader, IO 
 sdc_tools/                  SDC clock extraction, `sdc-tools` CLI (Tcl stub evaluator)
 pex_tools/                  SPEF/DSPF parser, `pex-tools` CLI
 tests/                      Unified pytest suite (Liberty, LEF, DEF, SDC, PEX, and `tests/gen/design_gen.py`)
-core/tests/core_api.rs      Rust integration tests for the plain-Rust public API
+core/tests/                 Rust integration tests for the plain-Rust public API
 otw-design/                 Design workspace for the next OTW version (non-normative; `docs/otw.md` is the spec)
 docs/                       AI-agent and per-tool Markdown documentation (`docs/ai-api.md`, `docs/cli.md`, `docs/*.md`)
 ```
@@ -103,9 +105,9 @@ This is a **maturin/PyO3 hybrid over a plain-Rust core**: all parsing and
 data storage lives in `core/` (`open-eda-file-tools-core`, an rlib with no
 pyo3/Arrow/Parquet); the root crate is the thin `_native` cdylib whose
 pyclasses delegate to or convert from core types. **The bindings never
-re-implement parser logic** — they call `core::def`/`core::lef`/
-`core::liberty`; a handful of 5-line accessors and thin writer shims exist
-on both sides because pymethods call them on the pyclass. The Liberty
+re-implement parser logic**. They call `core::def`, `core::lef`,
+`core::liberty`, and `core::pex`. A handful of accessors and writer shims
+exist on both sides because pymethods call them on the pyclass. The Liberty
 writer machinery (surgical attribute edits) is pure Rust in
 `core::liberty` (`apply_edits_to_source`, `read_source_text`,
 `write_source_text`, …); the bindings' pyclass methods delegate to it and
