@@ -20,7 +20,7 @@ pub struct Token {
 }
 
 impl Token {
-    pub(super) fn is_keyword(&self, keyword: &str) -> bool {
+    pub(crate) fn is_keyword(&self, keyword: &str) -> bool {
         !self.quoted && self.text.eq_ignore_ascii_case(keyword)
     }
 }

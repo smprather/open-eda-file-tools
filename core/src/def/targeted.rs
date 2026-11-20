@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use super::{
     BATCH_SIZE, ByteTokens, InstanceBBox, Lexer, MacroDef, RawRecord, expect_semicolon,
     macro_sizes_in_dbu, open_input, parse_components_with_fallback, parse_connection_list,
-    parse_def_units, unescaped,
+    parse_def_units, skip_unrequested_def_data, unescaped,
 };
 use crate::Error;
 use crate::connectivity::Conn;
@@ -61,8 +61,7 @@ pub fn scan_clock_nets_and_instances(
     let mut seen_components = false;
     let mut clock_nets = Vec::new();
     while let Some(token) = lexer.next_token()? {
-        let keyword = token.text.as_str();
-        if keyword.eq_ignore_ascii_case("UNITS") {
+        if token.is_keyword("UNITS") {
             if seen_components {
                 return Err(invalid("DEF UNITS must precede COMPONENTS").into());
             }
@@ -70,11 +69,11 @@ pub fn scan_clock_nets_and_instances(
             if dbu.is_some_and(|value| value <= 0) {
                 return Err(invalid("DEF UNITS must be positive").into());
             }
-        } else if keyword.eq_ignore_ascii_case("ROW") && !seen_components {
+        } else if token.is_keyword("ROW") && !seen_components {
             if let Some(pitch) = row_pitch(&mut lexer, token.offset)? {
                 site_pitch = Some(site_pitch.map_or(pitch, |prev: i64| prev.min(pitch)));
             }
-        } else if keyword.eq_ignore_ascii_case("COMPONENTS") {
+        } else if token.is_keyword("COMPONENTS") {
             if seen_components {
                 return Err(invalid("multiple DEF COMPONENTS sections").into());
             }
@@ -86,9 +85,9 @@ pub fn scan_clock_nets_and_instances(
                 &mut visit,
             )?;
             seen_components = true;
-        } else if keyword.eq_ignore_ascii_case("NETS") {
+        } else if token.is_keyword("NETS") {
             scan_nets(&mut lexer, &wanted, &mut clock_nets)?;
-        } else if keyword.eq_ignore_ascii_case("SPECIALNETS") {
+        } else if token.is_keyword("SPECIALNETS") {
             let count = section_count(&mut lexer, "SPECIALNETS")?;
             let mut seen = 0;
             while next_record(&mut lexer, "SPECIALNETS")?.is_some() {
@@ -96,31 +95,15 @@ pub fn scan_clock_nets_and_instances(
                 seen += 1;
             }
             check_count("SPECIALNETS", count, seen)?;
-        } else if keyword.eq_ignore_ascii_case("END") {
+        } else if token.is_keyword("END") {
             if lexer
                 .next_token()?
-                .is_some_and(|token| token.text.eq_ignore_ascii_case("DESIGN"))
+                .is_some_and(|token| token.is_keyword("DESIGN"))
             {
                 break;
             }
-        } else if keyword == "-"
-            || [
-                "VERSION",
-                "DESIGN",
-                "DIVIDERCHAR",
-                "BUSBITCHARS",
-                "TECHNOLOGY",
-                "ARRAY",
-                "FLOORPLAN",
-                "DIEAREA",
-                "TRACKS",
-                "GCELLGRID",
-                "HISTORY",
-            ]
-            .iter()
-            .any(|value| keyword.eq_ignore_ascii_case(value))
-        {
-            lexer.skip_until_semicolon()?;
+        } else {
+            skip_unrequested_def_data(&mut lexer, &token)?;
         }
     }
     if !seen_components {
@@ -189,7 +172,7 @@ fn scan_nets(
     while let Some(offset) = next_record(lexer, "NETS")? {
         let name = lexer
             .next_token()?
-            .filter(|token| token.text != ";")
+            .filter(|token| !token.is_keyword(";"))
             .ok_or_else(|| invalid("missing DEF net name"))?
             .text;
         seen += 1;
@@ -258,25 +241,29 @@ fn next_record(lexer: &mut DefLexer, section: &str) -> io::Result<Option<u64>> {
             format!("missing END {section}"),
         )
     })?;
-    if token.text == "-" {
+    if token.is_keyword("-") {
         return Ok(Some(token.offset));
     }
-    if token.text.eq_ignore_ascii_case("END") {
-        if !lexer
-            .next_token()?
-            .is_some_and(|token| token.text.eq_ignore_ascii_case(section))
-        {
-            return Err(invalid(format!(
-                "expected END {section} near DEF byte {}",
-                token.offset
-            )));
-        }
+    if token.is_keyword("END") {
+        expect_end(lexer, section, token.offset)?;
         return Ok(None);
     }
     Err(invalid(format!(
         "expected {section} record near DEF byte {}",
         token.offset
     )))
+}
+
+fn expect_end(lexer: &mut DefLexer, section: &str, offset: u64) -> io::Result<()> {
+    if !lexer
+        .next_token()?
+        .is_some_and(|token| token.is_keyword(section))
+    {
+        return Err(invalid(format!(
+            "expected END {section} near DEF byte {offset}"
+        )));
+    }
+    Ok(())
 }
 
 fn section_count(lexer: &mut DefLexer, section: &str) -> io::Result<usize> {

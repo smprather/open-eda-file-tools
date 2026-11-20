@@ -1,5 +1,6 @@
 use rayon::prelude::*;
 use std::borrow::Cow;
+use std::cell::LazyCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions, create_dir_all};
@@ -8,7 +9,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::connectivity::{Adjacency, Conn, Connectivity, ConnectivityBuilder, NetConns, PORT};
-use crate::lef::{Lexer, open_input};
+use crate::lef::{Lexer, Token, open_input};
 
 mod targeted;
 pub use targeted::{ClockNetRecord, DefConnection, TargetedDefScan, scan_clock_nets_and_instances};
@@ -290,6 +291,7 @@ fn roles_by_macro<'a>(
 /// Trace clock-tree cells forward from symbolic SDC roots in an on-disk DEF.
 ///
 /// Roots are `port:NAME`, `net:NAME`, `pin:INSTANCE/PIN`, or `cell:INSTANCE`.
+/// Bare targets are treated as ports, or as pins if they contain a slash.
 /// Combinational cells propagate from clock-through inputs to their outputs.
 /// Sequential endpoints terminate that propagation and are included when a
 /// known clock net is driven by one of their outputs. With `prune`, retain
@@ -315,15 +317,38 @@ pub fn clock_tree_cells(
     for net in 0..c.nets.len() as u32 {
         net_by_name.insert(c.nets.get(net), net);
     }
+    // Unescaped aliases are needed only when an exact root lookup misses.
+    let net_aliases =
+        LazyCell::new(|| escaped_names((0..c.nets.len() as u32).map(|id| (id, c.nets.get(id)))));
+    let component_aliases =
+        LazyCell::new(|| escaped_names((0..c.component_count).map(|id| (id, c.instances.get(id)))));
+    let net_id = |name: &str| {
+        net_by_name.get(name).copied().or_else(|| {
+            let alias = unescaped(name);
+            net_by_name
+                .get(alias.as_ref())
+                .or_else(|| net_aliases.get(alias.as_ref()))
+                .copied()
+        })
+    };
+    let component_id = |name: &str| {
+        components.get(name).copied().or_else(|| {
+            let alias = unescaped(name);
+            components
+                .get(alias.as_ref())
+                .or_else(|| component_aliases.get(alias.as_ref()))
+                .copied()
+        })
+    };
 
     let mut seeds: Vec<u32> = Vec::new();
     for root in roots {
         collect_root_nets(
             root,
             &c,
-            &net_by_name,
+            &net_id,
             &adjacency,
-            &components,
+            &component_id,
             &roles,
             &mut seeds,
         );
@@ -562,49 +587,65 @@ pub fn clock_object_instances(
     })
 }
 
-pub(crate) fn collect_root_nets(
+fn escaped_names<'a>(names: impl Iterator<Item = (u32, &'a str)>) -> HashMap<String, u32> {
+    names
+        .filter_map(|(id, name)| match unescaped(name) {
+            Cow::Owned(alias) => Some((alias, id)),
+            Cow::Borrowed(_) => None,
+        })
+        .collect()
+}
+
+fn collect_root_nets(
     root: &str,
     c: &Connectivity,
-    net_by_name: &HashMap<&str, u32>,
+    net_id: &impl Fn(&str) -> Option<u32>,
     adjacency: &Adjacency,
-    components: &HashMap<&str, u32>,
+    component_id: &impl Fn(&str) -> Option<u32>,
     roles: &[Option<&MacroPinRole>],
     seeds: &mut Vec<u32>,
 ) {
-    // Components first (last duplicate wins), then instances seen only in nets.
-    let instance_id = |name: &str| -> Option<u32> {
-        components.get(name).copied().or_else(|| {
-            (c.component_count..c.instances.len() as u32).find(|&id| c.instances.get(id) == name)
-        })
-    };
-    if let Some(name) = root.strip_prefix("port:") {
-        if let Some(&index) = net_by_name.get(name) {
-            seeds.push(index);
+    let (kind, name) = root.split_once(':').unwrap_or_else(|| {
+        if root.contains('/') {
+            ("pin", root)
+        } else {
+            ("port", root)
         }
+    });
+    if kind == "port" {
+        let initial_len = seeds.len();
+        let port_name = unescaped(name);
         for net in 0..c.nets.len() as u32 {
             if c.conns(net)
-                .any(|(instance, pin)| instance == PORT && c.pins.get(pin) == name)
+                .any(|(instance, pin)| instance == PORT && unescaped(c.pins.get(pin)) == port_name)
             {
                 seeds.push(net);
             }
         }
-    } else if let Some(name) = root.strip_prefix("net:") {
-        if let Some(&index) = net_by_name.get(name) {
-            seeds.push(index);
+        if seeds.len() == initial_len {
+            seeds.extend(net_id(name));
         }
-    } else if let Some(path) = root.strip_prefix("pin:") {
-        let Some((instance, pin)) = split_root_pin(path) else {
+    } else if kind == "net" {
+        seeds.extend(net_id(name));
+    } else if kind == "pin" {
+        let Some((instance, pin)) = split_root_pin(name) else {
             return;
         };
-        if let Some(id) = instance_id(instance) {
+        let id = component_id(instance).or_else(|| {
+            let name = unescaped(instance);
+            (c.component_count..c.instances.len() as u32)
+                .find(|&id| unescaped(c.instances.get(id)) == name)
+        });
+        if let Some(id) = id {
+            let pin = unescaped(pin);
             for (net, conn_pin) in adjacency.of(id) {
-                if c.pins.get(conn_pin) == pin {
+                if unescaped(c.pins.get(conn_pin)) == pin {
                     seeds.push(net);
                 }
             }
         }
-    } else if let Some(instance) = root.strip_prefix("cell:") {
-        let Some(&id) = components.get(instance) else {
+    } else if kind == "cell" {
+        let Some(id) = component_id(name) else {
             return;
         };
         let Some(role) = roles[c.instance_macro[id as usize] as usize] else {
@@ -2108,10 +2149,7 @@ fn collect_def_connectivity(def_path: &Path) -> Result<Connectivity, crate::Erro
     let mut scan = ConnectivityScan::default();
 
     while let Some(token) = lexer.next_token()? {
-        if token.text == "-" {
-            // A record of a section this pass does not read.
-            lexer.skip_until_semicolon()?;
-        } else if token.text.eq_ignore_ascii_case("COMPONENTS") {
+        if token.is_keyword("COMPONENTS") {
             let _count = lexer.next_token()?;
             expect_semicolon(&mut lexer)?;
             if scan.nets_added {
@@ -2120,18 +2158,86 @@ fn collect_def_connectivity(def_path: &Path) -> Result<Connectivity, crate::Erro
             collect_component_section(&mut lexer, &mut scan.builder)?;
             scan.components_seen = true;
             scan.release_held()?;
-        } else if token.text.eq_ignore_ascii_case("NETS") {
+        } else if token.is_keyword("NETS") {
             let _count = lexer.next_token()?;
             expect_semicolon(&mut lexer)?;
             collect_net_connectivity(&mut lexer, "NETS", &mut scan)?;
-        } else if token.text.eq_ignore_ascii_case("SPECIALNETS") {
+        } else if token.is_keyword("SPECIALNETS") {
             let _count = lexer.next_token()?;
             expect_semicolon(&mut lexer)?;
             collect_net_connectivity(&mut lexer, "SPECIALNETS", &mut scan)?;
+        } else if token.is_keyword("END") {
+            if lexer
+                .next_token()?
+                .is_some_and(|token| token.is_keyword("DESIGN"))
+            {
+                break;
+            }
+        } else {
+            skip_unrequested_def_data(&mut lexer, &token)?;
         }
     }
     scan.release_held()?;
     Ok(scan.builder.finish())
+}
+
+fn skip_unrequested_def_data<R: Read>(lexer: &mut Lexer<R>, token: &Token) -> io::Result<()> {
+    if token.is_keyword("PROPERTYDEFINITIONS") {
+        loop {
+            let property = lexer.next_token()?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "missing END PROPERTYDEFINITIONS",
+                )
+            })?;
+            if property.is_keyword("END") {
+                if lexer
+                    .next_token()?
+                    .is_some_and(|end| end.is_keyword("PROPERTYDEFINITIONS"))
+                {
+                    return Ok(());
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "expected END PROPERTYDEFINITIONS",
+                ));
+            }
+            lexer.skip_until_semicolon()?;
+        }
+    }
+    if token.is_keyword("BEGINEXT") {
+        while let Some(content) = lexer.next_token()? {
+            if content.is_keyword("ENDEXT") {
+                return Ok(());
+            }
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "missing DEF ENDEXT",
+        ));
+    }
+    if [
+        "-",
+        "VERSION",
+        "DESIGN",
+        "DIVIDERCHAR",
+        "BUSBITCHARS",
+        "TECHNOLOGY",
+        "ARRAY",
+        "FLOORPLAN",
+        "UNITS",
+        "DIEAREA",
+        "ROW",
+        "TRACKS",
+        "GCELLGRID",
+        "HISTORY",
+    ]
+    .iter()
+    .any(|keyword| token.is_keyword(keyword))
+    {
+        lexer.skip_until_semicolon()?;
+    }
+    Ok(())
 }
 
 /// The error for a second COMPONENTS section once nets were resolved; the

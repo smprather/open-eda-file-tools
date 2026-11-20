@@ -20,15 +20,18 @@ fn fixture(def: &str) -> PathBuf {
 fn generated_clock_includes_divider_but_input_clock_does_not_forward_data() {
     let path = fixture(
         r#"
+        PROPERTYDEFINITIONS
+          COMPONENT marker STRING "NETS" ;
+        END PROPERTYDEFINITIONS
         COMPONENTS 3 ;
-        - div FF + PLACED ( 0 0 ) N ;
+        - div\[0\] FF + PLACED ( 0 0 ) N ;
         - sink FF + PLACED ( 0 0 ) N ;
         - data BUF + PLACED ( 0 0 ) N ;
         END COMPONENTS
         NETS 3 ;
-        - root ( PIN clk ) ( div CK ) ;
-        - generated ( div Q ) ( sink CK ) ;
-        - data_net ( div QN ) ( data A ) ;
+        - root ( PIN clk ) ( div\[0\] CK ) ;
+        - generated ( div\[0\] Q ) ( sink CK ) ;
+        - clk ( div\[0\] QN ) ( data A ) ;
         END NETS
         END DESIGN
     "#,
@@ -50,8 +53,8 @@ fn generated_clock_includes_divider_but_input_clock_does_not_forward_data() {
     ];
     for prune in [true, false] {
         assert_eq!(
-            def::clock_tree_cells(&path, &["pin:div/Q".into()], &roles, prune).unwrap(),
-            vec!["div"]
+            def::clock_tree_cells(&path, &["pin:div[0]/Q".into()], &roles, prune).unwrap(),
+            vec![r"div\[0\]"]
         );
         assert!(
             def::clock_tree_cells(&path, &["port:clk".into()], &roles, prune)
@@ -60,15 +63,15 @@ fn generated_clock_includes_divider_but_input_clock_does_not_forward_data() {
         );
     }
     let explicit = def::clock_object_instances(&path, &["generated".into()], &[], &roles).unwrap();
-    assert_eq!(explicit.instances, vec!["div"]);
+    assert_eq!(explicit.instances, vec![r"div\[0\]"]);
     let pin = def::clock_object_instances(
         &path,
         &[],
-        &[("div".into(), "Q".into()), ("sink".into(), "CK".into())],
+        &[("div[0]".into(), "Q".into()), ("sink".into(), "CK".into())],
         &roles,
     )
     .unwrap();
-    assert_eq!(pin.instances, vec!["div"]);
+    assert_eq!(pin.instances, vec![r"div\[0\]"]);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -77,6 +80,12 @@ fn targeted_scan_streams_bbox_and_only_selected_regular_net_connections() {
     let path = fixture(
         r#"
         UNITS DISTANCE MICRONS 2000 ;
+        PROPERTYDEFINITIONS
+          COMPONENT marker STRING "NETS" ;
+        END PROPERTYDEFINITIONS
+        BEGINEXT "vendor"
+          COMPONENTS "ENDEXT" ;
+        ENDEXT
         ROW r site 0 0 N DO 100 BY 1 STEP 125 0 ;
         SPECIALNETS 1 ;
         - n\[0\] ( PIN power ) ( invalid connection ignored ) ;

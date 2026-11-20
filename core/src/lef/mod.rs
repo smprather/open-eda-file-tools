@@ -12,6 +12,6 @@ pub use cell_lef::{
 // Used by the Python bindings for macro filtering and Python error mapping.
 #[doc(hidden)]
 pub use cell_lef::{LefError, parse_library};
-pub(crate) use lexer::Lexer;
 #[doc(hidden)]
 pub use lexer::open_input;
+pub(crate) use lexer::{Lexer, Token};

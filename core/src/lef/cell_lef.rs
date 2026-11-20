@@ -404,6 +404,12 @@ fn parse_metadata_file(path: &Path, mode: MacroMode) -> LefResult<MetadataFile> 
                 "UNITS" | "SPACING" | "IRDROP" | "PROPERTYDEFINITIONS" => {
                     skip_named_metadata_group(&mut lexer, path, &token.text, None)?;
                 }
+                "NOISETABLE" | "CORRECTIONTABLE" => {
+                    lexer.skip_statement(|| {
+                        format!("{}: unterminated {} header", path.display(), token.text)
+                    })?;
+                    skip_named_metadata_group(&mut lexer, path, &token.text, None)?;
+                }
                 "BEGINEXT" => {
                     lexer.skip_extension(|| format!("{}: unterminated BEGINEXT", path.display()))?
                 }

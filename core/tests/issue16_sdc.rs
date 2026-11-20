@@ -93,6 +93,21 @@ fn traces_sdc_clocks_through_def_using_targeted_liberty_roles() {
         def::clock_tree_cells(&layout.0, &roots, &roles, true).unwrap(),
         ["clkbuf", "div"]
     );
+    let sdc = Fixture::new(
+        r#"
+        create_clock -period 4 input_clk
+        create_generated_clock -source input_clk -divide_by 2 div/Q
+        "#,
+    );
+    let roots: Vec<_> = clocks(&sdc.0)
+        .unwrap()
+        .into_iter()
+        .flat_map(|clock| clock.sources)
+        .collect();
+    assert_eq!(
+        def::clock_tree_cells(&layout.0, &roots, &roles, true).unwrap(),
+        ["clkbuf", "div"]
+    );
 }
 
 fn tcl_available() -> bool {
