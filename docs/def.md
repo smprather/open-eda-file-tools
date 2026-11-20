@@ -184,16 +184,19 @@ Measured on a Ryzen 9 5900X (12 cores / 24 threads), files in page cache:
 
 | Command | 458 MB synthetic, 2M instances | 118 MB routed cva6, 302k instances |
 | --- | --- | --- |
-| `instances` CSV | 0.53 s | 0.08 s |
+| `instances` CSV | 0.55 s | 0.07 s |
 | `instances` Parquet | 0.46 s | 0.08 s |
-| `instances` table | 1.06 s | 0.15 s |
+| `instances` table | 1.06 s | 0.14 s |
 | `net-shapes` (one signal net) | 0.08 s | 0.02 s |
-| `cache create` | 1.24 s | 0.25 s |
-| clock trace (`sdc-tools clock-cells` core) | 2.66 s | 0.16 s |
+| `cache create` | 1.01 s | 0.24 s |
+| clock trace (`sdc-tools clock-cells` core) | 1.31 s | 0.11 s |
 
 The table format scans the DEF twice (column widths first). The clock trace
-holds every connection as two strings; that memory layout, not the scan, is
-now its main cost.
+runs on a flat id-based connectivity (`core/src/connectivity.rs`): names are
+stored once, connections are integer pairs. Against the previous per-string
+layout it takes 1.30 s instead of 2.52 s on the synthetic design (peak RSS
+724 MB instead of 1923 MB) and 0.12 s instead of 0.16 s on cva6 (91 MB
+instead of 159 MB).
 
 ## Python API
 

@@ -203,18 +203,6 @@ pub(crate) struct Placement {
     pub orient: &'static str,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct NetConn {
-    pub instance: Option<String>,
-    pub pin: String,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct NetInfo {
-    pub name: String,
-    pub conns: Vec<NetConn>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InstanceBBox {
     pub instance: String,
@@ -2626,32 +2614,6 @@ pub(crate) fn load_connectivity(cache_dir: &Path) -> Result<Connectivity, String
     }
     arena.add_all(&mut builder);
     Ok(builder.finish())
-}
-
-/// Temporary adapter for the consumers still on the per-name tables.
-#[allow(dead_code)] // removed with NetConn/NetInfo in Task 7
-pub(crate) fn legacy_tables(c: &Connectivity) -> (HashMap<String, String>, Vec<NetInfo>) {
-    let components = (0..c.component_count)
-        .map(|id| {
-            (
-                c.instances.get(id).to_string(),
-                c.macro_of(id).unwrap_or_default().to_string(),
-            )
-        })
-        .collect();
-    let nets = (0..c.nets.len() as u32)
-        .map(|net| NetInfo {
-            name: c.nets.get(net).to_string(),
-            conns: c
-                .conns(net)
-                .map(|(instance, pin)| NetConn {
-                    instance: (instance != PORT).then(|| c.instances.get(instance).to_string()),
-                    pin: c.pins.get(pin).to_string(),
-                })
-                .collect(),
-        })
-        .collect();
-    (components, nets)
 }
 
 pub(crate) fn write_header<W: Write>(

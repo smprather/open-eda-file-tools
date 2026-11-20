@@ -343,6 +343,14 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   like `NETS` inside VIAS/PINS records are never read as section keywords.
   The connectivity pass keeps only a net's connection list
   (`read_until_plus_or_semicolon`), never its routing.
+- **Connectivity is flat and id-based** (`core/src/connectivity.rs`). Instance
+  ids `0..component_count` follow COMPONENTS order (duplicates keep both
+  entries; nets resolve to the last definition); names seen only in nets get
+  later ids in first-seen order; `PORT = u32::MAX` is `( PIN name )`. Adjacency
+  lists entries in net order, then connection order, and is built sequentially.
+  `+ SYNTHESIZED` connections are accepted. A COMPONENTS section after nets
+  were read is an error naming the byte. Clock trace, clock-object resolution
+  and `clock-instances` all run on it; do not add per-connection strings.
 - **All route geometry comes from one state machine.** `parse_net_shapes_record`
   (`core/src/def.rs`) drives the direct scan, the Python iterator and the cache
   query. `read_route_point` resolves `*` against the previous point (an error
