@@ -1117,7 +1117,7 @@ pub fn write_clock_instances_csv_impl(
     clock_cell_patterns: &[String],
     output: Option<&Path>,
 ) -> Result<(), String> {
-    let (components, nets) = legacy_tables(&collect_def_connectivity(def_path)?);
+    let c = collect_def_connectivity(def_path)?;
     let patterns: Vec<String> = if clock_cell_patterns.is_empty() {
         vec!["clk".to_string()]
     } else {
@@ -1130,24 +1130,12 @@ pub fn write_clock_instances_csv_impl(
     match output {
         Some(path) => {
             let file = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            write_clock_instances_csv_stream(
-                &components,
-                &nets,
-                roots,
-                &patterns,
-                BufWriter::new(file),
-            )
+            write_clock_instances_csv_stream(&c, roots, &patterns, BufWriter::new(file))
         }
         None => {
             let stdout = io::stdout();
             let lock = stdout.lock();
-            write_clock_instances_csv_stream(
-                &components,
-                &nets,
-                roots,
-                &patterns,
-                BufWriter::new(lock),
-            )
+            write_clock_instances_csv_stream(&c, roots, &patterns, BufWriter::new(lock))
         }
     }
 }
@@ -1160,7 +1148,7 @@ pub fn write_clock_instances_csv_from_cache_impl(
     output: Option<&Path>,
 ) -> Result<(), String> {
     read_manifest(cache_dir)?;
-    let (components, nets) = legacy_tables(&load_connectivity(cache_dir)?);
+    let c = load_connectivity(cache_dir)?;
     let patterns: Vec<String> = if clock_cell_patterns.is_empty() {
         vec!["clk".to_string()]
     } else {
@@ -1173,46 +1161,23 @@ pub fn write_clock_instances_csv_from_cache_impl(
     match output {
         Some(path) => {
             let file = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            write_clock_instances_csv_stream(
-                &components,
-                &nets,
-                roots,
-                &patterns,
-                BufWriter::new(file),
-            )
+            write_clock_instances_csv_stream(&c, roots, &patterns, BufWriter::new(file))
         }
         None => {
             let stdout = io::stdout();
             let lock = stdout.lock();
-            write_clock_instances_csv_stream(
-                &components,
-                &nets,
-                roots,
-                &patterns,
-                BufWriter::new(lock),
-            )
+            write_clock_instances_csv_stream(&c, roots, &patterns, BufWriter::new(lock))
         }
     }
 }
 
 pub(crate) fn write_clock_instances_csv_stream<W: Write>(
-    components: &HashMap<String, String>,
-    nets: &[NetInfo],
+    c: &Connectivity,
     roots: &[(String, String, String)],
     clock_cell_patterns: &[String],
     mut out: W,
 ) -> Result<(), String> {
-    let mut instance_to_nets: HashMap<&str, Vec<usize>> = HashMap::new();
-    for (net_index, net) in nets.iter().enumerate() {
-        for conn in &net.conns {
-            if let Some(instance) = &conn.instance {
-                instance_to_nets
-                    .entry(instance.as_str())
-                    .or_default()
-                    .push(net_index);
-            }
-        }
-    }
+    let adjacency = c.adjacency();
 
     writeln!(
         out,
@@ -1222,14 +1187,8 @@ pub(crate) fn write_clock_instances_csv_stream<W: Write>(
 
     let mut buffer = String::with_capacity(64 * 1024);
     for (clock, root_type, root_name) in roots {
-        let initial_nets = seed_clock_nets(nets, root_type, root_name);
-        let rows = traverse_clock_instances(
-            components,
-            nets,
-            &instance_to_nets,
-            &initial_nets,
-            clock_cell_patterns,
-        );
+        let initial_nets = seed_clock_nets(c, root_type, root_name);
+        let rows = traverse_clock_instances(c, &adjacency, &initial_nets, clock_cell_patterns);
         for (instance, macro_name, net, is_clock_cell) in rows {
             append_csv_field(&mut buffer, clock);
             buffer.push(',');
@@ -1237,11 +1196,11 @@ pub(crate) fn write_clock_instances_csv_stream<W: Write>(
             buffer.push(',');
             append_csv_field(&mut buffer, root_name);
             buffer.push(',');
-            append_csv_field(&mut buffer, &instance);
+            append_csv_field(&mut buffer, instance);
             buffer.push(',');
-            append_csv_field(&mut buffer, &macro_name);
+            append_csv_field(&mut buffer, macro_name);
             buffer.push(',');
-            append_csv_field(&mut buffer, &net);
+            append_csv_field(&mut buffer, net);
             let _ = writeln!(&mut buffer, ",{}", is_clock_cell);
         }
     }
@@ -2353,68 +2312,74 @@ pub(crate) fn stream_nets_to_cache<R: Read, W1: Write, W2: Write, W3: Write>(
     writer.flush(&mut batch)
 }
 
-pub(crate) fn seed_clock_nets(nets: &[NetInfo], root_type: &str, root_name: &str) -> Vec<usize> {
+pub(crate) fn seed_clock_nets(c: &Connectivity, root_type: &str, root_name: &str) -> Vec<u32> {
+    let pin_root = if root_type == "pin" {
+        split_pin_name(root_name)
+    } else {
+        None
+    };
     let mut seeds = Vec::new();
-    for (index, net) in nets.iter().enumerate() {
-        if net.name == root_name {
-            seeds.push(index);
+    for net in 0..c.nets.len() as u32 {
+        if c.nets.get(net) == root_name {
+            seeds.push(net);
             continue;
         }
-        for conn in &net.conns {
-            match root_type {
-                "port" => {
-                    if conn.instance.is_none() && conn.pin == root_name {
-                        seeds.push(index);
-                        break;
-                    }
+        let hit = c.conns(net).any(|(instance, pin)| match root_type {
+            "port" => instance == PORT && c.pins.get(pin) == root_name,
+            "pin" => match pin_root {
+                Some((inst, pin_name)) => {
+                    instance != PORT
+                        && c.instances.get(instance) == inst
+                        && c.pins.get(pin) == pin_name
                 }
-                "pin" => {
-                    if let Some((inst, pin)) = split_pin_name(root_name) {
-                        if conn.instance.as_deref() == Some(inst) && conn.pin == pin {
-                            seeds.push(index);
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            }
+                None => false,
+            },
+            _ => false,
+        });
+        if hit {
+            seeds.push(net);
         }
     }
     seeds
 }
 
-pub(crate) fn traverse_clock_instances(
-    components: &HashMap<String, String>,
-    nets: &[NetInfo],
-    instance_to_nets: &HashMap<&str, Vec<usize>>,
-    initial_nets: &[usize],
+/// Instances reached from the seed nets as `(instance, macro, first net,
+/// is_clock_cell)`, sorted by instance name. The first net is the first one in
+/// breadth-first order that reached the instance.
+pub(crate) fn traverse_clock_instances<'a>(
+    c: &'a Connectivity,
+    adjacency: &Adjacency,
+    initial_nets: &[u32],
     patterns: &[String],
-) -> Vec<(String, String, String, bool)> {
-    let mut queue: VecDeque<usize> = initial_nets.iter().copied().collect();
-    let mut seen_nets = vec![false; nets.len()];
-    let mut seen_instances: HashMap<String, (String, String, bool)> = HashMap::new();
+) -> Vec<(&'a str, &'a str, &'a str, bool)> {
+    let mut queue: VecDeque<u32> = initial_nets.iter().copied().collect();
+    let mut seen_nets = vec![false; c.nets.len()];
+    // Per instance id: the first net that reached it and its clock-cell flag.
+    let mut seen_instances: Vec<Option<(u32, bool)>> = vec![None; c.instances.len()];
 
-    while let Some(net_index) = queue.pop_front() {
-        if net_index >= nets.len() || seen_nets[net_index] {
+    while let Some(net) = queue.pop_front() {
+        if seen_nets[net as usize] {
             continue;
         }
-        seen_nets[net_index] = true;
-        let net = &nets[net_index];
-        for conn in &net.conns {
-            let Some(instance) = &conn.instance else {
+        seen_nets[net as usize] = true;
+        for (instance, _) in c.conns(net) {
+            if instance == PORT {
                 continue;
+            }
+            let slot = &mut seen_instances[instance as usize];
+            let is_clock = match slot {
+                Some((_, is_clock)) => *is_clock,
+                None => {
+                    let is_clock =
+                        is_clock_cell(c.macro_of(instance).unwrap_or_default(), patterns);
+                    *slot = Some((net, is_clock));
+                    is_clock
+                }
             };
-            let macro_name = components.get(instance).cloned().unwrap_or_default();
-            let is_clock_cell = is_clock_cell(&macro_name, patterns);
-            seen_instances
-                .entry(instance.clone())
-                .or_insert_with(|| (macro_name.clone(), net.name.clone(), is_clock_cell));
-            if is_clock_cell {
-                if let Some(next_nets) = instance_to_nets.get(instance.as_str()) {
-                    for next_net in next_nets {
-                        if !seen_nets[*next_net] {
-                            queue.push_back(*next_net);
-                        }
+            if is_clock {
+                for (next_net, _) in adjacency.of(instance) {
+                    if !seen_nets[next_net as usize] {
+                        queue.push_back(next_net);
                     }
                 }
             }
@@ -2422,12 +2387,20 @@ pub(crate) fn traverse_clock_instances(
     }
 
     let mut rows: Vec<_> = seen_instances
-        .into_iter()
-        .map(|(instance, (macro_name, net, is_clock_cell))| {
-            (instance, macro_name, net, is_clock_cell)
+        .iter()
+        .enumerate()
+        .filter_map(|(id, seen)| {
+            let (net, is_clock) = (*seen)?;
+            let id = id as u32;
+            Some((
+                c.instances.get(id),
+                c.macro_of(id).unwrap_or_default(),
+                c.nets.get(net),
+                is_clock,
+            ))
         })
         .collect();
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows.sort_by(|a, b| a.0.cmp(b.0));
     rows
 }
 
@@ -2656,6 +2629,7 @@ pub(crate) fn load_connectivity(cache_dir: &Path) -> Result<Connectivity, String
 }
 
 /// Temporary adapter for the consumers still on the per-name tables.
+#[allow(dead_code)] // removed with NetConn/NetInfo in Task 7
 pub(crate) fn legacy_tables(c: &Connectivity) -> (HashMap<String, String>, Vec<NetInfo>) {
     let components = (0..c.component_count)
         .map(|id| {
