@@ -578,6 +578,26 @@ let skipped = shapes.skipped();   // SkippedRoutes { after_via, polygon, subnet 
 // LEF macro sizes in microns (last duplicate definition wins):
 let sizes: HashMap<String, lef::MacroSize> = lef::macro_sizes(&lef_paths)?;
 
+// Reuse parsed LEF data across DEF scans.
+let library = lef::parse_cell_lef(&lef_paths)?;
+if let Some(cell) = library.macro_by_name("BUF") {
+    for pin in cell.pins() {
+        println!("{} {:?} {:?}", pin.name, pin.direction, pin.use_kind);
+    }
+}
+let rows = def::scan_instance_bboxes_with_library(def_path, &library)?;
+
+// Resolve explicit DEF clock nets and (instance, pin) pairs.
+let roles = [def::MacroPinRole {
+    macro_name: "BUF".into(),
+    inputs: vec!["A".into()],
+    outputs: vec!["Y".into()],
+    endpoint: false,
+    clock_pins: Vec::new(),
+}];
+let resolution = def::clock_object_instances(def_path, &clock_nets, &clock_pins, &roles)?;
+// resolution.instances, .unmatched_nets, .unmatched_pins, .unclassified
+
 // Liberty attribute-only scan: lazy per-cell parse with table bodies
 // skipped; is_sequential = the cell has an ff or latch group.
 for cell in liberty::cell_attributes(lib_path)? {

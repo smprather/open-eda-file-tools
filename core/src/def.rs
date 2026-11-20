@@ -233,39 +233,26 @@ pub struct NetShape {
     pub ury: i64,
 }
 
-/// `(name, clock-through input pins, output pins, endpoint, clock pins)` for one
-/// Liberty cell, as built by `def_tools.clock_roles`.
-///
-/// * An *endpoint* (flip-flop, latch, memory) ends a clock trace.
-/// * An integrated clock gate is not an endpoint: its only clock-through input
-///   is its clock pin, so an enable pin never carries a clock into it.
-/// * *Clock pins* are the pins a clock is delivered to (`clock : true`,
-///   `clocked_on`, latch `enable`, `clock_gate_clock_pin`).
-#[doc(hidden)]
-pub type MacroRole = (String, Vec<String>, Vec<String>, bool, Vec<String>);
-
-#[derive(Clone, Copy)]
-pub(crate) struct RoleRef<'a> {
-    inputs: &'a [String],
-    outputs: &'a [String],
-    endpoint: bool,
-    clock_pins: &'a [String],
+/// Clock-related pin roles for one cell macro.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MacroPinRole {
+    /// Case-sensitive macro name used in DEF component records.
+    pub macro_name: String,
+    /// Input pins that can pass a clock through the cell. For an integrated
+    /// clock gate, include its clock input here.
+    pub inputs: Vec<String>,
+    /// Output pins that can drive a clock net.
+    pub outputs: Vec<String>,
+    /// Whether the macro ends a clock trace, as a flip-flop or latch does.
+    pub endpoint: bool,
+    /// Pins that receive a clock. Used by the forward clock-tracing routine.
+    pub clock_pins: Vec<String>,
 }
 
-pub(crate) fn role_map(macros: &[MacroRole]) -> HashMap<&str, RoleRef<'_>> {
+fn role_map(macros: &[MacroPinRole]) -> HashMap<&str, &MacroPinRole> {
     macros
         .iter()
-        .map(|(name, inputs, outputs, endpoint, clock_pins)| {
-            (
-                name.as_str(),
-                RoleRef {
-                    inputs,
-                    outputs,
-                    endpoint: *endpoint,
-                    clock_pins,
-                },
-            )
-        })
+        .map(|role| (role.macro_name.as_str(), role))
         .collect()
 }
 
@@ -275,10 +262,10 @@ pub(crate) fn has_pin(pins: &[String], pin: &str) -> bool {
 
 /// Roles by macro id (`None` for a macro without a Liberty cell), built once
 /// by name rather than per connection.
-pub(crate) fn roles_by_macro<'a>(
+fn roles_by_macro<'a>(
     c: &Connectivity,
-    macros: &'a [MacroRole],
-) -> Vec<Option<RoleRef<'a>>> {
+    macros: &'a [MacroPinRole],
+) -> Vec<Option<&'a MacroPinRole>> {
     let by_name = role_map(macros);
     (0..c.macros.len() as u32)
         .map(|id| by_name.get(c.macros.get(id)).copied())
@@ -289,16 +276,16 @@ pub(crate) fn roles_by_macro<'a>(
 pub fn clock_tree_cells_impl(
     def_path: &Path,
     roots: &[String],
-    macros: &[MacroRole],
+    macros: &[MacroPinRole],
     prune: bool,
 ) -> Result<Vec<String>, String> {
-    let c = collect_def_connectivity(def_path)?;
+    let c = collect_def_connectivity(def_path).map_err(|err| err.to_string())?;
     let roles = roles_by_macro(&c, macros);
-    let role_of = |instance: u32| -> Option<&RoleRef<'_>> {
+    let role_of = |instance: u32| -> Option<&MacroPinRole> {
         if instance >= c.component_count {
             return None;
         }
-        roles[c.instance_macro[instance as usize] as usize].as_ref()
+        roles[c.instance_macro[instance as usize] as usize]
     };
     let adjacency = c.adjacency();
     let components = c.component_lookup();
@@ -348,14 +335,14 @@ pub fn clock_tree_cells_impl(
             };
             let pin = c.pins.get(pin);
             if role.endpoint {
-                is_sink |= has_pin(role.clock_pins, pin);
+                is_sink |= has_pin(&role.clock_pins, pin);
                 continue;
             }
-            if role.outputs.is_empty() || !has_pin(role.inputs, pin) {
+            if role.outputs.is_empty() || !has_pin(&role.inputs, pin) {
                 continue;
             }
             // A clock gate reached on its clock pin is on the tree by itself.
-            if has_pin(role.clock_pins, pin) {
+            if has_pin(&role.clock_pins, pin) {
                 live.insert(instance);
             }
             let reached = reached_from.entry(instance).or_default();
@@ -365,7 +352,7 @@ pub fn clock_tree_cells_impl(
                 continue;
             }
             for (next_net, out_pin) in adjacency.of(instance) {
-                if has_pin(role.outputs, c.pins.get(out_pin)) {
+                if has_pin(&role.outputs, c.pins.get(out_pin)) {
                     drivers.entry(next_net).or_default().push(instance);
                     if !seen_nets[next_net as usize] {
                         queue.push_back(next_net);
@@ -419,16 +406,39 @@ pub(crate) fn unescaped(name: &str) -> Cow<'_, str> {
     }
 }
 
-#[doc(hidden)]
-pub type ClockObjectInstances = (Vec<String>, Vec<String>, Vec<(String, String)>, Vec<String>);
+/// Instance classification and diagnostics from explicit DEF clock objects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClockObjectResolution {
+    /// Classified instance names, deduplicated and sorted.
+    pub instances: Vec<String>,
+    /// Input clock net names absent from the DEF, in input order.
+    pub unmatched_nets: Vec<String>,
+    /// Input clock pins with an absent instance or top-level port, in input order.
+    pub unmatched_pins: Vec<(String, String)>,
+    /// Instances associated with a supplied clock object whose macros had no
+    /// supplied role, deduplicated and sorted.
+    pub unclassified: Vec<String>,
+}
 
-#[doc(hidden)]
-pub fn clock_object_instances_impl(
+/// Resolve explicit clock net names and `(instance, pin)` pairs against a DEF.
+///
+/// A non-endpoint instance is selected when one of its output pins drives a
+/// supplied net, or a supplied pair names one of its output or clock-through
+/// input pins. A pair with instance `"-"` denotes a top-level port, which is
+/// matched against the DEF net connections. A pin on a known instance that
+/// matches neither role list selects no instance.
+///
+/// DEF net, instance, and top-level port names are matched with backslash
+/// escapes removed. For an explicit pin pair, escapes are removed from the
+/// supplied pin name before it is compared with the macro role.
+/// Returned instance names retain their spelling in the DEF. If more than one
+/// role is supplied for a macro, the last role wins.
+pub fn clock_object_instances(
     def_path: &Path,
     clock_nets: &[String],
     clock_pins: &[(String, String)],
-    macros: &[MacroRole],
-) -> Result<ClockObjectInstances, String> {
+    macros: &[MacroPinRole],
+) -> Result<ClockObjectResolution, crate::Error> {
     let c = collect_def_connectivity(def_path)?;
     let macro_map = role_map(macros);
     let mut cells: HashSet<u32> = HashSet::new();
@@ -457,7 +467,7 @@ pub fn clock_object_instances_impl(
                         unclassified.insert(instance);
                     }
                     Some(role) => {
-                        if !role.endpoint && has_pin(role.outputs, c.pins.get(pin)) {
+                        if !role.endpoint && has_pin(&role.outputs, c.pins.get(pin)) {
                             cells.insert(instance);
                         }
                     }
@@ -499,7 +509,7 @@ pub fn clock_object_instances_impl(
                 }
                 Some(role) => {
                     if !role.endpoint
-                        && (has_pin(role.inputs, &pin_name) || has_pin(role.outputs, &pin_name))
+                        && (has_pin(&role.inputs, &pin_name) || has_pin(&role.outputs, &pin_name))
                     {
                         cells.insert(id);
                     }
@@ -516,12 +526,12 @@ pub fn clock_object_instances_impl(
         values.sort();
         values
     };
-    Ok((
-        sorted(cells),
+    Ok(ClockObjectResolution {
+        instances: sorted(cells),
         unmatched_nets,
         unmatched_pins,
-        sorted(unclassified),
-    ))
+        unclassified: sorted(unclassified),
+    })
 }
 
 pub(crate) fn collect_root_nets(
@@ -530,7 +540,7 @@ pub(crate) fn collect_root_nets(
     net_by_name: &HashMap<&str, u32>,
     adjacency: &Adjacency,
     components: &HashMap<&str, u32>,
-    roles: &[Option<RoleRef<'_>>],
+    roles: &[Option<&MacroPinRole>],
     seeds: &mut Vec<u32>,
 ) {
     // Components first (last duplicate wins), then instances seen only in nets.
@@ -569,11 +579,11 @@ pub(crate) fn collect_root_nets(
         let Some(&id) = components.get(instance) else {
             return;
         };
-        let Some(role) = roles[c.instance_macro[id as usize] as usize].as_ref() else {
+        let Some(role) = roles[c.instance_macro[id as usize] as usize] else {
             return;
         };
         for (net, pin) in adjacency.of(id) {
-            if has_pin(role.outputs, c.pins.get(pin)) {
+            if has_pin(&role.outputs, c.pins.get(pin)) {
                 seeds.push(net);
             }
         }
@@ -1113,7 +1123,7 @@ pub fn write_clock_instances_csv_impl(
     clock_cell_patterns: &[String],
     output: Option<&Path>,
 ) -> Result<(), String> {
-    let c = collect_def_connectivity(def_path)?;
+    let c = collect_def_connectivity(def_path).map_err(|err| err.to_string())?;
     let patterns: Vec<String> = if clock_cell_patterns.is_empty() {
         vec!["clk".to_string()]
     } else {
@@ -2046,30 +2056,30 @@ fn make_net_shape(
 /// parallel batches as the scan goes. Records of a NETS/SPECIALNETS section
 /// met before COMPONENTS are held until the components are known, so
 /// `add_component` never follows `add_nets`.
-pub(crate) fn collect_def_connectivity(def_path: &Path) -> Result<Connectivity, String> {
-    let mut lexer = Lexer::new(open_input(def_path).map_err(|e| e.to_string())?);
+fn collect_def_connectivity(def_path: &Path) -> Result<Connectivity, crate::Error> {
+    let mut lexer = Lexer::new(open_input(def_path)?);
     let mut scan = ConnectivityScan::default();
 
-    while let Some(token) = lexer.next_token().map_err(|e| e.to_string())? {
+    while let Some(token) = lexer.next_token()? {
         if token.text == "-" {
             // A record of a section this pass does not read.
-            lexer.skip_until_semicolon().map_err(|e| e.to_string())?;
+            lexer.skip_until_semicolon()?;
         } else if token.text.eq_ignore_ascii_case("COMPONENTS") {
-            let _count = lexer.next_token().map_err(|e| e.to_string())?;
-            expect_semicolon(&mut lexer).map_err(|e| e.to_string())?;
+            let _count = lexer.next_token()?;
+            expect_semicolon(&mut lexer)?;
             if scan.nets_added {
-                return Err(second_components_error(token.offset));
+                return Err(second_components_error(token.offset).into());
             }
             collect_component_section(&mut lexer, &mut scan.builder)?;
             scan.components_seen = true;
             scan.release_held()?;
         } else if token.text.eq_ignore_ascii_case("NETS") {
-            let _count = lexer.next_token().map_err(|e| e.to_string())?;
-            expect_semicolon(&mut lexer).map_err(|e| e.to_string())?;
+            let _count = lexer.next_token()?;
+            expect_semicolon(&mut lexer)?;
             collect_net_connectivity(&mut lexer, "NETS", &mut scan)?;
         } else if token.text.eq_ignore_ascii_case("SPECIALNETS") {
-            let _count = lexer.next_token().map_err(|e| e.to_string())?;
-            expect_semicolon(&mut lexer).map_err(|e| e.to_string())?;
+            let _count = lexer.next_token()?;
+            expect_semicolon(&mut lexer)?;
             collect_net_connectivity(&mut lexer, "SPECIALNETS", &mut scan)?;
         }
     }
@@ -2145,14 +2155,14 @@ pub(crate) fn parse_connectivity_records(
     })
 }
 
-pub(crate) fn collect_component_section<R: Read>(
+fn collect_component_section<R: Read>(
     lexer: &mut Lexer<R>,
     builder: &mut ConnectivityBuilder,
-) -> Result<(), String> {
+) -> Result<(), crate::Error> {
     let mut bytes = Vec::with_capacity(256);
-    while let Some(token) = lexer.next_token().map_err(|e| e.to_string())? {
+    while let Some(token) = lexer.next_token()? {
         if token.text.eq_ignore_ascii_case("END") {
-            let _section = lexer.next_token().map_err(|e| e.to_string())?;
+            let _section = lexer.next_token()?;
             return Ok(());
         }
         if token.text != "-" {
@@ -2160,9 +2170,7 @@ pub(crate) fn collect_component_section<R: Read>(
         }
         bytes.clear();
         bytes.push(b'-');
-        lexer
-            .read_until_semicolon(&mut bytes)
-            .map_err(|e| e.to_string())?;
+        lexer.read_until_semicolon(&mut bytes)?;
         let (instance, macro_name) = parse_component_identity(&bytes, token.offset)?;
         builder.add_component(&instance, &macro_name);
     }
@@ -2170,16 +2178,16 @@ pub(crate) fn collect_component_section<R: Read>(
 }
 
 /// Read one NETS/SPECIALNETS section, keeping each net's connection list.
-pub(crate) fn collect_net_connectivity<R: Read>(
+fn collect_net_connectivity<R: Read>(
     lexer: &mut Lexer<R>,
     section: &'static str,
     scan: &mut ConnectivityScan,
-) -> Result<(), String> {
+) -> Result<(), crate::Error> {
     let mut batch: Vec<NetRecord> = Vec::new();
     let mut batch_bytes = 0usize;
-    while let Some(token) = lexer.next_token().map_err(|e| e.to_string())? {
+    while let Some(token) = lexer.next_token()? {
         if token.text.eq_ignore_ascii_case("END") {
-            let _section = lexer.next_token().map_err(|e| e.to_string())?;
+            let _section = lexer.next_token()?;
             break;
         }
         if token.text != "-" {
@@ -2187,11 +2195,9 @@ pub(crate) fn collect_net_connectivity<R: Read>(
         }
         let mut bytes = Vec::with_capacity(128);
         bytes.push(b'-');
-        let routed = lexer
-            .read_until_plus_or_semicolon(&mut bytes)
-            .map_err(|e| e.to_string())?;
+        let routed = lexer.read_until_plus_or_semicolon(&mut bytes)?;
         if routed {
-            lexer.skip_until_semicolon().map_err(|e| e.to_string())?;
+            lexer.skip_until_semicolon()?;
         }
         batch_bytes += bytes.len();
         batch.push(NetRecord {
@@ -2204,7 +2210,7 @@ pub(crate) fn collect_net_connectivity<R: Read>(
             batch_bytes = 0;
         }
     }
-    scan.take_batch(&mut batch)
+    Ok(scan.take_batch(&mut batch)?)
 }
 
 pub(crate) fn stream_components_to_cache<R: Read, W: Write>(
@@ -2765,8 +2771,16 @@ fn load_lef_macros(
     dbu_per_micron: i64,
 ) -> Result<(MacroMap, Vec<String>), crate::Error> {
     let library = crate::lef::parse_library(paths, None, false)?;
-    let mut macros = HashMap::with_capacity(library.macros.len());
-    for item in &library.macros {
+    let macros = macro_sizes_in_dbu(&library, dbu_per_micron)?;
+    Ok((macros, library.duplicates))
+}
+
+fn macro_sizes_in_dbu(
+    library: &crate::lef::LibraryData,
+    dbu_per_micron: i64,
+) -> Result<MacroMap, crate::Error> {
+    let mut macros = HashMap::with_capacity(library.macros().len());
+    for item in library.macros() {
         macros.insert(
             item.name.clone(),
             MacroDef {
@@ -2777,7 +2791,7 @@ fn load_lef_macros(
             },
         );
     }
-    Ok((macros, library.duplicates))
+    Ok(macros)
 }
 
 pub(crate) fn to_dbu(
@@ -3401,12 +3415,13 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// Public Rust API (issue #12): plain-Rust consumers, no pyo3 anywhere.
+// Public Rust streaming API.
 // ---------------------------------------------------------------------------
 
 /// Streaming DEF `COMPONENTS` -> instance bounding boxes in DEF database
-/// units, with LEF `SIZE`/`ORIGIN` extents and `UNITS DISTANCE MICRONS`
-/// honored. Errors surface as items and end the scan: the first `Err` is the
+/// units. Each box starts at the DEF placement point and uses the LEF
+/// `SIZE`, the component orientation, and the design's unit scale.
+/// Errors surface as items and end the scan: the first `Err` is the
 /// last item, so a consumer never silently skips past a gap. Rows returned
 /// before the error are unaffected; the error replaces the remaining rows of
 /// its internal batch (up to 65,536 records).
@@ -3427,15 +3442,31 @@ impl std::fmt::Debug for InstanceBBoxIter {
 }
 
 impl InstanceBBoxIter {
+    /// Open a DEF and read the macro dimensions from the supplied LEF paths.
     pub fn from_path(def: &Path, lefs: &[PathBuf]) -> Result<Self, crate::Error> {
         let scanner = DefScanner::from_path(def)?;
         let (macros, _duplicates) = load_lef_macros(lefs, scanner.dbu_per_micron)?;
-        Ok(Self {
+        Ok(Self::with_macros(scanner, macros))
+    }
+
+    /// Open a DEF and convert the parsed library's macro dimensions to that
+    /// design's database units. The iterator owns the converted dimensions.
+    pub fn from_library(
+        def: &Path,
+        library: &crate::lef::LibraryData,
+    ) -> Result<Self, crate::Error> {
+        let scanner = DefScanner::from_path(def)?;
+        let macros = macro_sizes_in_dbu(library, scanner.dbu_per_micron)?;
+        Ok(Self::with_macros(scanner, macros))
+    }
+
+    fn with_macros(scanner: DefScanner, macros: MacroMap) -> Self {
+        Self {
             scanner,
             macros,
             pending: VecDeque::new(),
             done: false,
-        })
+        }
     }
 }
 
@@ -3478,6 +3509,15 @@ pub fn scan_instance_bboxes(
     lefs: &[PathBuf],
 ) -> Result<InstanceBBoxIter, crate::Error> {
     InstanceBBoxIter::from_path(def, lefs)
+}
+
+/// Scan placed components using a library from [`crate::lef::parse_cell_lef`].
+/// The same library can be reused across DEF files with different unit scales.
+pub fn scan_instance_bboxes_with_library(
+    def: &Path,
+    library: &crate::lef::LibraryData,
+) -> Result<InstanceBBoxIter, crate::Error> {
+    InstanceBBoxIter::from_library(def, library)
 }
 
 /// The DEF's `UNITS DISTANCE MICRONS` value (default 1000): the scale

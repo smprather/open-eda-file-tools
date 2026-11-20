@@ -178,12 +178,16 @@ impl LefMacro {
     }
 
     fn pin_names(&self) -> Vec<String> {
-        self.inner.pins.iter().map(|pin| pin.name.clone()).collect()
+        self.inner
+            .pins()
+            .iter()
+            .map(|pin| pin.name.clone())
+            .collect()
     }
 
     fn pins(&self) -> Vec<LefPin> {
         self.inner
-            .pins
+            .pins()
             .iter()
             .map(|pin| LefPin {
                 inner: Arc::clone(pin),
@@ -192,9 +196,9 @@ impl LefMacro {
     }
 
     fn pin(&self, name: &str) -> PyResult<LefPin> {
-        match self.inner.pin_index.get(name) {
-            Some(&index) => Ok(LefPin {
-                inner: Arc::clone(&self.inner.pins[index]),
+        match self.inner.pin(name) {
+            Some(pin) => Ok(LefPin {
+                inner: Arc::clone(pin),
             }),
             None => Err(PyKeyError::new_err(name.to_string())),
         }
@@ -206,7 +210,7 @@ impl LefMacro {
             self.inner.name,
             self.inner.width,
             self.inner.height,
-            self.inner.pins.len()
+            self.inner.pins().len()
         )
     }
 }
@@ -220,7 +224,7 @@ pub struct LefLibrary {
 impl LefLibrary {
     fn macro_names(&self) -> Vec<String> {
         self.inner
-            .macros
+            .macros()
             .iter()
             .map(|item| item.name.clone())
             .collect()
@@ -228,7 +232,7 @@ impl LefLibrary {
 
     fn macros(&self) -> Vec<LefMacro> {
         self.inner
-            .macros
+            .macros()
             .iter()
             .map(|item| LefMacro {
                 inner: Arc::clone(item),
@@ -238,20 +242,20 @@ impl LefLibrary {
 
     #[pyo3(name = "macro")]
     fn get_macro(&self, name: &str) -> PyResult<LefMacro> {
-        match self.inner.macro_index.get(name) {
-            Some(&index) => Ok(LefMacro {
-                inner: Arc::clone(&self.inner.macros[index]),
+        match self.inner.macro_by_name(name) {
+            Some(cell) => Ok(LefMacro {
+                inner: Arc::clone(cell),
             }),
             None => Err(PyKeyError::new_err(name.to_string())),
         }
     }
 
     fn duplicate_macro_names(&self) -> Vec<String> {
-        self.inner.duplicates.clone()
+        self.inner.duplicate_macro_names().to_vec()
     }
 
     fn __repr__(&self) -> String {
-        format!("LefLibrary(macros={})", self.inner.macros.len())
+        format!("LefLibrary(macros={})", self.inner.macros().len())
     }
 }
 

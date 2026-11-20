@@ -4,11 +4,13 @@
 mod cell_lef;
 mod lexer;
 
-pub use cell_lef::{MacroSize, macro_sizes};
+pub use cell_lef::{
+    LibraryData, MacroData, MacroSize, PinData, PortData, RectData, macro_sizes, parse_cell_lef,
+};
 
-// Used by the Python bindings; not part of the supported API.
+// Used by the Python bindings for macro filtering and Python error mapping.
 #[doc(hidden)]
-pub use cell_lef::{LefError, LibraryData, MacroData, PinData, PortData, RectData, parse_library};
+pub use cell_lef::{LefError, parse_library};
 pub(crate) use lexer::Lexer;
 #[doc(hidden)]
 pub use lexer::open_input;

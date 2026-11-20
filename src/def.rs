@@ -17,9 +17,8 @@ use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
 use open_eda_file_tools_core::def::{
-    self as core_def, ClockObjectInstances, ColumnKind, ColumnSpec, DefScanner,
-    InstanceBBox as CoreInstanceBBox, MacroRole, NetShape as CoreNetShape, SkippedRoutes,
-    parse_columns, parse_lef_files,
+    self as core_def, ColumnKind, ColumnSpec, DefScanner, InstanceBBox as CoreInstanceBBox,
+    MacroPinRole, NetShape as CoreNetShape, SkippedRoutes, parse_columns, parse_lef_files,
 };
 
 #[pyclass(frozen, skip_from_py_object)]
@@ -429,6 +428,25 @@ fn write_clock_instances_csv_from_cache(
     })
 }
 
+// Retain the Python tuple format at the binding boundary.
+type MacroRole = (String, Vec<String>, Vec<String>, bool, Vec<String>);
+type ClockObjectInstances = (Vec<String>, Vec<String>, Vec<(String, String)>, Vec<String>);
+
+fn macro_pin_roles(macros: Vec<MacroRole>) -> Vec<MacroPinRole> {
+    macros
+        .into_iter()
+        .map(
+            |(macro_name, inputs, outputs, endpoint, clock_pins)| MacroPinRole {
+                macro_name,
+                inputs,
+                outputs,
+                endpoint,
+                clock_pins,
+            },
+        )
+        .collect()
+}
+
 #[pyfunction]
 #[pyo3(signature = (def_path, roots, macros, prune = true))]
 fn clock_tree_cells(
@@ -439,8 +457,8 @@ fn clock_tree_cells(
     prune: bool,
 ) -> PyResult<Vec<String>> {
     py.detach(|| {
-        open_eda_file_tools_core::def::clock_tree_cells_impl(&def_path, &roots, &macros, prune)
-            .map_err(to_py_err)
+        let macros = macro_pin_roles(macros);
+        core_def::clock_tree_cells_impl(&def_path, &roots, &macros, prune).map_err(to_py_err)
     })
 }
 
@@ -463,8 +481,15 @@ fn clock_object_instances(
     macros: Vec<MacroRole>,
 ) -> PyResult<ClockObjectInstances> {
     py.detach(|| {
-        open_eda_file_tools_core::def::clock_object_instances_impl(&def_path, &nets, &pins, &macros)
-            .map_err(to_py_err)
+        let macros = macro_pin_roles(macros);
+        let resolution = core_def::clock_object_instances(&def_path, &nets, &pins, &macros)
+            .map_err(to_py_err)?;
+        Ok((
+            resolution.instances,
+            resolution.unmatched_nets,
+            resolution.unmatched_pins,
+            resolution.unclassified,
+        ))
     })
 }
 
