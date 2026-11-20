@@ -32,7 +32,9 @@ def _reset_thread_limit():
     _native.set_threads(None)
 
 
-def write_design(tmp_path: Path, components: int, power_conns: int = 0) -> tuple[Path, Path]:
+def write_design(
+    tmp_path: Path, components: int, power_conns: int = 0
+) -> tuple[Path, Path]:
     """A DEF with more components than one scan batch (65,536 records)."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     lef = tmp_path / "cells.lef"
@@ -49,7 +51,9 @@ def write_design(tmp_path: Path, components: int, power_conns: int = 0) -> tuple
     ]
     for index in range(components):
         orient = ("N", "FS", "E", "FW")[index % 4]
-        lines.append(f"  - u{index} INV + PLACED ( {index * 10} {index % 97} ) {orient} ;")
+        lines.append(
+            f"  - u{index} INV + PLACED ( {index * 10} {index % 97} ) {orient} ;"
+        )
     lines += [
         "END COMPONENTS",
         "PINS 1 ;",
@@ -58,7 +62,12 @@ def write_design(tmp_path: Path, components: int, power_conns: int = 0) -> tuple
     ]
     if power_conns:
         conns = " ".join(f"( t{index} VDD )" for index in range(power_conns))
-        lines += ["SPECIALNETS 1 ;", f"  - VDD ( PIN VDD ) {conns}", "    + ROUTED met1 40 ( 0 0 ) ( 10 0 ) ;", "END SPECIALNETS"]
+        lines += [
+            "SPECIALNETS 1 ;",
+            f"  - VDD ( PIN VDD ) {conns}",
+            "    + ROUTED met1 40 ( 0 0 ) ( 10 0 ) ;",
+            "END SPECIALNETS",
+        ]
     lines += [
         "NETS 3 ;",
         "  - clk ( PIN clk ) ( u0 A ) + USE CLOCK ;",
@@ -99,7 +108,9 @@ def test_set_threads_rejects_absurd_values() -> None:
 
 
 def outputs(tmp_path: Path, lef: Path, design: Path, tag: str) -> dict[str, Any]:
-    csv, table, parquet = (tmp_path / f"{tag}.{ext}" for ext in ("csv", "txt", "parquet"))
+    csv, table, parquet = (
+        tmp_path / f"{tag}.{ext}" for ext in ("csv", "txt", "parquet")
+    )
     cache = tmp_path / f"{tag}-cache"
     count = def_tools.write_instance_bbox_csv([lef], design, csv)
     def_tools.write_instance_table([lef], design, table)
@@ -157,7 +168,9 @@ def test_nets_before_components(tmp_path: Path) -> None:
     end = "END COMPONENTS\n"
     components = text[text.index("COMPONENTS") : text.index(end) + len(end)]
     nets = text[text.index("NETS 3 ;") : text.index("END NETS") + len("END NETS\n")]
-    design.write_text(text.replace(components, "").replace(nets, nets + components), encoding="utf-8")
+    design.write_text(
+        text.replace(components, "").replace(nets, nets + components), encoding="utf-8"
+    )
 
     cells = _native.clock_tree_cells(
         design, ["port:clk"], [("INV", ["A"], ["Y"], False, [])], False
@@ -172,7 +185,9 @@ NETS = (
     "NETS 3 ;\n  - clk ( PIN clk ) ( u0 A ) ;\n  - n1 ( u0 Y ) ( u1 A ) ;\n"
     "  - n2 ( u1 Y ) ( u2 A ) ;\nEND NETS\n"
 )
-SPECIAL = "SPECIALNETS 1 ;\n  - VDD ( u0 VDD ) ( u1 VDD ) + USE POWER ;\nEND SPECIALNETS\n"
+SPECIAL = (
+    "SPECIALNETS 1 ;\n  - VDD ( u0 VDD ) ( u1 VDD ) + USE POWER ;\nEND SPECIALNETS\n"
+)
 INV_ROLES = [("INV", ["A"], ["Y"], False, [])]
 
 
@@ -202,7 +217,9 @@ def test_components_after_nets_is_an_error_with_a_byte_offset(tmp_path: Path) ->
     design.write_text(text, encoding="utf-8")
     second = text.rindex("COMPONENTS 3")
 
-    with pytest.raises(Exception, match=rf"COMPONENTS section near DEF byte {second} follows NETS"):
+    with pytest.raises(
+        Exception, match=rf"COMPONENTS section near DEF byte {second} follows NETS"
+    ):
         _trace(design)
 
 
@@ -222,7 +239,9 @@ def test_cache_round_trip_with_duplicate_and_unknown_instances(tmp_path: Path) -
 
     def_tools.write_def_cache(design, cache)
     def_tools.write_clock_instances_csv(design, roots, ["inv"], tmp_path / "def.csv")
-    def_tools.write_clock_instances_csv_from_cache(cache, roots, ["inv"], tmp_path / "cache.csv")
+    def_tools.write_clock_instances_csv_from_cache(
+        cache, roots, ["inv"], tmp_path / "cache.csv"
+    )
 
     from_def = (tmp_path / "def.csv").read_text(encoding="utf-8")
     assert (tmp_path / "cache.csv").read_text(encoding="utf-8") == from_def
@@ -241,7 +260,9 @@ def test_long_connection_lists_parse_in_pieces(tmp_path: Path) -> None:
     # Instances absent from COMPONENTS are not classified.
     assert cells == [] and unmatched_nets == []
 
-    components = "\n".join(f"  - t{index} TIE + PLACED ( 0 0 ) N ;" for index in range(80_000))
+    components = "\n".join(
+        f"  - t{index} TIE + PLACED ( 0 0 ) N ;" for index in range(80_000)
+    )
     text = design.read_text(encoding="utf-8").replace(
         "COMPONENTS 3 ;", f"COMPONENTS 80003 ;\n{components}"
     )
@@ -253,7 +274,9 @@ def test_long_connection_lists_parse_in_pieces(tmp_path: Path) -> None:
 
 def test_malformed_connection_deep_in_a_long_list_is_reported(tmp_path: Path) -> None:
     _lef, design = write_design(tmp_path, components=3, power_conns=80_000)
-    text = design.read_text(encoding="utf-8").replace("( t70000 VDD )", "( t70000 VDD extra )")
+    text = design.read_text(encoding="utf-8").replace(
+        "( t70000 VDD )", "( t70000 VDD extra )"
+    )
     design.write_text(text, encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="net connection"):
@@ -266,7 +289,17 @@ def test_cli_threads_option_sets_the_limit_first(tmp_path: Path) -> None:
 
     result = CliRunner().invoke(
         main,
-        ["instances", "--lef", str(lef), "--def", str(design), "--threads", "2", "--output", str(output)],
+        [
+            "instances",
+            "--lef",
+            str(lef),
+            "--def",
+            str(design),
+            "--threads",
+            "2",
+            "--output",
+            str(output),
+        ],
     )
 
     assert result.exit_code == 0, result.output
@@ -305,9 +338,13 @@ def test_threads_must_be_positive(tmp_path: Path) -> None:
 
 def test_synthesized_connections_are_kept(tmp_path):
     lef, design = write_design(tmp_path, components=3)
-    text = design.read_text(encoding="utf-8").replace("( u1 A )", "( u1 A + SYNTHESIZED )")
+    text = design.read_text(encoding="utf-8").replace(
+        "( u1 A )", "( u1 A + SYNTHESIZED )"
+    )
     design.write_text(text, encoding="utf-8")
-    cells = _native.clock_tree_cells(design, ["port:clk"], [("INV", ["A"], ["Y"], False, [])], False)
+    cells = _native.clock_tree_cells(
+        design, ["port:clk"], [("INV", ["A"], ["Y"], False, [])], False
+    )
     assert cells == ["u0", "u1", "u2"]
     _native.write_def_cache(design, tmp_path / "cache")  # must not raise
 
@@ -324,7 +361,9 @@ def test_synthesized_in_split_connection_list(tmp_path):
     marked.write_text(text, encoding="utf-8")
     assert len(text.split("+ ROUTED")[0]) > 1 << 20
     cells = [
-        _native.clock_tree_cells(path, ["port:clk"], [("INV", ["A"], ["Y"], False, [])], False)
+        _native.clock_tree_cells(
+            path, ["port:clk"], [("INV", ["A"], ["Y"], False, [])], False
+        )
         for path in (plain, marked)
     ]
     assert cells[0] == cells[1]
@@ -335,7 +374,9 @@ def test_synthesized_in_split_connection_list(tmp_path):
     for name in names:
         if name in ("nets.dat", "nets.idx"):  # raw records keep the marker text
             continue
-        assert (tmp_path / "plain_cache" / name).read_bytes() == (tmp_path / "marked_cache" / name).read_bytes(), name
+        assert (tmp_path / "plain_cache" / name).read_bytes() == (
+            tmp_path / "marked_cache" / name
+        ).read_bytes(), name
 
 
 FANOUT_ROLES = [("INV", ["A"], ["Y"], False, []), ("CLKBUF", ["A"], ["Y"], False, [])]
@@ -431,7 +472,14 @@ def test_fanout_clock_cell_traversal_memory_is_bounded(tmp_path: Path) -> None:
     count = 140_000
     design = write_fanout_design(tmp_path / "fan.def", count)
     result = subprocess.run(
-        [sys.executable, "-c", FANOUT_CHILD, str(design), str(tmp_path / "o.csv"), str(count)],
+        [
+            sys.executable,
+            "-c",
+            FANOUT_CHILD,
+            str(design),
+            str(tmp_path / "o.csv"),
+            str(count),
+        ],
         capture_output=True,
         text=True,
         timeout=120,
