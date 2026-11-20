@@ -299,12 +299,11 @@ def resolve_clock_instances(
     """Map the clock objects in ``data`` onto DEF instances.
 
     * A clock **instance** is taken as given.
-    * A clock **net** marks the instances that drive it, flip-flops, latches
-      and memories excepted (a divider flop driving a generated clock is a
-      clock *source*, not a clock-tree cell).
-    * A clock **pin** marks its instance when the instance is not such an
-      endpoint and the pin is an output or a clock-through input (for an
-      integrated clock gate: its clock pin, never its enable).
+    * A clock **net** marks the instances that drive it, including sequential
+      drivers such as divider flip-flops.
+    * A clock **pin** marks its instance when it is an output or a
+      clock-through input. A sequential endpoint qualifies through its output
+      only. For integrated clock gates, the clock input qualifies.
 
     An instance with several nets or pins is a clock cell when any one of
     them marks it. Nets and pins need ``roles`` (Liberty pin directions).

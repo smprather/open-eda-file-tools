@@ -458,7 +458,7 @@ fn clock_tree_cells(
 ) -> PyResult<Vec<String>> {
     py.detach(|| {
         let macros = macro_pin_roles(macros);
-        core_def::clock_tree_cells_impl(&def_path, &roots, &macros, prune).map_err(to_py_err)
+        core_def::clock_tree_cells(&def_path, &roots, &macros, prune).map_err(to_py_err)
     })
 }
 

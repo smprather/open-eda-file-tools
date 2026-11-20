@@ -2,6 +2,7 @@ pub mod def;
 pub mod lef;
 pub mod otw;
 pub mod pex;
+mod sdc;
 pub mod threads;
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -1726,6 +1727,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     threads::register(m)?;
     pex::register(m)?;
     otw::register(m)?;
+    sdc::register(m)?;
     Ok(())
 }
 fn append_table_rows<'py>(

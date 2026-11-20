@@ -35,7 +35,7 @@ from def_tools.clock_data import (
 from def_tools.clock_roles import cell_clock_roles
 from def_tools.otw import OtwClock, OtwWindow, read_otw, write_otw
 
-CLOCK_TREE = ["u_b\\[1\\]", "u_buf", "u_gbuf", "u_icg"]
+CLOCK_TREE = ["u_b\\[1\\]", "u_buf", "u_div", "u_gbuf", "u_icg"]
 
 LIB = """\
 library (clk) {
@@ -637,8 +637,8 @@ def test_clock_object_instances_with_escaped_duplicate_and_net_only_names(
 ) -> None:
     # Escaped names, a duplicated component (the last definition, an
     # endpoint FF, wins), a port, a macro without a role, and `ghost`, an
-    # instance that appears only in nets. The expected tuple is the output of
-    # the pre-flat-connectivity build (e98bd32), not recomputed here.
+    # instance that appears only in nets. The endpoint's selected Q pin marks
+    # the instance as a clock driver.
     design = tmp_path / "e.def"
     design.write_text(ESCAPED_DEF, encoding="utf-8")
     macros = [
@@ -662,7 +662,7 @@ def test_clock_object_instances_with_escaped_duplicate_and_net_only_names(
         ("-", "nope"),
     ]
     assert _native.clock_object_instances(design, nets, pins, macros) == (
-        ["bus\\/x", "plain", "u\\[0\\]"],
+        ["bus\\/x", "dup", "plain", "u\\[0\\]"],
         ["missing"],
         [("ghost", "A"), ("-", "nope")],
         ["nomacro"],

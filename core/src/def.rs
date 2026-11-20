@@ -1,5 +1,6 @@
 use rayon::prelude::*;
 use std::borrow::Cow;
+use std::cell::LazyCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions, create_dir_all};
@@ -8,7 +9,10 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::connectivity::{Adjacency, Conn, Connectivity, ConnectivityBuilder, NetConns, PORT};
-use crate::lef::{Lexer, open_input};
+use crate::lef::{Lexer, Token, open_input};
+
+mod targeted;
+pub use targeted::{ClockNetRecord, DefConnection, TargetedDefScan, scan_clock_nets_and_instances};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[doc(hidden)]
@@ -249,6 +253,18 @@ pub struct MacroPinRole {
     pub clock_pins: Vec<String>,
 }
 
+impl From<(String, crate::liberty::CellClockRole)> for MacroPinRole {
+    fn from((macro_name, role): (String, crate::liberty::CellClockRole)) -> Self {
+        Self {
+            macro_name,
+            inputs: role.inputs,
+            outputs: role.outputs,
+            endpoint: role.endpoint,
+            clock_pins: role.clock_pins,
+        }
+    }
+}
+
 fn role_map(macros: &[MacroPinRole]) -> HashMap<&str, &MacroPinRole> {
     macros
         .iter()
@@ -272,14 +288,22 @@ fn roles_by_macro<'a>(
         .collect()
 }
 
-#[doc(hidden)]
-pub fn clock_tree_cells_impl(
+/// Trace clock-tree cells forward from symbolic SDC roots in an on-disk DEF.
+///
+/// Roots are `port:NAME`, `net:NAME`, `pin:INSTANCE/PIN`, or `cell:INSTANCE`.
+/// Bare targets are treated as ports, or as pins if they contain a slash.
+/// Combinational cells propagate from clock-through inputs to their outputs.
+/// Sequential endpoints terminate that propagation and are included when a
+/// known clock net is driven by one of their outputs. With `prune`, retain
+/// cells on a path to a clock pin and divider drivers on explicit clock roots.
+/// Results retain DEF instance spelling and are sorted.
+pub fn clock_tree_cells(
     def_path: &Path,
     roots: &[String],
     macros: &[MacroPinRole],
     prune: bool,
-) -> Result<Vec<String>, String> {
-    let c = collect_def_connectivity(def_path).map_err(|err| err.to_string())?;
+) -> Result<Vec<String>, crate::Error> {
+    let c = collect_def_connectivity(def_path)?;
     let roles = roles_by_macro(&c, macros);
     let role_of = |instance: u32| -> Option<&MacroPinRole> {
         if instance >= c.component_count {
@@ -293,15 +317,38 @@ pub fn clock_tree_cells_impl(
     for net in 0..c.nets.len() as u32 {
         net_by_name.insert(c.nets.get(net), net);
     }
+    // Unescaped aliases are needed only when an exact root lookup misses.
+    let net_aliases =
+        LazyCell::new(|| escaped_names((0..c.nets.len() as u32).map(|id| (id, c.nets.get(id)))));
+    let component_aliases =
+        LazyCell::new(|| escaped_names((0..c.component_count).map(|id| (id, c.instances.get(id)))));
+    let net_id = |name: &str| {
+        net_by_name.get(name).copied().or_else(|| {
+            let alias = unescaped(name);
+            net_by_name
+                .get(alias.as_ref())
+                .or_else(|| net_aliases.get(alias.as_ref()))
+                .copied()
+        })
+    };
+    let component_id = |name: &str| {
+        components.get(name).copied().or_else(|| {
+            let alias = unescaped(name);
+            components
+                .get(alias.as_ref())
+                .or_else(|| component_aliases.get(alias.as_ref()))
+                .copied()
+        })
+    };
 
     let mut seeds: Vec<u32> = Vec::new();
     for root in roots {
         collect_root_nets(
             root,
             &c,
-            &net_by_name,
+            &net_id,
             &adjacency,
-            &components,
+            &component_id,
             &roles,
             &mut seeds,
         );
@@ -312,13 +359,14 @@ pub fn clock_tree_cells_impl(
     // Each candidate instance is expanded once (`first_visit` below), so the
     // queue is bounded by the seeds plus the connections; `reached_from`
     // still records every reach.
-    let mut queue: VecDeque<u32> = seeds.into_iter().collect();
+    let mut queue: VecDeque<u32> = seeds.iter().copied().collect();
     let mut seen_nets = vec![false; c.nets.len()];
     // Nets a clock pin hangs on, and the candidates fed by / driving each net.
     let mut sink_nets: Vec<u32> = Vec::new();
     let mut live: HashSet<u32> = HashSet::new();
     let mut reached_from: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut drivers: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut endpoint_drivers = Vec::new();
 
     while let Some(net_index) = queue.pop_front() {
         if seen_nets[net_index as usize] {
@@ -336,6 +384,9 @@ pub fn clock_tree_cells_impl(
             let pin = c.pins.get(pin);
             if role.endpoint {
                 is_sink |= has_pin(&role.clock_pins, pin);
+                if has_pin(&role.outputs, pin) {
+                    endpoint_drivers.push((net_index, instance));
+                }
                 continue;
             }
             if role.outputs.is_empty() || !has_pin(&role.inputs, pin) {
@@ -365,7 +416,7 @@ pub fn clock_tree_cells_impl(
         }
     }
 
-    let mut result: Vec<String> = if prune {
+    if prune {
         // Walk back from every clock pin: a net is live when a clock pin or a
         // live candidate reads it, a candidate when it drives a live net.
         let mut live_nets = vec![false; c.nets.len()];
@@ -384,15 +435,17 @@ pub fn clock_tree_cells_impl(
                 }
             }
         }
-        live.into_iter()
-            .map(|id| c.instances.get(id).to_string())
-            .collect()
+        live.extend(endpoint_drivers.into_iter().filter_map(|(net, instance)| {
+            (live_nets[net as usize] || seeds.binary_search(&net).is_ok()).then_some(instance)
+        }));
     } else {
-        reached_from
-            .into_keys()
-            .map(|id| c.instances.get(id).to_string())
-            .collect()
-    };
+        live.extend(reached_from.into_keys());
+        live.extend(endpoint_drivers.into_iter().map(|(_, instance)| instance));
+    }
+    let mut result = live
+        .into_iter()
+        .map(|id| c.instances.get(id).to_string())
+        .collect::<Vec<_>>();
     result.sort();
     Ok(result)
 }
@@ -422,11 +475,11 @@ pub struct ClockObjectResolution {
 
 /// Resolve explicit clock net names and `(instance, pin)` pairs against a DEF.
 ///
-/// A non-endpoint instance is selected when one of its output pins drives a
-/// supplied net, or a supplied pair names one of its output or clock-through
-/// input pins. A pair with instance `"-"` denotes a top-level port, which is
-/// matched against the DEF net connections. A pin on a known instance that
-/// matches neither role list selects no instance.
+/// An instance is selected when one of its output pins drives a supplied
+/// clock net, or a supplied pair names one of its output pins. A supplied
+/// clock-through input selects the instance when it can propagate a clock.
+/// A pair with instance `"-"` denotes a top-level port, matched against the
+/// DEF net connections.
 ///
 /// DEF net, instance, and top-level port names are matched with backslash
 /// escapes removed. For an explicit pin pair, escapes are removed from the
@@ -467,7 +520,7 @@ pub fn clock_object_instances(
                         unclassified.insert(instance);
                     }
                     Some(role) => {
-                        if !role.endpoint && has_pin(&role.outputs, c.pins.get(pin)) {
+                        if has_pin(&role.outputs, c.pins.get(pin)) {
                             cells.insert(instance);
                         }
                     }
@@ -508,8 +561,8 @@ pub fn clock_object_instances(
                     unclassified.insert(id);
                 }
                 Some(role) => {
-                    if !role.endpoint
-                        && (has_pin(&role.inputs, &pin_name) || has_pin(&role.outputs, &pin_name))
+                    if has_pin(&role.outputs, &pin_name)
+                        || (!role.endpoint && has_pin(&role.inputs, &pin_name))
                     {
                         cells.insert(id);
                     }
@@ -534,49 +587,65 @@ pub fn clock_object_instances(
     })
 }
 
-pub(crate) fn collect_root_nets(
+fn escaped_names<'a>(names: impl Iterator<Item = (u32, &'a str)>) -> HashMap<String, u32> {
+    names
+        .filter_map(|(id, name)| match unescaped(name) {
+            Cow::Owned(alias) => Some((alias, id)),
+            Cow::Borrowed(_) => None,
+        })
+        .collect()
+}
+
+fn collect_root_nets(
     root: &str,
     c: &Connectivity,
-    net_by_name: &HashMap<&str, u32>,
+    net_id: &impl Fn(&str) -> Option<u32>,
     adjacency: &Adjacency,
-    components: &HashMap<&str, u32>,
+    component_id: &impl Fn(&str) -> Option<u32>,
     roles: &[Option<&MacroPinRole>],
     seeds: &mut Vec<u32>,
 ) {
-    // Components first (last duplicate wins), then instances seen only in nets.
-    let instance_id = |name: &str| -> Option<u32> {
-        components.get(name).copied().or_else(|| {
-            (c.component_count..c.instances.len() as u32).find(|&id| c.instances.get(id) == name)
-        })
-    };
-    if let Some(name) = root.strip_prefix("port:") {
-        if let Some(&index) = net_by_name.get(name) {
-            seeds.push(index);
+    let (kind, name) = root.split_once(':').unwrap_or_else(|| {
+        if root.contains('/') {
+            ("pin", root)
+        } else {
+            ("port", root)
         }
+    });
+    if kind == "port" {
+        let initial_len = seeds.len();
+        let port_name = unescaped(name);
         for net in 0..c.nets.len() as u32 {
             if c.conns(net)
-                .any(|(instance, pin)| instance == PORT && c.pins.get(pin) == name)
+                .any(|(instance, pin)| instance == PORT && unescaped(c.pins.get(pin)) == port_name)
             {
                 seeds.push(net);
             }
         }
-    } else if let Some(name) = root.strip_prefix("net:") {
-        if let Some(&index) = net_by_name.get(name) {
-            seeds.push(index);
+        if seeds.len() == initial_len {
+            seeds.extend(net_id(name));
         }
-    } else if let Some(path) = root.strip_prefix("pin:") {
-        let Some((instance, pin)) = split_root_pin(path) else {
+    } else if kind == "net" {
+        seeds.extend(net_id(name));
+    } else if kind == "pin" {
+        let Some((instance, pin)) = split_root_pin(name) else {
             return;
         };
-        if let Some(id) = instance_id(instance) {
+        let id = component_id(instance).or_else(|| {
+            let name = unescaped(instance);
+            (c.component_count..c.instances.len() as u32)
+                .find(|&id| unescaped(c.instances.get(id)) == name)
+        });
+        if let Some(id) = id {
+            let pin = unescaped(pin);
             for (net, conn_pin) in adjacency.of(id) {
-                if c.pins.get(conn_pin) == pin {
+                if unescaped(c.pins.get(conn_pin)) == pin {
                     seeds.push(net);
                 }
             }
         }
-    } else if let Some(instance) = root.strip_prefix("cell:") {
-        let Some(&id) = components.get(instance) else {
+    } else if kind == "cell" {
+        let Some(id) = component_id(name) else {
             return;
         };
         let Some(role) = roles[c.instance_macro[id as usize] as usize] else {
@@ -1281,13 +1350,21 @@ pub fn parse_components<'a>(
     batch: &'a [RawRecord],
     macros: &MacroMap,
 ) -> Result<Vec<Component<'a>>, String> {
+    parse_components_with_fallback(batch, macros, None)
+}
+
+fn parse_components_with_fallback<'a>(
+    batch: &'a [RawRecord],
+    macros: &MacroMap,
+    fallback: Option<&MacroDef>,
+) -> Result<Vec<Component<'a>>, String> {
     let chunks: Vec<Result<Vec<Component<'a>>, String>> = crate::threads::install(|| {
         batch
             .par_chunks(CHUNK)
             .map(|chunk| {
                 let mut rows = Vec::with_capacity(chunk.len());
                 for record in chunk {
-                    if let Some(row) = parse_component_record(record, macros)? {
+                    if let Some(row) = parse_component_record(record, macros, fallback)? {
                         rows.push(row);
                     }
                 }
@@ -1353,9 +1430,10 @@ pub(crate) fn process_net_record_batch(
     Ok((shapes, skipped))
 }
 
-pub(crate) fn parse_component_record<'a>(
+fn parse_component_record<'a>(
     record: &'a RawRecord,
     macros: &MacroMap,
+    fallback: Option<&MacroDef>,
 ) -> Result<Option<Component<'a>>, String> {
     let mut tokens = ByteTokens::new(&record.bytes);
     tokens.expect(b"-", record.offset, "component record")?;
@@ -1415,7 +1493,7 @@ pub(crate) fn parse_component_record<'a>(
         return Ok(None);
     };
 
-    let macro_def = macros.get(macro_str).ok_or_else(|| {
+    let macro_def = macros.get(macro_str).or(fallback).ok_or_else(|| {
         format!(
             "missing LEF macro '{}' for instance '{}' near DEF byte {}",
             macro_str, instance_str, record.offset
@@ -1438,8 +1516,18 @@ pub(crate) fn parse_component_record<'a>(
         orient: placement.orient,
         llx: placement.x,
         lly: placement.y,
-        urx: placement.x + width,
-        ury: placement.y + height,
+        urx: placement.x.checked_add(width).ok_or_else(|| {
+            format!(
+                "bbox x coordinate out of range for {instance_str:?} near DEF byte {}",
+                record.offset
+            )
+        })?,
+        ury: placement.y.checked_add(height).ok_or_else(|| {
+            format!(
+                "bbox y coordinate out of range for {instance_str:?} near DEF byte {}",
+                record.offset
+            )
+        })?,
     }))
 }
 
@@ -2061,10 +2149,7 @@ fn collect_def_connectivity(def_path: &Path) -> Result<Connectivity, crate::Erro
     let mut scan = ConnectivityScan::default();
 
     while let Some(token) = lexer.next_token()? {
-        if token.text == "-" {
-            // A record of a section this pass does not read.
-            lexer.skip_until_semicolon()?;
-        } else if token.text.eq_ignore_ascii_case("COMPONENTS") {
+        if token.is_keyword("COMPONENTS") {
             let _count = lexer.next_token()?;
             expect_semicolon(&mut lexer)?;
             if scan.nets_added {
@@ -2073,18 +2158,86 @@ fn collect_def_connectivity(def_path: &Path) -> Result<Connectivity, crate::Erro
             collect_component_section(&mut lexer, &mut scan.builder)?;
             scan.components_seen = true;
             scan.release_held()?;
-        } else if token.text.eq_ignore_ascii_case("NETS") {
+        } else if token.is_keyword("NETS") {
             let _count = lexer.next_token()?;
             expect_semicolon(&mut lexer)?;
             collect_net_connectivity(&mut lexer, "NETS", &mut scan)?;
-        } else if token.text.eq_ignore_ascii_case("SPECIALNETS") {
+        } else if token.is_keyword("SPECIALNETS") {
             let _count = lexer.next_token()?;
             expect_semicolon(&mut lexer)?;
             collect_net_connectivity(&mut lexer, "SPECIALNETS", &mut scan)?;
+        } else if token.is_keyword("END") {
+            if lexer
+                .next_token()?
+                .is_some_and(|token| token.is_keyword("DESIGN"))
+            {
+                break;
+            }
+        } else {
+            skip_unrequested_def_data(&mut lexer, &token)?;
         }
     }
     scan.release_held()?;
     Ok(scan.builder.finish())
+}
+
+fn skip_unrequested_def_data<R: Read>(lexer: &mut Lexer<R>, token: &Token) -> io::Result<()> {
+    if token.is_keyword("PROPERTYDEFINITIONS") {
+        loop {
+            let property = lexer.next_token()?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "missing END PROPERTYDEFINITIONS",
+                )
+            })?;
+            if property.is_keyword("END") {
+                if lexer
+                    .next_token()?
+                    .is_some_and(|end| end.is_keyword("PROPERTYDEFINITIONS"))
+                {
+                    return Ok(());
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "expected END PROPERTYDEFINITIONS",
+                ));
+            }
+            lexer.skip_until_semicolon()?;
+        }
+    }
+    if token.is_keyword("BEGINEXT") {
+        while let Some(content) = lexer.next_token()? {
+            if content.is_keyword("ENDEXT") {
+                return Ok(());
+            }
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "missing DEF ENDEXT",
+        ));
+    }
+    if [
+        "-",
+        "VERSION",
+        "DESIGN",
+        "DIVIDERCHAR",
+        "BUSBITCHARS",
+        "TECHNOLOGY",
+        "ARRAY",
+        "FLOORPLAN",
+        "UNITS",
+        "DIEAREA",
+        "ROW",
+        "TRACKS",
+        "GCELLGRID",
+        "HISTORY",
+    ]
+    .iter()
+    .any(|keyword| token.is_keyword(keyword))
+    {
+        lexer.skip_until_semicolon()?;
+    }
+    Ok(())
 }
 
 /// The error for a second COMPONENTS section once nets were resolved; the
@@ -3354,7 +3507,9 @@ mod tests {
             bytes: b"- u1 INV + PLACED ( 10 20 ) E".to_vec(),
             offset: 0,
         };
-        let bbox = parse_component_record(&raw, &macros).unwrap().unwrap();
+        let bbox = parse_component_record(&raw, &macros, None)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (bbox.llx, bbox.lly, bbox.urx, bbox.ury),
             (10, 20, 2410, 1220)
@@ -3371,6 +3526,7 @@ mod tests {
         let bbox = parse_component_record(
             &item,
             &parse_one_macro("MACRO INV\nSIZE 1.2 BY 2.4 ;\nEND INV\n", 1000),
+            None,
         )
         .unwrap()
         .unwrap();
@@ -3396,7 +3552,9 @@ mod tests {
         let mut scanner = DefScanner::from_path(&tmp).unwrap();
         let item = scanner.next_record().unwrap().unwrap();
         let macros = parse_one_macro("MACRO INV\nSIZE 1.2 BY 2.4 ;\nEND INV\n", 1000);
-        let bbox = parse_component_record(&item, &macros).unwrap().unwrap();
+        let bbox = parse_component_record(&item, &macros, None)
+            .unwrap()
+            .unwrap();
         std::fs::remove_file(&tmp).unwrap();
         assert_eq!(bbox.instance, "u-1");
         assert_eq!(bbox.macro_name, "INV");

@@ -477,12 +477,11 @@ lossless cache of it.
 `def-tools instances --clock-data design.otw.gz --lib cells.lib` fills
 `is_clock` from the `c` objects:
 
-- A clock **net** marks the instances that *drive* it, except flip-flops,
-  latches and memories — a divider flop driving a generated clock is a clock
-  source, not a clock-tree cell.
-- A clock **pin** marks its instance when the instance is not such an endpoint
-  and the pin is an output or a clock-through input (for an integrated clock
-  gate: the clock pin, never the enable).
+- A clock **net** marks the instances that *drive* it, including a divider
+  flip-flop whose output carries a generated clock.
+- A clock **pin** marks its instance through an output or a clock-through
+  input. Endpoint cells qualify through outputs only. The clock input of an
+  integrated clock gate qualifies.
 - An instance with several nets/pins is a clock cell when any one marks it.
 
 Pin-based files are recommended when available: they need no connectivity

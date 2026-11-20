@@ -19,9 +19,10 @@ tool for each. One package, one version, one install.
 
 Liberty, LEF, DEF and SPEF/DSPF inputs are read plain or gzipped.
 
-**Rust consumers:** the same readers ship as a plain Rust rlib with no
-Python dependency — `open-eda-file-tools-core` (workspace member `core/`),
-see [docs/ai-api.md §8](docs/ai-api.md).
+Rust applications can use `open-eda-file-tools-core` from the `core/`
+workspace member. It includes targeted LEF, Liberty, and DEF readers
+and clock-tree tracing from SDC without a Python runtime.
+[Rust API guide](docs/ai-api.md#8-rust-core-open-eda-file-tools-core--plain-rust-no-python)
 
 **Using this from an AI coding agent?** Read [docs/ai-api.md](docs/ai-api.md)
 first. It is a single page with a task-to-entry-point table, every typed

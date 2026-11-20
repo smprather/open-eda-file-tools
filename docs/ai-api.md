@@ -479,8 +479,8 @@ for clk in sdc_tools.clocks(sdc_path: str | Path):
 # Uses Liberty (parsed concurrently with skip_tables=True) for pin directions and
 # ff/latch/memory endpoints and clock gates. Traces through integrated clock gates
 # (clock pin -> gated clock; never via the enable pin). Never uses macro-name patterns.
-# prune=True (default): report only cells from which a clock pin is reachable, so the
-# datapath cone of a divider flop's output is not reported. prune=False: every cell touched.
+# prune=True (default) keeps paths to clock pins and sequential drivers on
+# explicit clock roots. A divider's data-only fan-out is dropped.
 result = sdc_tools.clock_cells(
     def_path: str | Path,
     libs: Sequence[Path | str],
@@ -562,7 +562,7 @@ open-eda-file-tools-core = { git = "https://github.com/smprather/open-eda-file-t
 ```
 
 ```rust
-use open_eda_file_tools_core::{Error, def, lef, liberty, pex, threads};
+use open_eda_file_tools_core::{Error, def, lef, liberty, pex, sdc, threads};
 
 // DEF COMPONENTS -> instance bboxes in integer DBU, LEF SIZE/ORIGIN and
 // UNITS DISTANCE MICRONS honored. A failed row surfaces as the final
@@ -587,6 +587,19 @@ if let Some(cell) = library.macro_by_name("BUF") {
 }
 let rows = def::scan_instance_bboxes_with_library(def_path, &library)?;
 
+// Read SIZE, ORIGIN, CLASS and SITE with pin directions and uses.
+// Pass false to skip pin bodies. Both modes skip pin-port geometry.
+let metadata = lef::parse_cell_lef_metadata(&lef_paths, true)?;
+let site = metadata.site_by_name("CoreSite");
+
+// Stream instance boxes and read just the regular nets in a HashSet<String>.
+// LEF sizes take precedence over the four-site DEF ROW marker.
+let scan = def::scan_clock_nets_and_instances(def_path, &lef_paths, &wanted_nets, |bbox| {
+    println!("{}", bbox.instance);
+    Ok(())
+})?;
+// scan.dbu_per_micron, scan.clock_nets
+
 // Resolve explicit DEF clock nets and (instance, pin) pairs.
 let roles = [def::MacroPinRole {
     macro_name: "BUF".into(),
@@ -597,6 +610,14 @@ let roles = [def::MacroPinRole {
 }];
 let resolution = def::clock_object_instances(def_path, &clock_nets, &clock_pins, &roles)?;
 // resolution.instances, .unmatched_nets, .unmatched_pins, .unclassified
+
+// With no timing-window data, trace from SDC using system tclsh >= 8.6.
+// The first library containing each requested macro supplies its role.
+let roles: Vec<_> = liberty::cell_clock_roles_for_cells(&lib_paths, &wanted_cells)?
+    .into_iter().map(def::MacroPinRole::from).collect();
+let roots: Vec<_> = sdc::clocks(sdc_path)?
+    .into_iter().flat_map(|clock| clock.sources).collect();
+let clock_cells = def::clock_tree_cells(def_path, &roots, &roles, true)?;
 
 // Liberty attribute-only scan: lazy per-cell parse with table bodies
 // skipped; is_sequential = the cell has an ff or latch group.
@@ -638,7 +659,7 @@ are not supported and may change in any release; everything else is
 crate-private. Every public entry point that runs parallel work installs itself
 inside the CPU limit (`set_threads`), and nested installs keep the outer budget.
 
-DEF, LEF, and PEX errors (and `set_threads`) are `core::Error`, an enum:
+DEF, LEF, PEX, SDC, targeted Liberty roles, and `set_threads` use `core::Error`:
 `Error::Io(io::Error)` is any failure that surfaced as an `io::Error`, which
 includes malformed input reported by the tokenizer (`InvalidData` for
 "DEF missing COMPONENTS section", `UnexpectedEof` for an unterminated record) as

@@ -16,6 +16,13 @@ const LEXER_BUF_SIZE: usize = 1024 * 1024;
 pub struct Token {
     pub text: String,
     pub offset: u64,
+    quoted: bool,
+}
+
+impl Token {
+    pub(crate) fn is_keyword(&self, keyword: &str) -> bool {
+        !self.quoted && self.text.eq_ignore_ascii_case(keyword)
+    }
 }
 
 pub fn open_input(path: &Path) -> io::Result<Box<dyn Read + Send>> {
@@ -85,12 +92,14 @@ impl<R: Read> Lexer<R> {
                 return Ok(Some(Token {
                     text: (byte as char).to_string(),
                     offset,
+                    quoted: false,
                 }));
             }
             if matches!(byte, b'(' | b')' | b';') {
                 return Ok(Some(Token {
                     text: (byte as char).to_string(),
                     offset,
+                    quoted: false,
                 }));
             }
             if byte == b'"' {
@@ -127,6 +136,7 @@ impl<R: Read> Lexer<R> {
         Ok(Some(Token {
             text: into_text(bytes),
             offset,
+            quoted: false,
         }))
     }
 
@@ -152,6 +162,7 @@ impl<R: Read> Lexer<R> {
         Ok(Some(Token {
             text: into_text(bytes),
             offset,
+            quoted: true,
         }))
     }
 

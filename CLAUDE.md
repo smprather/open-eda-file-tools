@@ -304,10 +304,10 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   A backend whose source has several records per object must report `c` when
   any record is a clock record (real per-edge files tag every clock net as
   data too).
-- **Clock net -> its drivers; clock pin -> its instance; endpoints excluded.**
-  `clock_object_instances_impl` (`core/src/def.rs`) marks non-endpoint instances with an
-  output on a clock net, or with a clock pin that is an output or
-  clock-through input. Names compare with DEF backslash escapes removed.
+- **Clock nets mark their drivers, including sequential endpoints.**
+  `clock_object_instances` in `core/src/def.rs` also marks explicitly
+  selected output and clock-through pins. An endpoint's input never marks
+  it. Names compare with DEF backslash escapes removed.
 - **The binary cache is versioned.** Magic headers and `CACHE_VERSION` guard
   the on-disk format; components, raw net records, a fixed-offset net index, a
   name index and connectivity live in separate files so single-net queries read
@@ -384,8 +384,9 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
 `sdc_tools` extracts the clocks an SDC creates:
 
 ```
-sdc_tools/tcl.py     tclsh >= 8.6 discovery, safe interpreter, stub prelude
-sdc_tools/clocks.py  create_clock / create_generated_clock records
+core/src/sdc/       tclsh >= 8.6, safe interpreter, stub prelude
+core/src/sdc.rs     create_clock / create_generated_clock records
+sdc_tools/clocks.py Python wrapper and clock dataclass
 sdc_tools/clock_tree.py  forward trace from clock roots through DEF connectivity
 sdc_tools/cli.py     `sdc-tools clocks` / `sdc-tools clock-cells`
 ```
@@ -401,12 +402,12 @@ sdc_tools/cli.py     `sdc-tools clocks` / `sdc-tools clock-cells`
   otherwise `tclsh8.6`, then `tclsh`. There is no static-parser fallback.
 - **Collections stay symbolic**: `port:clk`, `pin:div/Q`, `net:clk`,
   `cell:u1`. Resolving names against DEF/LEF/Liberty is a separate pass.
-- **Records cross the process boundary as JSON** emitted by the prelude and
-  parsed with `json.loads`; the prelude must stay Tcl 8.6-compatible.
-- **Clock-tree cells come from connectivity, never names.** `clock_tree_cells`
-  (`clock_tree_cells_impl` in `core/src/def.rs`) seeds nets from the SDC roots and follows input→output through
-  combinational cells; endpoints end the trace and are not reported. LEF is
-  not needed. Each instance's nets are expanded once (first visit), so the
+- **The Tcl prelude emits length-prefixed UTF-8 fields.** Keep it Tcl
+  8.6-compatible and preserve symbolic collections as separate endpoints.
+- **Clock-tree cells come from connectivity.** `def::clock_tree_cells` seeds
+  nets from SDC roots and follows combinational cells from input to output.
+  Endpoint inputs stop the trace. An endpoint that drives a clock net is
+  included. Each instance's nets are expanded on the first visit, so the
   queue stays O(nets + connections) here and in `traverse_clock_instances`.
 - **One Liberty clock-role model, shared.** `def_tools/clock_roles.py`
   (`CellClockRole`) feeds both the SDC trace and clock-data resolution. An
@@ -415,11 +416,10 @@ sdc_tools/cli.py     `sdc-tools clocks` / `sdc-tools clock-cells`
   *not* an endpoint: its only clock-through input is its clock pin, so the
   trace passes CK→GCK and a clock on the enable/test pin never marks it.
   `is_seq` is unchanged (ICGs have a latch, so they are `is_seq`).
-- **The trace is pruned to clock pins by default.** A candidate is reported
-  only if a clock pin is reachable from it (backward pass in
-  `clock_tree_cells_impl`); otherwise a generated clock on a divider flop's
-  `Q` leaks into its whole datapath cone. `prune=False` / `--no-prune` keeps
-  every touched cell.
+- **The trace is pruned to clock pins by default.** The backward pass in
+  `def::clock_tree_cells` keeps paths reaching clock pins. Sequential
+  drivers on explicit clock roots are also kept. `prune=False` or
+  `--no-prune` keeps every touched candidate.
 - **Liberty metadata parses one thread per library.** `cell_clock_roles` parses
   each library with `ThreadPoolExecutor`; `parse_file` releases the GIL, so the
   set parses concurrently. Later libraries win for duplicate cell names.
