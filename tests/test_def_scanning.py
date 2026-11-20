@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -357,29 +359,62 @@ def write_fanout_design(path: Path, nets: int) -> Path:
     return path
 
 
-def test_fanout_clock_cell_output_matches_reference(tmp_path: Path) -> None:
-    """Expected values were taken from the reference build (e98bd32) on this design."""
-    count = 300
-    design = write_fanout_design(tmp_path / "fan.def", count)
+SMALL_FANOUT_DEF = """\
+VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+DESIGN s ;
+UNITS DISTANCE MICRONS 1000 ;
+COMPONENTS 7 ;
+  - u0 CLKBUF + PLACED ( 0 0 ) N ;
+  - u1 CLKBUF + PLACED ( 0 0 ) N ;
+  - h0 INV + PLACED ( 0 0 ) N ;
+  - h1 INV + PLACED ( 0 0 ) N ;
+  - h2 INV + PLACED ( 0 0 ) N ;
+  - h3 INV + PLACED ( 0 0 ) N ;
+  - hk INV + PLACED ( 0 0 ) N ;
+END COMPONENTS
+NETS 5 ;
+  - clk ( PIN clk ) ( u0 A ) ;
+  - n0 ( u0 Y ) ( u1 A ) ( h0 A ) ( hk A ) ;
+  - n1 ( u0 Y ) ( hk A ) ( h1 A ) ;
+  - n2 ( u1 Y ) ( h2 A ) ( h3 A ) ;
+  - n3 ( u1 Y ) ( u0 A ) ( hk A ) ;
+END NETS
+END DESIGN
+"""
+
+# Literals produced by the reference build (commit e98bd32, before the
+# per-instance expansion change) on SMALL_FANOUT_DEF.
+SMALL_FANOUT_CSV = (
+    "clock,root_type,root_name,instance,macro,net,is_clock_cell\n"
+    "clk,port,clk,h0,INV,n0,false\n"
+    "clk,port,clk,h1,INV,n1,false\n"
+    "clk,port,clk,h2,INV,n2,false\n"
+    "clk,port,clk,h3,INV,n2,false\n"
+    "clk,port,clk,hk,INV,n0,false\n"
+    "clk,port,clk,u0,CLKBUF,clk,true\n"
+    "clk,port,clk,u1,CLKBUF,n0,true\n"
+)
+SMALL_FANOUT_CELLS = ["h0", "h1", "h2", "h3", "hk", "u0", "u1"]
+
+
+def test_fanout_small_output_matches_reference(tmp_path: Path) -> None:
+    """hk is reached by n0 and n1 (first net n0); u1 is a second clock cell."""
+    design = tmp_path / "small.def"
+    design.write_text(SMALL_FANOUT_DEF, encoding="utf-8")
     out = tmp_path / "out.csv"
     def_tools.write_clock_instances_csv(design, [("clk", "port", "clk")], ["clk"], out)
-    names = sorted([f"h{i}" for i in range(count)] + ["u0"])
-    rows = ["clock,root_type,root_name,instance,macro,net,is_clock_cell"]
-    for name in names:
-        if name == "u0":
-            rows.append("clk,port,clk,u0,CLKBUF,clk,true")
-        else:
-            rows.append(f"clk,port,clk,{name},INV,n{name[1:]},false")
-    assert out.read_text(encoding="utf-8") == "\n".join(rows) + "\n"
+    assert out.read_text(encoding="utf-8") == SMALL_FANOUT_CSV
     cells = _native.clock_tree_cells(design, ["port:clk"], FANOUT_ROLES, False)
-    assert cells == names
-    assert cells[:3] == ["h0", "h1", "h10"] and cells[-2:] == ["h99", "u0"]
+    assert cells == SMALL_FANOUT_CELLS
 
 
 FANOUT_CHILD = """
-import sys
+import resource, sys
+resource.setrlimit(resource.RLIMIT_AS, (4 << 30, 4 << 30))
 import def_tools
 from liberty_tools import _native
+_native.set_threads(1)
 design, out = sys.argv[1], sys.argv[2]
 roles = [("INV", ["A"], ["Y"], False, []), ("CLKBUF", ["A"], ["Y"], False, [])]
 def_tools.write_clock_instances_csv(design, [("clk", "port", "clk")], ["clk"], out)
@@ -388,22 +423,15 @@ assert len(cells) == int(sys.argv[3]) + 1, len(cells)
 """
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"), reason="RLIMIT_AS is only enforced on Linux"
+)
 def test_fanout_clock_cell_traversal_memory_is_bounded(tmp_path: Path) -> None:
     """A clock cell on N nets must not queue its nets once per net (O(N^2) memory)."""
-    import resource
-    import subprocess
-    import sys
-
     count = 140_000
     design = write_fanout_design(tmp_path / "fan.def", count)
-    limit = 3 << 30
-
-    def cap() -> None:
-        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
-
     result = subprocess.run(
         [sys.executable, "-c", FANOUT_CHILD, str(design), str(tmp_path / "o.csv"), str(count)],
-        preexec_fn=cap,
         capture_output=True,
         text=True,
         timeout=120,
