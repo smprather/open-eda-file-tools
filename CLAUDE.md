@@ -348,8 +348,10 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   entries; nets resolve to the last definition); names seen only in nets get
   later ids in first-seen order; `PORT = u32::MAX` is `( PIN name )`. Adjacency
   lists entries in net order, then connection order, and is built sequentially.
-  `+ SYNTHESIZED` connections are accepted. A COMPONENTS section after nets
-  were read is an error naming the byte. Clock trace, clock-object resolution
+  `+ SYNTHESIZED` connections are accepted. A single COMPONENTS section after
+  NETS/SPECIALNETS is fine (their records are held until it ends); a second
+  COMPONENTS section, once nets were resolved, is an error naming the byte, in
+  the DEF-backed readers and in cache creation alike. Clock trace, clock-object resolution
   and `clock-instances` all run on it; do not add per-connection strings.
 - **All route geometry comes from one state machine.** `parse_net_shapes_record`
   (`core/src/def.rs`) drives the direct scan, the Python iterator and the cache

@@ -168,7 +168,11 @@ return identical rows and counts to direct scans.
 
 ## Performance and CPU use
 
-All DEF commands stream: memory does not grow with design size. The scan that
+The commands that write rows (`instances`, `net-shapes`, `cache create`) stream:
+memory does not grow with design size. The connectivity commands (clock
+trace, `clock-instances` and clock-data resolution) hold the whole design's
+connectivity, as flat integer arrays: 724 MB peak RSS on the 2M-instance
+synthetic design, 91 MB on cva6. The scan that
 splits the file into records is sequential and runs on its own thread, one
 batch ahead of the parallel parse; records are skipped without being copied
 when a command does not need them (`net-shapes` reads only the matching net,
@@ -193,10 +197,17 @@ Measured on a Ryzen 9 5900X (12 cores / 24 threads), files in page cache:
 
 The table format scans the DEF twice (column widths first). The clock trace
 runs on a flat id-based connectivity (`core/src/connectivity.rs`): names are
-stored once, connections are integer pairs. Against the previous per-string
-layout it takes 1.30 s instead of 2.52 s on the synthetic design (peak RSS
-724 MB instead of 1923 MB) and 0.12 s instead of 0.16 s on cva6 (91 MB
-instead of 159 MB).
+stored once, connections are integer pairs. The table figures come from
+`def_bench.py`. A separate old-versus-new probe (one run of each build on the
+same file) measured the previous per-string layout at 2.52 s on the synthetic
+design (peak RSS 1923 MB) and 0.16 s on cva6 (159 MB), against 1.30 s / 724 MB
+and 0.12 s / 91 MB for the flat layout; the 0.01 s differences from the table
+are run-to-run noise between the two tools.
+
+A DEF has one COMPONENTS section. A single COMPONENTS section after
+NETS/SPECIALNETS is fine (their records are held until it ends); a second one,
+once nets were resolved, is an error naming its DEF byte. `cache create`
+refuses the same input with the same error.
 
 ## Python API
 
