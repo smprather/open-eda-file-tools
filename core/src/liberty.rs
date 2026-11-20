@@ -7,6 +7,9 @@ use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+mod clock_roles;
+pub use clock_roles::{CellClockRole, cell_clock_roles_for_cells};
+
 /// Unit scales resolved from the library header and inherited by every cell
 /// and pin, so that scalar accessors can report values with their scale
 /// attached (and SI-converted variants where useful).
@@ -818,9 +821,13 @@ pub fn minimized_sop(expr: &BoolExpr, mentioned: &[String], canonical: &str) -> 
 
 #[doc(hidden)]
 pub fn open_input(path: &str) -> io::Result<Box<dyn Read>> {
+    open_input_path(Path::new(path))
+}
+
+fn open_input_path(path: &Path) -> io::Result<Box<dyn Read>> {
     let file = File::open(path)?;
     let reader = BufReader::with_capacity(128 * 1024, file);
-    if path.ends_with(".gz") {
+    if path.as_os_str().as_encoded_bytes().ends_with(b".gz") {
         Ok(Box::new(GzDecoder::new(reader)))
     } else {
         Ok(Box::new(reader))
@@ -834,9 +841,9 @@ pub fn open_input(path: &str) -> io::Result<Box<dyn Read>> {
 // at a time instead of parsing the entire file up front. The scanner is lexer-
 // faithful about strings/comments but does *not* build any AST.
 
-pub(crate) fn read_to_memory(path: &str) -> io::Result<Vec<u8>> {
+pub(crate) fn read_to_memory(path: &Path) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
-    open_input(path)?.read_to_end(&mut buf)?;
+    open_input_path(path)?.read_to_end(&mut buf)?;
     Ok(buf)
 }
 
@@ -1177,7 +1184,7 @@ impl LibraryIndex {
 
 #[doc(hidden)]
 pub fn open_library_index(path: &str) -> Result<LibraryIndex, ParseLoadError> {
-    let data = read_to_memory(path).map_err(ParseLoadError::Io)?;
+    let data = read_to_memory(Path::new(path)).map_err(ParseLoadError::Io)?;
     let scan = index_cells(&data);
     // The library header is the preamble *and* the top-level items that
     // follow the first cell: a library may declare its units or its
@@ -1227,8 +1234,8 @@ pub(crate) struct Token {
     end: usize,
 }
 
-pub(crate) struct Lexer {
-    reader: Box<dyn Read>,
+pub(crate) struct Lexer<'a> {
+    reader: Box<dyn Read + 'a>,
     peeked: VecDeque<u8>,
     line: usize,
     column: usize,
@@ -1243,8 +1250,8 @@ pub(crate) struct Lexer {
 pub(crate) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 pub(crate) const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-impl Lexer {
-    pub fn new(reader: Box<dyn Read>) -> Result<Self, ParseError> {
+impl<'a> Lexer<'a> {
+    pub fn new(reader: Box<dyn Read + 'a>) -> Result<Self, ParseError> {
         Ok(Self {
             reader,
             peeked: VecDeque::new(),
@@ -1544,8 +1551,8 @@ pub(crate) struct LibraryUnits {
     driver_waveforms: Vec<TimingTableData>,
 }
 
-pub(crate) struct Parser {
-    lexer: Lexer,
+pub(crate) struct Parser<'a> {
+    lexer: Lexer<'a>,
     current: Option<Token>,
     cell_filter: Option<HashSet<String>>,
     /// Skip floating-point table bodies (`cell_rise`, power, CCSN) without
@@ -1558,9 +1565,9 @@ pub(crate) struct Parser {
     cell_spans: Vec<(String, usize, usize)>,
 }
 
-impl Parser {
+impl<'a> Parser<'a> {
     pub fn new(
-        reader: Box<dyn Read>,
+        reader: Box<dyn Read + 'a>,
         cell_filter: Option<HashSet<String>>,
         skip_tables: bool,
     ) -> Result<Self, ParseError> {
@@ -1691,7 +1698,8 @@ impl Parser {
                                 .as_ref()
                                 .map_or(true, |filter| filter.contains(&cell_name))
                             {
-                                cells.push(self.parse_cell_body(cell_name.clone())?);
+                                let (cell, _) = self.parse_cell_body(cell_name.clone())?;
+                                cells.push(cell);
                                 // `previous_end` is the end of the cell's closing
                                 // brace: the group text is [item_start, end).
                                 self.cell_spans
@@ -1759,7 +1767,8 @@ impl Parser {
         Ok(())
     }
 
-    pub fn parse_cell_body(&mut self, name: String) -> Result<CellData, ParseError> {
+    /// Parse a cell and report whether it contains a Liberty `memory` group.
+    pub fn parse_cell_body(&mut self, name: String) -> Result<(CellData, bool), ParseError> {
         let mut area = None;
         let mut pins = Vec::new();
         let mut buses = Vec::new();
@@ -1768,6 +1777,7 @@ impl Parser {
         let mut dynamic_currents = Vec::new();
         let mut ff = None;
         let mut latch = None;
+        let mut memory = false;
         let mut leakage_powers = Vec::new();
         let mut pg_pins = Vec::new();
         while !self.consume_symbol(b'}')? {
@@ -1804,6 +1814,10 @@ impl Parser {
                         "latch" | "latch_bank" => {
                             latch = Some(self.parse_latch_body(&args)?);
                         }
+                        "memory" => {
+                            memory = true;
+                            self.skip_group_body()?;
+                        }
                         "leakage_power" => {
                             leakage_powers.push(self.parse_leakage_power_body()?);
                         }
@@ -1831,7 +1845,7 @@ impl Parser {
                 return Err(self.error_here("expected '(' or ':' after cell item name"));
             }
         }
-        Ok(CellData {
+        let cell = CellData {
             name,
             area,
             pins,
@@ -1844,7 +1858,8 @@ impl Parser {
             leakage_powers,
             pg_pins,
             units: UnitContext::default(),
-        })
+        };
+        Ok((cell, memory))
     }
 
     /// Parse a `pg_pin` body: capture its simple `name : value` attributes;
@@ -3017,7 +3032,7 @@ pub fn read_source_text(
     source_hash: u64,
 ) -> Result<String, WriteError> {
     let path = source_path.ok_or(WriteError::NoSource)?;
-    let data = read_to_memory(path).map_err(|err| WriteError::Io(err.to_string()))?;
+    let data = read_to_memory(Path::new(path)).map_err(|err| WriteError::Io(err.to_string()))?;
     if data.len() != source_len || fnv1a(&data) != source_hash {
         return Err(WriteError::Changed(format!(
             "source file {path:?} changed since it was parsed; re-parse it before writing"

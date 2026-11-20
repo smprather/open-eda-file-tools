@@ -318,7 +318,7 @@ END NETS
     assert_eq!(
         resolution,
         ClockObjectResolution {
-            instances: vec![r"u\[0\]".into(), r"z\/buf".into()],
+            instances: vec!["ff".into(), r"u\[0\]".into(), r"z\/buf".into()],
             unmatched_nets: vec!["missing_z".into(), "missing_a".into()],
             unmatched_pins: vec![
                 ("gone".into(), "A".into()),

@@ -305,4 +305,12 @@ def set_threads(threads: int | None = None) -> None:
 def get_threads() -> int:
     """CPUs native readers will use: the limit, else all logical CPUs."""
 
+def evaluate_sdc(path: _StrPath) -> tuple[list[list[str]], str | None]: ...
+def sdc_clocks(path: _StrPath) -> list[
+    tuple[
+        str, float | None, list[float], list[str], str | None, int | None,
+        int | None, list[float], bool,
+    ]
+]: ...
+
 def __getattr__(name: str) -> Any: ...

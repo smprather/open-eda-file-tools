@@ -100,13 +100,11 @@ from a reader for a malformed file.
   (one per launching clock edge is common, and then every clock net also has
   data records), the backend applies the precedence rule: **any clock record
   makes the object `c`**.
-- *Net -> instances.* A clock net marks the instances that **drive** it,
-  except flip-flops, latches and memories (a divider flop driving a generated
-  clock is a clock source, not a clock-tree cell).
-- *Pin -> instance.* A clock pin marks its instance when the instance is not
-  such an endpoint and the pin is an output or a clock-through input — for an
-  integrated clock gate (`clock_gating_integrated_cell`) the clock pin, never
-  the enable or test pin.
+- A clock net marks the instances that **drive** it, including sequential
+  drivers such as divider flip-flops.
+- A clock pin marks its instance through an output or a clock-through
+  input. A sequential endpoint qualifies through its output only. For an
+  integrated clock gate, its clock input qualifies.
 - *Aggregation.* An instance is a clock cell when any one of its nets or pins
   marks it. Net-based and pin-based sources are both accepted and may be
   mixed; pin-based is recommended (no connectivity inference, and it tells a
@@ -211,11 +209,12 @@ refuses the same input with the same error.
 
 ## Python API
 
-The same readers are also available as a plain Rust rlib with no Python
-dependency: `open-eda-file-tools-core` — `def::scan_instance_bboxes`,
-`def::dbu_per_micron`, `def::scan_net_shapes`, `lef::macro_sizes`,
-`liberty::cell_attributes` / `liberty::LibraryIndex`. See
-[docs/ai-api.md §8](ai-api.md#8-rust-core-open-eda-file-tools-core--plain-rust-no-python).
+The [Rust core API](ai-api.md#8-rust-core-open-eda-file-tools-core--plain-rust-no-python)
+also provides `def::scan_clock_nets_and_instances`, which streams placed
+bboxes and reads connections for selected regular clock nets in one pass.
+It uses LEF sizes when available and a square four-site marker from the
+smallest positive DEF `ROW` step for unknown macros. A usable row step is
+required when any placed macro has no LEF size.
 
 ```python
 import def_tools
