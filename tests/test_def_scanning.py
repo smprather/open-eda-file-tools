@@ -334,3 +334,78 @@ def test_synthesized_in_split_connection_list(tmp_path):
         if name in ("nets.dat", "nets.idx"):  # raw records keep the marker text
             continue
         assert (tmp_path / "plain_cache" / name).read_bytes() == (tmp_path / "marked_cache" / name).read_bytes(), name
+
+
+FANOUT_ROLES = [("INV", ["A"], ["Y"], False, []), ("CLKBUF", ["A"], ["Y"], False, [])]
+
+
+def write_fanout_design(path: Path, nets: int) -> Path:
+    """One clock buffer `u0` driving `nets` nets, each read by an inverter."""
+    lines = [
+        "VERSION 5.8 ;",
+        'DIVIDERCHAR "/" ;',
+        "DESIGN s ;",
+        "UNITS DISTANCE MICRONS 1000 ;",
+        f"COMPONENTS {nets + 1} ;",
+        "  - u0 CLKBUF + PLACED ( 0 0 ) N ;",
+    ]
+    lines += [f"  - h{i} INV + PLACED ( 0 0 ) N ;" for i in range(nets)]
+    lines += ["END COMPONENTS", f"NETS {nets + 1} ;", "  - clk ( PIN clk ) ( u0 A ) ;"]
+    lines += [f"  - n{i} ( u0 Y ) ( h{i} A ) ;" for i in range(nets)]
+    lines += ["END NETS", "END DESIGN", ""]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def test_fanout_clock_cell_output_matches_reference(tmp_path: Path) -> None:
+    """Expected values were taken from the reference build (e98bd32) on this design."""
+    count = 300
+    design = write_fanout_design(tmp_path / "fan.def", count)
+    out = tmp_path / "out.csv"
+    def_tools.write_clock_instances_csv(design, [("clk", "port", "clk")], ["clk"], out)
+    names = sorted([f"h{i}" for i in range(count)] + ["u0"])
+    rows = ["clock,root_type,root_name,instance,macro,net,is_clock_cell"]
+    for name in names:
+        if name == "u0":
+            rows.append("clk,port,clk,u0,CLKBUF,clk,true")
+        else:
+            rows.append(f"clk,port,clk,{name},INV,n{name[1:]},false")
+    assert out.read_text(encoding="utf-8") == "\n".join(rows) + "\n"
+    cells = _native.clock_tree_cells(design, ["port:clk"], FANOUT_ROLES, False)
+    assert cells == names
+    assert cells[:3] == ["h0", "h1", "h10"] and cells[-2:] == ["h99", "u0"]
+
+
+FANOUT_CHILD = """
+import sys
+import def_tools
+from liberty_tools import _native
+design, out = sys.argv[1], sys.argv[2]
+roles = [("INV", ["A"], ["Y"], False, []), ("CLKBUF", ["A"], ["Y"], False, [])]
+def_tools.write_clock_instances_csv(design, [("clk", "port", "clk")], ["clk"], out)
+cells = _native.clock_tree_cells(design, ["port:clk"], roles, False)
+assert len(cells) == int(sys.argv[3]) + 1, len(cells)
+"""
+
+
+def test_fanout_clock_cell_traversal_memory_is_bounded(tmp_path: Path) -> None:
+    """A clock cell on N nets must not queue its nets once per net (O(N^2) memory)."""
+    import resource
+    import subprocess
+    import sys
+
+    count = 140_000
+    design = write_fanout_design(tmp_path / "fan.def", count)
+    limit = 3 << 30
+
+    def cap() -> None:
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+    result = subprocess.run(
+        [sys.executable, "-c", FANOUT_CHILD, str(design), str(tmp_path / "o.csv"), str(count)],
+        preexec_fn=cap,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]

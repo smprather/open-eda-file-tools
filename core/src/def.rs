@@ -322,6 +322,9 @@ pub fn clock_tree_cells_impl(
     seeds.sort_unstable();
     seeds.dedup();
 
+    // Each candidate instance is expanded once (`first_visit` below), so the
+    // queue is bounded by the seeds plus the connections; `reached_from`
+    // still records every reach.
     let mut queue: VecDeque<u32> = seeds.into_iter().collect();
     let mut seen_nets = vec![false; c.nets.len()];
     // Nets a clock pin hangs on, and the candidates fed by / driving each net.
@@ -2340,6 +2343,8 @@ pub(crate) fn traverse_clock_instances<'a>(
     initial_nets: &[u32],
     patterns: &[String],
 ) -> Vec<(&'a str, &'a str, &'a str, bool)> {
+    // Each instance is expanded once (on its first visit), so the queue holds
+    // at most the seeds plus one entry per connection of a clock cell.
     let mut queue: VecDeque<u32> = initial_nets.iter().copied().collect();
     let mut seen_nets = vec![false; c.nets.len()];
     // Per instance id: the first net that reached it and its clock-cell flag.
@@ -2355,15 +2360,14 @@ pub(crate) fn traverse_clock_instances<'a>(
                 continue;
             }
             let slot = &mut seen_instances[instance as usize];
-            let is_clock = match slot {
-                Some((_, is_clock)) => *is_clock,
-                None => {
-                    let is_clock =
-                        is_clock_cell(c.macro_of(instance).unwrap_or_default(), patterns);
-                    *slot = Some((net, is_clock));
-                    is_clock
-                }
-            };
+            if slot.is_some() {
+                // Already visited: a clock cell's nets were queued on its
+                // first visit, so queueing them again only adds duplicates
+                // (this is what keeps the queue O(nets + connections)).
+                continue;
+            }
+            let is_clock = is_clock_cell(c.macro_of(instance).unwrap_or_default(), patterns);
+            *slot = Some((net, is_clock));
             if is_clock {
                 for (next_net, _) in adjacency.of(instance) {
                     if !seen_nets[next_net as usize] {

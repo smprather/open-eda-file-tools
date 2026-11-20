@@ -402,7 +402,8 @@ sdc_tools/cli.py     `sdc-tools clocks` / `sdc-tools clock-cells`
 - **Clock-tree cells come from connectivity, never names.** `clock_tree_cells`
   (`clock_tree_cells_impl` in `core/src/def.rs`) seeds nets from the SDC roots and follows input→output through
   combinational cells; endpoints end the trace and are not reported. LEF is
-  not needed.
+  not needed. Each instance's nets are expanded once (first visit), so the
+  queue stays O(nets + connections) here and in `traverse_clock_instances`.
 - **One Liberty clock-role model, shared.** `def_tools/clock_roles.py`
   (`CellClockRole`) feeds both the SDC trace and clock-data resolution. An
   endpoint is a non-ICG cell with `ff`/`latch` or a `clock : true` pin
