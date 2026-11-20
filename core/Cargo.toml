@@ -1,5 +1,5 @@
-# The plain-Rust core of open-eda-file-tools: LEF/DEF readers and the Liberty
-# parser with no Python binding layer.
+# The plain-Rust core of open-eda-file-tools: LEF, DEF, Liberty, SPEF, and
+# DSPF readers without a Python binding layer.
 #
 # Allowed direct dependencies (keep this list minimal for air-gapped,
 # vendored-mirror consumers; no pyo3, no arrow, no parquet, no C toolchain):

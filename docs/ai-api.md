@@ -562,7 +562,7 @@ open-eda-file-tools-core = { git = "https://github.com/smprather/open-eda-file-t
 ```
 
 ```rust
-use open_eda_file_tools_core::{Error, def, lef, liberty, threads};
+use open_eda_file_tools_core::{Error, def, lef, liberty, pex, threads};
 
 // DEF COMPONENTS -> instance bboxes in integer DBU, LEF SIZE/ORIGIN and
 // UNITS DISTANCE MICRONS honored. A failed row surfaces as the final
@@ -597,6 +597,15 @@ index.capacitive_load_unit(); index.energy_unit_joules();
 index.templates();                    // HashMap<String, Vec<Option<String>>>
 index.attributes();                   // Vec<(String, String)>
 
+// SPEF/DSPF `pex_path: &Path` can be plain or .gz:
+let header = pex::header(pex_path)?;
+let summaries = pex::summaries(pex_path, pex::SummaryMode::Parallel)?;
+for net in summaries {
+    // net.name, .total_cap, .ground_cap, .coupling_cap, .res_count, .res_total
+}
+let parsed = pex::parse(pex_path, true)?;   // header and full connection/RC entries
+let hist = pex::histogram(pex_path, 20, pex::SummaryMode::Stream)?;
+
 // CPU limit for every parallel reader (same as def_tools.set_threads):
 threads::set_threads(Some(4))?;   // Result<(), Error>; > 4096 is Error::Message
 ```
@@ -609,7 +618,7 @@ are not supported and may change in any release; everything else is
 crate-private. Every public entry point that runs parallel work installs itself
 inside the CPU limit (`set_threads`), and nested installs keep the outer budget.
 
-DEF and LEF errors (and `set_threads`) are `core::Error`, an enum:
+DEF, LEF, and PEX errors (and `set_threads`) are `core::Error`, an enum:
 `Error::Io(io::Error)` is any failure that surfaced as an `io::Error`, which
 includes malformed input reported by the tokenizer (`InvalidData` for
 "DEF missing COMPONENTS section", `UnexpectedEof` for an unterminated record) as

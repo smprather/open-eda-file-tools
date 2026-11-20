@@ -41,6 +41,30 @@ for net in parsed.nets:
         print(cap.id, cap.node1, cap.node2, cap.value, cap.ext)
 ```
 
+## Rust API
+
+The `open_eda_file_tools_core::pex` module accepts plain and gzipped SPEF and
+DSPF files. `header` reads the metadata and resolves ports. `summaries`
+returns each electrical net’s declared total capacitance, ground and
+coupling capacitance, and resistor count and sum in the file’s units.
+`parse` also exposes individual connections, capacitors, and resistors
+when `keep_entries` is enabled.
+
+```rust
+use std::path::Path;
+use open_eda_file_tools_core::pex::{self, SummaryMode};
+
+let path = Path::new("design.spef.gz");
+let header = pex::header(path)?;
+for net in pex::summaries(path, SummaryMode::Stream)? {
+    println!("{}: C={} coupling={} R={}", net.name, net.total_cap,
+             net.coupling_cap, net.res_total);
+}
+```
+
+See the [Rust core reference](ai-api.md#8-rust-core-open-eda-file-tools-core--plain-rust-no-python)
+for parallel summaries, full parsing, and histograms.
+
 ## Supported Syntax & Extensions
 
 - Header: `*SPEF` / `*DSPF`, design, vendor, program, version, divider/delimiter, and `T_UNIT` / `C_UNIT` / `R_UNIT` / `L_UNIT`.

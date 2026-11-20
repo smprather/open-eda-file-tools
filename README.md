@@ -236,10 +236,9 @@ uv run ruff check .
 uv run ty check
 ```
 
-Parsing lives in Rust under `src/`; the Python packages at the repository root
-are thin wrappers over one PyO3 extension module. No design files are
-committed: tests generate their LEF, DEF and SDC inputs with
-`tests/gen/design_gen.py`. The large-file Liberty smoke tests run only when
+The Liberty, LEF, DEF, and SPEF/DSPF parsers live in `core/`. The Python
+packages at the repository root use the PyO3 extension in `src/`. The
+tests generate their LEF, DEF, and SDC inputs with `tests/gen/design_gen.py`. The large-file Liberty smoke tests run only when
 `generic80_ss_125c_1p116v_0p84v.lib` is present in the repository root.
 
 Documentation is part of the change. A new flag, column, function or behavior
