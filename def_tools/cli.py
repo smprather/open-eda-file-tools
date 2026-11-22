@@ -22,6 +22,7 @@ from .instances import (
     effective_batch_size,
     expand_lef_argv,
     memory_ceiling,
+    parse_block_defs,
     parse_column_spec,
     parse_size,
     peak_rss_bytes,
@@ -122,6 +123,13 @@ def main() -> None:
     help="DEF design file (.def or .def.gz).",
 )
 @click.option(
+    "--block-def",
+    "block_def_args",
+    multiple=True,
+    metavar="MACRO=PATH",
+    help="Expand a macro from a child .def or .def.gz. Repeat for nested block definitions.",
+)
+@click.option(
     "--lib",
     "libs",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
@@ -207,6 +215,7 @@ def main() -> None:
 def instances(
     lefs: tuple[Path, ...],
     def_path: Path,
+    block_def_args: tuple[str, ...],
     libs: tuple[Path, ...],
     clock_cells: Path | None,
     clock_data: str | None,
@@ -219,6 +228,10 @@ def instances(
     threads: int | None,
 ) -> None:
     """Dump placed instance bounding boxes (in microns) as CSV, Parquet, or table."""
+    try:
+        block_defs = parse_block_defs(block_def_args)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
     # Before any native work: the Liberty and clock-data steps run in parallel too.
     set_threads(threads)
     try:
@@ -244,6 +257,7 @@ def instances(
         batch_size=batch_size,
         max_memory=max_memory,
         threads=threads,
+        block_defs=block_defs,
     )
     if rc != 0:
         raise SystemExit(rc)

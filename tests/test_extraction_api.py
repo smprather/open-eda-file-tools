@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 import liberty_tools as lt
+from liberty_tools import _native
 
 
 LIBERTY_FIXTURE = """
@@ -502,3 +503,83 @@ def test_unbalanced_braces_report_clear_error(tmp_path):
     )
     with pytest.raises(ValueError, match="unbalanced braces"):
         lt.parse_file(path)
+
+
+def test_frame_export_uses_native_columns(tmp_path, monkeypatch):
+    liberty = lt.parse_file(write_fixture(tmp_path))
+    pl = pytest.importorskip("polars")
+    from polars.testing import assert_frame_equal
+
+    def fail(**_filters):
+        pytest.fail("column-wise export requested the list of dictionaries")
+
+    power_path = tmp_path / "power.lib"
+    power_path.write_text(POWER_FIXTURE)
+    power = lt.parse_file(power_path)
+    for doc, kind, method, name in (
+        (liberty, "timing", "timing_tables", "ram_macro"),
+        (power, "power", "internal_power_tables", "buf"),
+    ):
+        rows = getattr(doc, method)(cell=name)
+        assert rows
+        expected = pl.DataFrame(rows, infer_schema_length=None)
+        with monkeypatch.context() as patch:
+            patch.setattr(type(doc), method, lambda self, **filters: fail(**filters))
+            assert_frame_equal(doc.to_polars(kind, cell=name), expected)
+            assert doc.to_polars(kind, cell="absent").shape == (0, 0)
+
+
+
+def test_ipc_preserves_late_optional_columns_and_duplicate_rows(tmp_path):
+    import polars as pl
+    from polars.testing import assert_frame_equal
+
+    samples = ", ".join(str(n) for n in range(4096))
+    source = f"""library (m) {{
+        cell (C) {{ area : 1; pin (Y) {{
+            timing () {{ cell_rise (a) {{ index_1 ("{samples}"); values ("{samples}"); }} }}
+        }} }}
+        cell (C) {{ area : 2; pin (Y) {{
+            timing () {{ when : A'; cell_rise (scalar) {{ values ("-1"); }} }}
+        }} }}
+    }}"""
+    path = tmp_path / "late-columns.lib"
+    path.write_text(source)
+    doc = lt.parse_file(path)
+    assert doc.cells() == ["C", "C"]
+    assert doc.cell("C").area == 1
+    rows = doc.timing_tables(cell="C")
+    assert len(rows) == 4097 and rows[-1]["when"] == "A'"
+    expected = pl.DataFrame(rows, infer_schema_length=None)
+    actual = doc.to_polars(cell="C")
+    assert actual.schema["index_3"] == pl.Null
+    assert actual.schema["row"] == pl.Int64
+    assert_frame_equal(actual, expected)
+
+    table = doc.cell("C").pin("Y").timing_arcs()[0].table("cell_rise")
+    raw_doc = _native.parse_file(str(path))
+    raw_table = raw_doc.cell("C").pin("Y").timing_arcs()[0].table("cell_rise")
+    assert_frame_equal(table.to_polars(), pl.DataFrame(raw_table.rows()))
+    with pytest.raises(TypeError, match=r"Document\.timing_tables\(\) got an unexpected keyword"):
+        doc.to_polars(related_pg_pin="VDD")
+    with pytest.raises(TypeError, match=r"Document\.internal_power_tables\(\) got an unexpected keyword"):
+        doc.to_polars("power", timing_type="combinational")
+    with pytest.raises(ValueError, match="kind"):
+        doc.to_polars("noise")  # ty: ignore[invalid-argument-type]
+    with pytest.raises(ValueError, match="invalid when expression"):
+        doc.to_polars(when="(")
+
+
+def test_child_handles_keep_shared_cell_data_alive(tmp_path):
+    path = write_fixture(tmp_path)
+    index = lt.LibraryIndex.open(path)
+    cell = index.cell("ram_macro")
+    pin = cell.bus("A").pin("A[0]")
+    arc = pin.timing_arcs()[0]
+    table = arc.table("fall_constraint")
+    del index, cell, pin, arc
+
+    values = table.values
+    values.clear()
+    assert table.values == [7.0, 8.0]
+    assert table.index_1 == [0.5, 0.6]

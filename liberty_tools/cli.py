@@ -7,13 +7,19 @@ formatter; the group is the single entry point for Liberty command-line tools.
 from __future__ import annotations
 
 import gzip
+import shutil
 import sys
+import tempfile
+from collections.abc import Iterator
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import TextIO
 
 import click
 
-from liberty_format import TransparencyError, format_text
+from liberty_format import TransparencyError, _reindent_lines, _verify_tokens
+
+from . import _native
 
 
 def _package_version() -> str:
@@ -23,11 +29,32 @@ def _package_version() -> str:
         return "0.0.0+unknown"
 
 
-def _read(path: Path) -> str:
-    if path.suffix == ".gz":
-        with gzip.open(path, "rt", encoding="utf-8") as handle:
-            return handle.read()
-    return path.read_text(encoding="utf-8")
+def _copy_lines(source: TextIO, copy: TextIO) -> Iterator[str]:
+    for line in source:
+        copy.write(line)
+        yield line
+
+
+def _stage_format(path: Path, before: Path, after: Path, indent: str) -> None:
+    # Text mode matches the CLI's UTF-8 and universal-newline input rules.
+    opener = gzip.open if path.suffix == ".gz" else open
+    with (
+        opener(path, "rt", encoding="utf-8") as source,
+        before.open("w", encoding="utf-8", newline="\n") as normalized,
+        after.open("w", encoding="utf-8", newline="\n") as formatted,
+    ):
+        formatted.writelines(_reindent_lines(_copy_lines(source, normalized), indent))
+    _verify_tokens(_native._compare_token_files(before, after))
+
+
+def _same_contents(before: Path, after: Path) -> bool:
+    if before.stat().st_size != after.stat().st_size:
+        return False
+    with before.open("rb") as original, after.open("rb") as formatted:
+        while chunk := original.read(65536):
+            if chunk != formatted.read(65536):
+                return False
+    return True
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -72,32 +99,44 @@ def format_command(
     functionally transparent: it is accepted only if it lexes to the exact
     same token stream as the input (otherwise the file is left untouched).
     """
-    text = _read(file)
-    try:
-        formatted = format_text(text, indent=" " * indent)
-    except TransparencyError as exc:
-        raise click.ClickException(f"{file}: {exc}") from exc
+    with tempfile.TemporaryDirectory(prefix="liberty-format-") as scratch:
+        before = Path(scratch) / "input.lib"
+        after = Path(scratch) / "formatted.lib"
+        try:
+            _stage_format(file, before, after, " " * indent)
+        except TransparencyError as exc:
+            raise click.ClickException(f"{file}: {exc}") from exc
 
-    if check:
-        if formatted == text:
-            click.secho(f"{file}: already formatted", fg="green")
+        if check:
+            if _same_contents(before, after):
+                click.secho(f"{file}: already formatted", fg="green")
+                return
+            click.secho(f"{file}: would reformat", fg="yellow")
+            sys.exit(1)
+
+        if in_place:
+            if file.suffix == ".gz":
+                raise click.ClickException("--in-place not supported for .gz; use -o")
+            if _same_contents(before, after):
+                click.secho(f"{file}: unchanged", fg="green")
+                return
+            output = file
+
+        if output is None:
+            with after.open(encoding="utf-8", newline="\n") as formatted:
+                while lines := formatted.readlines(65536):
+                    click.echo("".join(lines), nl=False)
             return
-        click.secho(f"{file}: would reformat", fg="yellow")
-        sys.exit(1)
 
-    if in_place:
-        if file.suffix == ".gz":
-            raise click.ClickException("--in-place not supported for .gz; use -o")
-        if formatted == text:
-            click.secho(f"{file}: unchanged", fg="green")
-        else:
-            file.write_text(formatted, encoding="utf-8")
+        with (
+            after.open(encoding="utf-8", newline="\n") as formatted,
+            output.open("w", encoding="utf-8") as destination,
+        ):
+            shutil.copyfileobj(formatted, destination, length=65536)
+        if in_place:
             click.secho(f"{file}: formatted", fg="cyan")
-    elif output:
-        output.write_text(formatted, encoding="utf-8")
-        click.secho(f"wrote {output}", fg="cyan")
-    else:
-        click.echo(formatted, nl=False)
+        else:
+            click.secho(f"wrote {output}", fg="cyan")
 
 
 def format_main(argv: list[str] | None = None) -> None:

@@ -12,6 +12,32 @@ from typing import Any, final
 
 _StrPath = str | PathLike[str]
 
+def _sequential_flags(path: str) -> list[tuple[str, bool]]: ...
+
+@final
+class Document:
+    def _timing_ipc(
+        self, cell: str | None = None, pin: str | None = None,
+        related_pin: str | None = None, timing_type: str | None = None,
+        when: str | None = None, table: str | None = None,
+    ) -> tuple[bytes, int] | None: ...
+    def _power_ipc(
+        self, cell: str | None = None, pin: str | None = None,
+        related_pin: str | None = None, related_pg_pin: str | None = None,
+        when: str | None = None, table: str | None = None,
+    ) -> tuple[bytes, int] | None: ...
+    def __getattr__(self, name: str) -> Any: ...
+
+@final
+class TimingTable:
+    def _rows_ipc(self) -> tuple[bytes, int] | None: ...
+    def __getattr__(self, name: str) -> Any: ...
+
+@final
+class InternalPower:
+    def _table_shapes(self) -> list[tuple[str, int, bool]]: ...
+    def __getattr__(self, name: str) -> Any: ...
+
 @final
 class LefRect:
     """One ``RECT`` from a pin port, in LEF microns."""
@@ -104,6 +130,32 @@ class InstanceBBox:
 class InstanceBBoxIter:
     def __iter__(self) -> Iterator[InstanceBBox]: ...
     def __next__(self) -> InstanceBBox: ...
+
+@final
+class HierarchicalInstanceIter:
+    def __iter__(self) -> Iterator[InstanceBBox]: ...
+    def __next__(self) -> InstanceBBox: ...
+
+@final
+class DefHierarchy:
+    @property
+    def dbu_per_micron(self) -> int: ...
+    def instances(self) -> HierarchicalInstanceIter: ...
+    def _write_instances(
+        self,
+        format: str,
+        output: _StrPath | None,
+        batch_size: int,
+        columns: Sequence[tuple[str, str]] | None = None,
+        sequential: Sequence[str] | None = None,
+        clock: Sequence[str] | None = None,
+    ) -> tuple[int, int | None]: ...
+
+def read_def_hierarchy(
+    lefs: Sequence[_StrPath],
+    def_path: _StrPath,
+    block_defs: Sequence[tuple[str, _StrPath]],
+) -> DefHierarchy: ...
 
 @final
 class NetShape:
@@ -312,5 +364,8 @@ def sdc_clocks(path: _StrPath) -> list[
         int | None, list[float], bool,
     ]
 ]: ...
+
+def _compare_token_strings(before: str, after: str) -> tuple[bool, int, int]: ...
+def _compare_token_files(before: _StrPath, after: _StrPath) -> tuple[bool, int, int]: ...
 
 def __getattr__(name: str) -> Any: ...

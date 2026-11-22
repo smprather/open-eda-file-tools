@@ -24,6 +24,7 @@ core/                       Plain-Rust rlib `open-eda-file-tools-core` (issue #1
 core/src/lib.rs             Crate root: public re-exports and `Error`
 core/src/liberty.rs         Liberty lexer/parser/evaluator/data model + LibraryIndex + public API
 core/src/def.rs             DEF scanner, bbox/net-shape/clock logic, cache (no Arrow)
+core/src/def/hierarchy.rs   Mapped multi-DEF hierarchy and top-level instance transforms
 core/src/lef/               Shared LEF/DEF tokenizer (`lexer.rs`) + cell LEF parser (`cell_lef.rs`)
 core/src/pex.rs             SPEF/DSPF parser, summaries, and per-net RC data
 core/src/threads.rs         Process-wide CPU limit (`set_threads`)
@@ -126,23 +127,33 @@ tests/                     Pytest integration tests (inline fixture strings, no 
 
 The Liberty machinery is a single core file (plain Rust; the pyo3 shell in
 `src/lib.rs` wraps it); it contains:
-- **`Lexer`** — byte-level streaming tokenizer; handles `#`, `//`, `/* */` comments, quoted strings, backslash line continuation
+- **`Lexer`** — byte-level streaming tokenizer with a 32 KiB refill buffer; handles `#`, `//`, `/* */` comments, quoted strings, backslash line continuation
 - **`Parser`** — recursive descent; builds `*Data` structs (plain Rust) by consuming tokens
 - **`BoolParser` / `BoolExpr` / `bool_implies`** — Liberty Boolean expression parser and implication checker for `when` filters; uses brute-force truth-table enumeration
 - **`*Data` types, `Document`, `LibraryIndex`** — the parsed data model and the cell-offset index (`LibraryIndex::open`, `cell`, `cell_source`, ...)
 
-`src/lib.rs` (the `_native` module) holds the pyo3 side: the `#[pyclass]` types (`Document`, `Cell`, `Pin`, `Bus`, `Bundle`, `BusType`, `TimingArc`, `TimingTable`) that own `Vec<*Data>` and expose methods to Python, and the `parse_file` `#[pyfunction]` (opens `.lib` or `.lib.gz`, constructs the parser with an optional cell filter).
-
-There are two parallel type hierarchies: `*Data` (plain Rust structs in core, no PyO3 overhead) used during parse, and `#[pyclass]` types in `src/lib.rs` that wrap/clone them when returned to Python. This avoids PyO3 GIL overhead during bulk parse.
+The PyO3 bindings in `src/lib.rs` build a first-occurrence name index over
+the ordered cells. `src/liberty_data.rs` provides shared, immutable data views
+for cell and child handles. Handle-local scalar edits and the document edit
+log carry mutable state. Core parsing and the binding's document construction
+run with the GIL released.
 
 ### Python layer (`liberty_tools/__init__.py`)
 
-Each class wraps the corresponding native object via `self._native`. `LibertyDocument.to_polars()` calls `timing_tables()` and hands the result to `polars.DataFrame`. `parse_file` is the entry point for reading; `liberty_tools/comparison.py` holds the library comparison (`compare()` and its result types) and is re-exported from the package.
+Each Python class wraps its native object via `self._native`. The document's
+list-of-dicts methods and Polars export share the ordered table traversal.
+`src/liberty_rows.rs` builds bounded Arrow record batches for Polars, which
+reads the IPC stream in memory. `liberty_tools/comparison.py` implements
+`compare()` and its result types, re-exported from the package.
 
 ### Browser viewer (`viewer/`)
 
 `viewer/server.py` is the FastAPI backend. `viewer/data.py` converts native
 Liberty objects into JSON payloads for the static SPA in `viewer/static/`.
+The server publishes a single lazy index per process. Each tree request parses
+its cell once and uses table shape metadata to group curves. The frontend
+retains recent source under a size budget and loads Plotly on its first chart
+request.
 
 Static asset roles:
 
@@ -174,8 +185,8 @@ Logic-symbol rendering lessons learned:
 ### Key behaviors to preserve
 
 - **`when` filter uses implication, not equality**: `when="A"` matches `"A & B"` and `"A & !B"` but not `"A | B"`. Any changes to `bool_implies` must preserve this semantics.
-- **Parse-time cell filter** (`cells=[...]` in `parse_file`) skips group bodies entirely via `skip_group_body()` — it is not a post-parse filter.
-- **`timing_tables()` / `to_polars()` search pins inside buses and bundles** in addition to top-level cell pins (see the nested loops in `Document::timing_tables`).
+- **Parse-time cell filter** (`cells=[...]` in `parse_file`) skips unselected group bodies with the lexer’s byte scanner.
+- **`timing_tables()` / `to_polars()` search pins inside buses and bundles** in addition to top-level cell pins (see `Document::visit_tables`).
 - **3D table flattening**: values stored row-major across `(index_1 × index_2 × index_3)`; `table_position()` reconstructs `(i, j, k)`. The Polars column is `depth`, not `index_3_pos`.
 - **`internal_power` is energy, not power**: the `rise_power`/`fall_power` table values are switching *energy* in joules. Scale = `voltage_unit × current_unit × time_unit` (`Document::energy_unit_joules`, exposed as `doc.energy_unit_joules()`); ASAP7 = `1e-15` (fJ). Extract via `internal_power_tables()` / `to_polars(kind="power")` (rows carry `related_pg_pin`; reuses `table_position`/`TimingTableData`). **Non-propagating energy** (input pin switches, no output switch) lives in input-pin `internal_power` groups with no `related_pin` and a 1-D table over input transition — these are included, with `related_pin` null.
 - **One top-level group**: a valid library is a single `library` group. A second top-level group (typically a `cell` orphaned by a premature `library` close) is reported as an `unbalanced braces` error pointing at that group, not skipped — see the stray-`}` guard in `Parser::parse_document`. The ASAP7 SIMPLE-group libs ship with this exact defect (spurious `}` after `XOR2xp5r`, dropping `NAND5xp2R`).
@@ -233,6 +244,7 @@ lef_tools/           Python wrapper and `lef-tools` CLI
 
 ```
 core/src/def.rs           DEF parser, streaming reads, binary cache
+core/src/def/hierarchy.rs Mapped multi-DEF definitions and top-level instance transforms
 src/def.rs                DEF pyclasses/pyfunctions and the Arrow/Parquet writer (CSV/table writers are core's `write_*_impl`)
 def_tools/cli.py          click CLI (`def-tools <command>`)
 def_tools/instances.py    instance bbox dumper (`def-tools instances`, CSV/Parquet/table in microns)
@@ -267,6 +279,12 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   silent false column. `is_seq` parses each
   library with `skip_tables=True`, one thread per library; only structural
   fields are needed.
+- **Hierarchical instance dumps use explicit macro-to-DEF mappings.**
+  The hierarchy caches one component list per file and traverses placements
+  in pre-order. It anchors each child to its DIEAREA footprint and composes
+  rotations and mirrors in the common DBU scale. CSV, Parquet, and table
+  share the flat dump's column formatting. Clock net and pin resolution
+  reads top-level connectivity.
 - **`is_clock` sources are backends that answer, not formats.**
   `def_tools/clock_data.py` defines the seam: a backend maps one file to a
   role (`c`/`d`/`u`/`z`) per net, pin or instance (`ClockData`), and this repo
@@ -420,9 +438,10 @@ sdc_tools/cli.py     `sdc-tools clocks` / `sdc-tools clock-cells`
   `def::clock_tree_cells` keeps paths reaching clock pins. Sequential
   drivers on explicit clock roots are also kept. `prune=False` or
   `--no-prune` keeps every touched candidate.
-- **Liberty metadata parses one thread per library.** `cell_clock_roles` parses
-  each library with `ThreadPoolExecutor`; `parse_file` releases the GIL, so the
-  set parses concurrently. Later libraries win for duplicate cell names.
+- **Liberty metadata parses one thread per library.** Workers in
+  `def_tools/clock_roles.py` return small role or sequential-flag mappings.
+  The native parser releases the GIL. Merging mappings in input order gives
+  later libraries precedence for duplicate cell names.
 - **The safe interpreter hides `exec`, `open`, `source`, and `load`.**
 
 ## PEX package (`pex_tools/`)

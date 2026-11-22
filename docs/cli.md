@@ -30,6 +30,12 @@ Usage: liberty-tools format [OPTIONS] FILE
 | `--check` | off | Exit 0 if already formatted, 1 if it would reformat. |
 | `--indent INTEGER` | `2` | Spaces per `{ }` nesting level. |
 
+
+Both entry points stream the input into temporary files, reindent by line,
+and verify the two token streams incrementally before writing any output.
+Gzip input is decompressed for verification. An output path receives plain
+UTF-8 text even if it ends in `.gz`.
+
 ---
 
 ## `liberty-view`
@@ -45,14 +51,18 @@ Usage: liberty-view [OPTIONS] [LIBERTY_FILE]
 | `--open-browser / --no-open-browser` | `--open-browser` | Open a browser tab when ready. |
 | `--exit-on-close / --no-exit-on-close` | `--exit-on-close` | Exit shortly after the browser tab closes. |
 
-While running, `liberty-view` serves a JSON API for scripting against a large
-library without re-parsing:
+The viewer opens one index per process and parses cells on demand. Its HTTP
+endpoints include the following.
 
-- `GET /api/meta` — library name, units, cell count, templates.
-- `GET /api/cells?filter=<substr>&offset=0&limit=200` — filtered cell list.
-- `GET /api/cell/{cell_name}` — pins, buses, bundles, arcs, and table metadata.
-- `GET /api/cell/{cell_name}/source` — raw Liberty source of that cell.
-- `GET /api/cell/{cell_name}/pin/{pin_name}/table/{arc_idx}/{table_name}` — full table values.
+- `GET /api/ready` warms the index and returns an empty HTTP 204 response.
+- `GET /api/meta` returns library metadata, templates, and driver waveforms.
+- `GET /api/cells?filter=<substr>&offset=0&limit=200` returns a filtered cell page.
+- `GET /api/cells/{cell}` returns pins, buses, bundles, arcs, and table metadata.
+- `GET /api/cells/{cell}/source` returns cell source up to one million characters,
+  with the original character count.
+- `GET /api/table?cell=...&pin=...&group=...&arc_index=...&table=...` returns full table
+  values. Include `container=bus:<name>` or `container=bundle:<name>` for members.
+
 
 ---
 
@@ -76,6 +86,7 @@ lef-tools show --lef cells.lef --macro sky130_fd_sc_hd__buf_8
 def-tools instances \
   --lef "pdk/*.lef" \
   --def design.def.gz \
+  [--block-def MACRO=PATH ...] \
   [--lib stdcell.lib ...] \
   [--clock-cells clock_cells.txt | --clock-data [BACKEND:]PATH | --twf PATH] \
   [--format csv|parquet|table] \
@@ -87,6 +98,7 @@ def-tools instances \
 ```
 
 - `--lef` accepts multiple files or glob patterns after a single `--lef` flag or repeated `--lef` flags.
+- `--block-def MACRO=PATH` expands a placed macro using a child DEF. Repeat to link nested blocks. The dump includes block rows and descendant paths with top-level coordinates. See the [hierarchical DEF example](def.md#hierarchical-def-instances).
 - Coordinates (`llx, lly, urx, ury`) are in **microns** (`DBU / UNITS DISTANCE MICRONS`).
 - Default columns are `instance,base_cell,llx,lly,urx,ury`, plus `is_seq` when `--lib` is given and `is_clock` when `--clock-cells`, `--clock-data` or `--twf` is given.
 - `--columns` selects and renames columns (`instance=inst_name,base_cell=cell,status,orient,is_seq,is_clock,llx=llx_um`). Requesting `is_seq` without `--lib` or `is_clock` without a clock input is an error.

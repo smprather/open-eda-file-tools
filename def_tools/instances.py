@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from liberty_tools._native import (
+    read_def_hierarchy,
     set_threads,
     write_instance_bbox_csv,
     write_instance_parquet,
@@ -26,7 +27,7 @@ from .clock_data import (
     read_clock_data,
     resolve_clock_instances,
 )
-from .clock_roles import cell_clock_roles
+from .clock_roles import cell_clock_roles, cell_sequential_flags
 
 FORMATS = ("csv", "parquet", "table")
 CANONICAL_COLUMNS = ("instance", "base_cell", "llx", "lly", "urx", "ury")
@@ -63,7 +64,7 @@ def sequential_macros(libs: Sequence[Path]) -> set[str]:
     ``skip_tables=True`` and one thread per library (``parse_file`` releases
     the GIL).
     """
-    return {name for name, role in cell_clock_roles(libs).items() if role.sequential}
+    return {name for name, sequential in cell_sequential_flags(libs).items() if sequential}
 
 
 def instance_flag_inputs(
@@ -96,15 +97,15 @@ def instance_flag_inputs(
     ]
     if len(given) > 1:
         raise ValueError(f"{' and '.join(given)} are alternatives; supply one")
-    roles = cell_clock_roles(libs) if libs else None
-    sequential = (
-        sorted(name for name, role in roles.items() if role.sequential)
-        if roles is not None
-        else None
-    )
+    spec = f"twf:{twf}" if twf is not None else clock_data
+    roles = cell_clock_roles(libs) if libs and spec is not None else None
+    sequential = None
+    if roles is not None:
+        sequential = sorted(name for name, role in roles.items() if role.sequential)
+    elif libs:
+        sequential = sorted(sequential_macros(libs))
     if clock_cells is not None:
         return sequential, sorted(read_clock_cells(clock_cells)), []
-    spec = f"twf:{twf}" if twf is not None else clock_data
     if spec is None:
         return sequential, None, []
     resolved = resolve_clock_instances(read_clock_data(spec), def_path, roles)
@@ -317,6 +318,16 @@ def report_instances(
     print(f"output: {output} ({output.stat().st_size / 1e6:.1f} MB)")
 
 
+def parse_block_defs(values: Sequence[str]) -> list[tuple[str, Path]]:
+    blocks = []
+    for value in values:
+        name, separator, path = value.partition("=")
+        if not separator or not name or not path:
+            raise ValueError(f"invalid --block-def {value!r}; expected MACRO=PATH")
+        blocks.append((name, Path(path)))
+    return blocks
+
+
 def run_instances(
     lefs: Sequence[Path],
     def_path: Path,
@@ -328,6 +339,7 @@ def run_instances(
     batch_size: int = 131_072,
     max_memory: int = 1024**3,
     threads: int | None = None,
+    block_defs: Sequence[tuple[str, Path]] = (),
 ) -> int:
     """Execute the instance dump and return exit code (0 on success, 1 on error)."""
     if threads is not None:
@@ -349,38 +361,49 @@ def run_instances(
     parquet_info: tuple[int, int] | None = None
     lef_list = [Path(p) for p in lefs]
     try:
-        dbu_per_micron, expected = read_header(def_path)
-        if fmt == "table":
-            written = write_instance_table(
-                lef_list,
-                def_path,
-                output,
-                columns=columns,
-                sequential=sequential,
-                clock=clock,
-            )
-        elif fmt == "csv":
-            written = write_instance_bbox_csv(
-                lef_list,
-                def_path,
-                output,
-                columns=columns,
-                sequential=sequential,
-                clock=clock,
-            )
-        else:
-            assert output is not None
+        expected = None
+        if block_defs:
+            hierarchy = read_def_hierarchy(lef_list, def_path, block_defs)
+            dbu_per_micron = hierarchy.dbu_per_micron
             eff_batch = effective_batch_size(max_memory, batch_size)
-            written, row_groups = write_instance_parquet(
-                lef_list,
-                def_path,
-                output,
-                eff_batch,
-                columns=columns,
-                sequential=sequential,
-                clock=clock,
+            written, row_groups = hierarchy._write_instances(
+                fmt, output, eff_batch, columns, sequential, clock
             )
-            parquet_info = (eff_batch, row_groups)
+            if row_groups is not None:
+                parquet_info = (eff_batch, row_groups)
+        else:
+            dbu_per_micron, expected = read_header(def_path)
+            if fmt == "table":
+                written = write_instance_table(
+                    lef_list,
+                    def_path,
+                    output,
+                    columns=columns,
+                    sequential=sequential,
+                    clock=clock,
+                )
+            elif fmt == "csv":
+                written = write_instance_bbox_csv(
+                    lef_list,
+                    def_path,
+                    output,
+                    columns=columns,
+                    sequential=sequential,
+                    clock=clock,
+                )
+            else:
+                assert output is not None
+                eff_batch = effective_batch_size(max_memory, batch_size)
+                written, row_groups = write_instance_parquet(
+                    lef_list,
+                    def_path,
+                    output,
+                    eff_batch,
+                    columns=columns,
+                    sequential=sequential,
+                    clock=clock,
+                )
+                parquet_info = (eff_batch, row_groups)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         if output is not None and not output_existed:
@@ -389,7 +412,7 @@ def run_instances(
 
     elapsed = time.perf_counter() - started
     peak_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    if written > expected:
+    if expected is not None and written > expected:
         print(
             f"error: parsed {written} instances but the DEF header says {expected}",
             file=sys.stderr,
@@ -435,6 +458,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="def-tools instances")
     parser.add_argument("--lef", type=Path, action="append", required=True)
     parser.add_argument("--def", dest="def_path", type=Path, required=True)
+    parser.add_argument("--block-def", action="append", default=[], metavar="MACRO=PATH")
     parser.add_argument("--lib", type=Path, action="append", default=[])
     parser.add_argument("--clock-cells", type=Path, default=None)
     parser.add_argument("--clock-data", default=None, metavar="[BACKEND:]PATH")
@@ -446,6 +470,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-memory", type=parse_size, default=1024**3)
     parser.add_argument("--threads", type=int, default=None)
     args = parser.parse_args(normalized)
+    try:
+        block_defs = parse_block_defs(args.block_def)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.batch_size < 1:
         parser.error("--batch-size must be at least 1")
     if args.threads is not None and args.threads < 1:
@@ -478,6 +506,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         batch_size=args.batch_size,
         max_memory=args.max_memory,
         threads=args.threads,
+        block_defs=block_defs,
     )
 
 

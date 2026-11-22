@@ -97,3 +97,61 @@ def test_index_templates_keep_declaration_order(tmp_path: Path):
 
     assert list(index.templates()) == names
     assert list(index.templates()) == list(doc.templates())
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+def test_postfix_apostrophe_does_not_hide_following_cell(tmp_path, compressed):
+    import gzip
+
+    keep = "cell (keep) { area : 1; }"
+    source = f"library (t) {{ cell (omit) {{ pin (Z) {{ function : A'; }} }} {keep} }}"
+    path = tmp_path / ("postfix.lib.gz" if compressed else "postfix.lib")
+    data = source.encode()
+    path.write_bytes(gzip.compress(data) if compressed else data)
+
+    assert lt.parse_file(path).cells() == ["omit", "keep"]
+    assert lt.LibraryIndex.open(path).cell_source("keep") == keep
+    doc = lt.parse_file(path, cells=["keep"])
+    assert doc.cell("keep").area == 1
+    assert doc.to_string() == source
+
+
+@pytest.mark.parametrize("body", [
+    'test : "quoted } /*";',
+    "test : A\\}; // }",
+    "test : A'/* } */;",
+    "test : A\\\r\n';",
+    "extra () { empty () {} test : 'literal }'; }",
+])
+def test_selected_and_indexed_cells_agree_after_skipped_groups(tmp_path, body):
+    path = tmp_path / "escape.lib"
+    want = "cell (keep) { area : 4; }"
+    source = f"library (t) {{ cell (omit) {{ {body}\n }} {want} }}"
+    path.write_bytes(source.encode())
+    assert lt.parse_file(path).cells() == ["omit", "keep"]
+    assert lt.LibraryIndex.open(path).cell_source("keep") == want
+    selected = lt.parse_file(path, cells=["keep"])
+    assert selected.cell("keep").area == 4
+    assert selected.to_string() == source
+
+
+@pytest.mark.parametrize(("body", "error"), [
+    ('   attr : "open', "unterminated quoted string"),
+    ("   /* open", "unterminated block comment"),
+    ("   attr : x;", "unexpected end of file while skipping group"),
+])
+def test_fast_cell_skip_reports_lexical_errors(tmp_path, body, error):
+    path = tmp_path / "malformed.lib"
+    path.write_text(f"library (t) {{\n  cell (omit) {{\n{body}")
+    with pytest.raises(ValueError, match=error):
+        lt.parse_file(path, cells=["keep"])
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_index_normalizes_continuations_in_unquoted_cell_names(tmp_path, newline):
+    path = tmp_path / "continued-name.lib"
+    path.write_bytes(f"library (t) {{ cell (in\\{newline}verter) {{ area : 1; }} }}".encode())
+    doc = lt.parse_file(path)
+    index = lt.LibraryIndex.open(path)
+    assert index.cell_names() == doc.cells() == ["inverter"]
+    assert index.cell("inverter").area == 1

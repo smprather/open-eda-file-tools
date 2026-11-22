@@ -254,3 +254,25 @@ def test_dev_lib_accessors():
     # round-trip and minimize.
     pdf = dff.pin("QN").power_down_function_expr()
     assert pdf == B("(!VDD) + (VSS)")
+
+
+@pytest.mark.parametrize("actual", ["A' & B", "A | C", "A ^ C", "0", "1"])
+@pytest.mark.parametrize("query", ["A'", "B | C", "A ^ C", "0", "1"])
+def test_implication_matches_full_truth_table(actual, query):
+    from itertools import product
+
+    a, b = B(actual), B(query)
+    assignments = [dict(zip("ABC", bits, strict=True)) for bits in product((False, True), repeat=3)]
+    expected = all(not a.eval(bits) or b.eval(bits) for bits in assignments)
+    assert a.implies(b) is expected
+
+
+def test_derived_forms_agree_when_display_is_requested_first():
+    expr = B("A ^ B")
+    rendered = str(expr)
+    equivalent = B("A B' | A' B")
+    assert expr.variables == ["A", "B"]
+    assert B(rendered) == expr == equivalent
+    assert hash(expr) == hash(equivalent)
+    assert expr.minterms() == equivalent.minterms()
+    assert expr.canonical() == equivalent.canonical()

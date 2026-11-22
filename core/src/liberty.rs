@@ -1,6 +1,6 @@
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
@@ -72,15 +72,6 @@ impl ContainerKind {
         }
     }
 }
-
-/// What makes an edited attribute unique: the cell, the pin, the container
-/// that owns the pin and the attribute's key.
-pub(crate) type EditKey = (
-    String,
-    Option<String>,
-    Option<(ContainerKind, String)>,
-    String,
-);
 
 /// A pending attribute edit recorded by `Cell::set_attribute` /
 /// `Pin::set_attribute`. The writer replays these against the original
@@ -327,12 +318,30 @@ pub fn parse_file_document(
     Ok(document)
 }
 
+/// Return the sequential classification of the first group per name in file order.
+#[doc(hidden)]
+pub fn sequential_flags(path: &str) -> Result<Vec<(String, bool)>, ParseLoadError> {
+    let reader = open_input(path).map_err(ParseLoadError::Io)?;
+    let mut parser = Parser::new(reader, None, true).map_err(ParseLoadError::Parse)?;
+    parser.project_cells = true;
+    let doc = parser.parse_document().map_err(ParseLoadError::Parse)?;
+    let mut seen = HashSet::new();
+    Ok(doc
+        .cells
+        .into_iter()
+        .filter_map(|cell| {
+            seen.insert(cell.name.clone())
+                .then(|| (cell.name, cell.ff.is_some() || cell.latch.is_some()))
+        })
+        .collect())
+}
+
 /// Encode the lexer's token stream as strings (`W<value>` for words, `S<char>`
 /// for symbols). Comments and whitespace are not tokens, so two files with
 /// equal token streams parse identically — the basis for `liberty-format`'s
 /// functional-transparency guarantee.
 #[doc(hidden)]
-pub fn lex_all(reader: Box<dyn Read>) -> Result<Vec<String>, ParseError> {
+pub fn lex_all(reader: Box<dyn Read + '_>) -> Result<Vec<String>, ParseError> {
     let mut lexer = Lexer::new(reader)?;
     let mut out = Vec::new();
     while let Some(tok) = lexer.next_token()? {
@@ -342,6 +351,44 @@ pub fn lex_all(reader: Box<dyn Read>) -> Result<Vec<String>, ParseError> {
         }
     }
     Ok(out)
+}
+
+/// Compare token kinds and text without retaining the two token streams.
+#[doc(hidden)]
+pub fn compare_token_streams(
+    before: Box<dyn Read + '_>,
+    after: Box<dyn Read + '_>,
+) -> Result<(bool, usize, usize), ParseError> {
+    let mut before = Lexer::new(before)?;
+    let mut after = Lexer::new(after)?;
+    let mut after = std::iter::from_fn(|| after.next_token().transpose()).fuse();
+    let mut equal = true;
+    let (mut before_count, mut after_count) = (0, 0);
+    let mut after_error = None;
+    while let Some(left) = before.next_token()? {
+        before_count += 1;
+        if after_error.is_none() {
+            match after.next() {
+                Some(Ok(right)) => {
+                    after_count += 1;
+                    equal = equal && left.kind == right.kind;
+                }
+                Some(Err(err)) => after_error = Some(err),
+                None => equal = false,
+            }
+        }
+    }
+    // The original verification tokenized the whole input first. A malformed
+    // input therefore takes precedence over any error in the reindented text.
+    if let Some(err) = after_error {
+        return Err(err);
+    }
+    for token in after {
+        token?;
+        after_count += 1;
+        equal = false;
+    }
+    Ok((equal, before_count, after_count))
 }
 
 #[doc(hidden)]
@@ -373,7 +420,8 @@ pub fn matches_opt_opt(filter: Option<&str>, actual: Option<&str>) -> bool {
 
 #[doc(hidden)]
 pub struct WhenFilter {
-    pub query: Option<BoolExpr>,
+    query: Option<BoolExpr>,
+    cache: Mutex<HashMap<String, bool>>,
 }
 
 impl WhenFilter {
@@ -382,7 +430,10 @@ impl WhenFilter {
             .map(parse_bool_expr)
             .transpose()
             .map_err(|err| format!("invalid when expression: {err}"))?;
-        Ok(Self { query })
+        Ok(Self {
+            query,
+            cache: Mutex::new(HashMap::new()),
+        })
     }
 
     pub fn matches(&self, actual: Option<&str>) -> bool {
@@ -392,33 +443,58 @@ impl WhenFilter {
         let Some(actual) = actual else {
             return false;
         };
-        parse_bool_expr(actual)
-            .map(|actual| bool_implies(&actual, query))
-            .unwrap_or(false)
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(&result) = cache.get(actual) {
+            return result;
+        }
+        let result = parse_bool_expr(actual).is_ok_and(|expr| bool_implies(&expr, query));
+        cache.insert(actual.to_owned(), result);
+        result
     }
 }
 
 #[derive(Clone, Debug)]
 #[doc(hidden)]
-pub enum BoolExpr {
-    Var(String),
+pub enum BoolExpr<V = String> {
+    Var(V),
     Const(bool),
-    Not(Box<BoolExpr>),
-    And(Box<BoolExpr>, Box<BoolExpr>),
-    Or(Box<BoolExpr>, Box<BoolExpr>),
-    Xor(Box<BoolExpr>, Box<BoolExpr>),
+    Not(Box<BoolExpr<V>>),
+    And(Box<BoolExpr<V>>, Box<BoolExpr<V>>),
+    Or(Box<BoolExpr<V>>, Box<BoolExpr<V>>),
+    Xor(Box<BoolExpr<V>>, Box<BoolExpr<V>>),
+}
+
+impl<V> BoolExpr<V> {
+    fn evaluate(&self, value_of: &impl Fn(&V) -> bool) -> bool {
+        match self {
+            Self::Var(name) => value_of(name),
+            Self::Const(value) => *value,
+            Self::Not(expr) => !expr.evaluate(value_of),
+            Self::And(left, right) => left.evaluate(value_of) && right.evaluate(value_of),
+            Self::Or(left, right) => left.evaluate(value_of) || right.evaluate(value_of),
+            Self::Xor(left, right) => left.evaluate(value_of) ^ right.evaluate(value_of),
+        }
+    }
+
+    fn map_vars<U>(&self, convert: &impl Fn(&V) -> U) -> BoolExpr<U> {
+        let map_child = |expr: &Self| Box::new(expr.map_vars(convert));
+        match self {
+            Self::Var(name) => BoolExpr::Var(convert(name)),
+            Self::Const(value) => BoolExpr::Const(*value),
+            Self::Not(expr) => BoolExpr::Not(map_child(expr)),
+            Self::And(left, right) => BoolExpr::And(map_child(left), map_child(right)),
+            Self::Or(left, right) => BoolExpr::Or(map_child(left), map_child(right)),
+            Self::Xor(left, right) => BoolExpr::Xor(map_child(left), map_child(right)),
+        }
+    }
 }
 
 impl BoolExpr {
     pub fn eval(&self, true_vars: &HashSet<String>) -> bool {
-        match self {
-            BoolExpr::Var(name) => true_vars.contains(name),
-            BoolExpr::Const(value) => *value,
-            BoolExpr::Not(expr) => !expr.eval(true_vars),
-            BoolExpr::And(left, right) => left.eval(true_vars) && right.eval(true_vars),
-            BoolExpr::Or(left, right) => left.eval(true_vars) || right.eval(true_vars),
-            BoolExpr::Xor(left, right) => left.eval(true_vars) ^ right.eval(true_vars),
-        }
+        self.evaluate(&|name| true_vars.contains(name))
     }
 
     pub fn collect_vars(&self, vars: &mut Vec<String>) {
@@ -448,18 +524,13 @@ pub fn bool_implies(actual: &BoolExpr, query: &BoolExpr) -> bool {
         return false;
     }
 
-    for mask in 0..assignment_count {
-        let mut true_vars = HashSet::new();
-        for (idx, name) in vars.iter().enumerate() {
-            if (mask & (1usize << idx)) != 0 {
-                true_vars.insert(name.clone());
-            }
-        }
-        if actual.eval(&true_vars) && !query.eval(&true_vars) {
-            return false;
-        }
-    }
-    true
+    let position = |name: &String| 1usize << vars.iter().position(|item| item == name).unwrap();
+    let actual = actual.map_vars(&position);
+    let query = query.map_vars(&position);
+    (0..assignment_count).all(|mask| {
+        let value_of = |bit: &usize| mask & bit != 0;
+        !actual.evaluate(&value_of) || query.evaluate(&value_of)
+    })
 }
 
 #[doc(hidden)]
@@ -884,20 +955,19 @@ pub(crate) fn skip_trivia(d: &[u8], mut i: usize) -> usize {
 /// Consume a quoted string starting at `d[i] == quote`; return index after the
 /// closing quote, honoring backslash escapes.
 pub(crate) fn skip_quoted(d: &[u8], mut i: usize) -> usize {
-    let n = d.len();
     let quote = d[i];
     i += 1;
-    while i < n {
-        if d[i] == b'\\' {
-            i += 2;
-            continue;
-        }
+    while i < d.len() {
+        let Some(offset) = memchr::memchr2(quote, b'\\', &d[i..]) else {
+            return d.len();
+        };
+        i += offset;
         if d[i] == quote {
             return i + 1;
         }
-        i += 1;
+        i += 2;
     }
-    i
+    i.min(d.len())
 }
 
 /// Read one token (bare word or quoted string) at `i`; return (value, next).
@@ -909,10 +979,11 @@ pub(crate) fn read_token(d: &[u8], i: usize) -> (String, usize) {
         return (String::from_utf8_lossy(inner).into_owned(), end);
     }
     let start = i;
-    let mut j = i;
-    while j < n && !d[j].is_ascii_whitespace() && !is_index_symbol(d[j]) {
-        j += 1;
-    }
+    let j = if i < n && !d[i].is_ascii_whitespace() && !is_index_symbol(d[i]) {
+        skip_bare_word(d, start, is_index_symbol)
+    } else {
+        i
+    };
     (String::from_utf8_lossy(&d[start..j]).into_owned(), j)
 }
 
@@ -946,8 +1017,9 @@ pub(crate) fn read_paren_args(d: &[u8], mut i: usize) -> (Vec<String>, usize) {
                 i = end;
             }
             _ => {
-                cur.push(d[i] as char);
-                i += 1;
+                let end = skip_index_token(d, i);
+                append_bare_word(&mut cur, &d[i..end]);
+                i = end;
             }
         }
     }
@@ -957,31 +1029,59 @@ pub(crate) fn read_paren_args(d: &[u8], mut i: usize) -> (Vec<String>, usize) {
     (args, i)
 }
 
-/// At `d[i] == '{'`, return the index just past the matching `}` (string/comment
-/// aware).
+fn append_bare_word(output: &mut String, word: &[u8]) {
+    // The lexer keeps non-continuation escapes verbatim in a bare word.
+    let mut start = 0;
+    let mut cursor = 1;
+    while let Some(offset) = memchr::memchr(b'\\', &word[cursor..]) {
+        let escape = cursor + offset;
+        cursor = (escape + 2).min(word.len());
+        match word.get(escape + 1) {
+            Some(b'\r') if word.get(cursor) == Some(&b'\n') => cursor += 1,
+            Some(b'\r' | b'\n') => {}
+            _ => continue,
+        }
+        output.push_str(&String::from_utf8_lossy(&word[start..escape]));
+        start = cursor;
+    }
+    output.push_str(&String::from_utf8_lossy(&word[start..]));
+}
+
+/// Return the end of a token after trivia, with no allocation.
+fn skip_index_token(d: &[u8], start: usize) -> usize {
+    match d[start] {
+        b'"' | b'\'' => skip_quoted(d, start),
+        byte if is_symbol(byte) => start + 1,
+        _ => skip_bare_word(d, start, is_symbol),
+    }
+}
+
+#[inline]
+fn skip_bare_word(d: &[u8], start: usize, symbol: impl Fn(u8) -> bool) -> usize {
+    let mut i = start + 1;
+    while let Some(&byte) = d.get(i) {
+        if byte.is_ascii_whitespace()
+            || symbol(byte)
+            || (byte == b'/' && matches!(d.get(i + 1), Some(b'*' | b'/')))
+        {
+            break;
+        }
+        i += 1;
+        if byte == b'\\' && i < d.len() {
+            if d[i] == b'\r' && d.get(i + 1) == Some(&b'\n') {
+                i += 1;
+            }
+            i += 1;
+        }
+    }
+    i
+}
+
+/// At `d[i] == '{'`, return the index just past the matching `}`.
 pub(crate) fn match_braces(d: &[u8], mut i: usize) -> usize {
-    let n = d.len();
     let mut depth = 0usize;
-    while i < n {
-        match d[i] {
-            b'"' | b'\'' => i = skip_quoted(d, i),
-            b'#' => {
-                while i < n && d[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            b'/' if i + 1 < n && d[i + 1] == b'/' => {
-                while i < n && d[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            b'/' if i + 1 < n && d[i + 1] == b'*' => {
-                i += 2;
-                while i + 1 < n && !(d[i] == b'*' && d[i + 1] == b'/') {
-                    i += 1;
-                }
-                i = (i + 2).min(n);
-            }
+    while let Some(&byte) = d.get(i) {
+        match byte {
             b'{' => {
                 depth += 1;
                 i += 1;
@@ -993,22 +1093,26 @@ pub(crate) fn match_braces(d: &[u8], mut i: usize) -> usize {
                     return i;
                 }
             }
-            _ => i += 1,
+            b'"' | b'\'' => i = skip_quoted(d, i),
+            b'#' => i = skip_trivia(d, i),
+            b'/' if matches!(d.get(i + 1), Some(b'/' | b'*')) => i = skip_trivia(d, i),
+            b'\\' if matches!(d.get(i + 1), Some(b'\n' | b'\r')) => i += 2,
+            byte if byte.is_ascii_whitespace() || is_symbol(byte) => i += 1,
+            _ => i = skip_bare_word(d, i, is_symbol),
         }
     }
     i
 }
 
 pub(crate) fn skip_to_semicolon(d: &[u8], mut i: usize) -> usize {
-    let n = d.len();
-    while i < n {
-        match d[i] {
-            b'"' | b'\'' => i = skip_quoted(d, i),
-            b';' => return i + 1,
-            _ => i += 1,
+    loop {
+        i = skip_trivia(d, i);
+        match d.get(i) {
+            Some(b';') => return i + 1,
+            Some(_) => i = skip_index_token(d, i),
+            None => return i,
         }
     }
-    i
 }
 
 /// The top-level structure of a Liberty file, found by a byte-level scan.
@@ -1119,12 +1223,19 @@ pub(crate) fn parse_slice_as_library(
     body: &[u8],
     skip_tables: bool,
 ) -> Result<Document, ParseError> {
+    library_slice_parser(name, body, skip_tables)?.parse_document()
+}
+
+fn library_slice_parser(
+    name: &str,
+    body: &[u8],
+    skip_tables: bool,
+) -> Result<Parser<'static>, ParseError> {
     let mut buf = Vec::with_capacity(body.len() + 32);
     buf.extend_from_slice(format!("library ({name}) {{\n").as_bytes());
     buf.extend_from_slice(body);
     buf.extend_from_slice(b"\n}\n");
-    let reader: Box<dyn Read> = Box::new(io::Cursor::new(buf));
-    Parser::new(reader, None, skip_tables)?.parse_document()
+    Parser::new(Box::new(io::Cursor::new(buf)), None, skip_tables)
 }
 
 /// Cell-offset index over an in-memory Liberty file: list cells cheaply, parse
@@ -1217,7 +1328,7 @@ pub fn open_library_index(path: &str) -> Result<LibraryIndex, ParseLoadError> {
     })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TokenKind {
     Word(String),
     Symbol(u8),
@@ -1236,7 +1347,9 @@ pub(crate) struct Token {
 
 pub(crate) struct Lexer<'a> {
     reader: Box<dyn Read + 'a>,
-    peeked: VecDeque<u8>,
+    buffer: Box<[u8]>,
+    cursor: usize,
+    end: usize,
     line: usize,
     column: usize,
     eof: bool,
@@ -1254,7 +1367,9 @@ impl<'a> Lexer<'a> {
     pub fn new(reader: Box<dyn Read + 'a>) -> Result<Self, ParseError> {
         Ok(Self {
             reader,
-            peeked: VecDeque::new(),
+            buffer: vec![0; 32 * 1024].into_boxed_slice(),
+            cursor: 0,
+            end: 0,
             line: 1,
             column: 1,
             eof: false,
@@ -1394,14 +1509,14 @@ impl<'a> Lexer<'a> {
                     break;
                 }
             }
-            match (self.peek()?, self.peek_next()?) {
-                (Some(b'#'), _) => self.skip_line(),
-                (Some(b'/'), Some(b'/')) => {
+            match self.peek()? {
+                Some(b'#') => self.skip_line()?,
+                Some(b'/') if self.peek_next()? == Some(b'/') => {
                     self.bump()?;
                     self.bump()?;
-                    self.skip_line();
+                    self.skip_line()?;
                 }
-                (Some(b'/'), Some(b'*')) => {
+                Some(b'/') if self.peek_next()? == Some(b'*') => {
                     let line = self.line;
                     let column = self.column;
                     self.bump()?;
@@ -1413,12 +1528,13 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn skip_line(&mut self) {
-        while let Ok(Some(byte)) = self.bump() {
+    pub fn skip_line(&mut self) -> Result<(), ParseError> {
+        while let Some(byte) = self.bump()? {
             if byte == b'\n' {
                 break;
             }
         }
+        Ok(())
     }
 
     pub fn skip_block_comment(&mut self, line: usize, column: usize) -> Result<(), ParseError> {
@@ -1439,60 +1555,55 @@ impl<'a> Lexer<'a> {
     /// hashes and positions every byte but allocates no tokens or values.
     pub fn skip_braces(&mut self, mut depth: usize) -> Result<(), ParseError> {
         while depth > 0 {
+            self.skip_ws_and_comments()?;
+            let (line, column) = (self.line, self.column);
             let Some(byte) = self.bump()? else {
                 return Err(ParseError::new(
-                    self.line,
-                    self.column,
+                    line,
+                    column,
                     "unexpected end of file while skipping group",
                 ));
             };
             match byte {
                 b'{' => depth += 1,
                 b'}' => depth -= 1,
-                b'"' | b'\'' => self.skip_quoted_bytes(byte)?,
-                b'#' => self.skip_line(),
-                b'/' => match self.peek()? {
-                    Some(b'/') => {
+                b'"' | b'\'' => self.skip_quoted_bytes(byte, line, column)?,
+                other if is_symbol(other) => {}
+                _ => {
+                    while let Some(next) = self.peek()? {
+                        if next.is_ascii_whitespace()
+                            || is_symbol(next)
+                            || (next == b'/' && matches!(self.peek_next()?, Some(b'*' | b'/')))
+                        {
+                            break;
+                        }
                         self.bump()?;
-                        self.skip_line();
-                    }
-                    Some(b'*') => {
-                        let line = self.line;
-                        let column = self.column;
-                        self.bump()?;
-                        self.skip_block_comment(line, column)?;
-                    }
-                    _ => {}
-                },
-                b'\\' => {
-                    if matches!(self.peek()?, Some(b'\n' | b'\r')) {
-                        let first = self.bump()?.unwrap_or(b'\n');
-                        if first == b'\r' && self.peek()? == Some(b'\n') {
+                        if next == b'\\'
+                            && self.bump()? == Some(b'\r')
+                            && self.peek()? == Some(b'\n')
+                        {
                             self.bump()?;
                         }
                     }
                 }
-                _ => {}
             }
         }
         Ok(())
     }
 
-    pub fn skip_quoted_bytes(&mut self, quote: u8) -> Result<(), ParseError> {
-        let line = self.line;
-        let column = self.column;
-        let mut escaped = false;
+    fn skip_quoted_bytes(
+        &mut self,
+        quote: u8,
+        line: usize,
+        column: usize,
+    ) -> Result<(), ParseError> {
         while let Some(byte) = self.bump()? {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if byte == b'\\' {
-                escaped = true;
-                continue;
-            }
-            if byte == quote {
-                return Ok(());
+            match byte {
+                b'\\' => {
+                    self.bump()?;
+                }
+                byte if byte == quote => return Ok(()),
+                _ => {}
             }
         }
         Err(ParseError::new(line, column, "unterminated quoted string"))
@@ -1500,9 +1611,11 @@ impl<'a> Lexer<'a> {
 
     pub fn bump(&mut self) -> Result<Option<u8>, ParseError> {
         self.fill_peek(1)?;
-        let Some(byte) = self.peeked.pop_front() else {
+        if self.cursor == self.end {
             return Ok(None);
-        };
+        }
+        let byte = self.buffer[self.cursor];
+        self.cursor += 1;
         if byte == b'\n' {
             self.line += 1;
             self.column = 1;
@@ -1517,20 +1630,27 @@ impl<'a> Lexer<'a> {
 
     pub fn peek(&mut self) -> Result<Option<u8>, ParseError> {
         self.fill_peek(1)?;
-        Ok(self.peeked.front().copied())
+        Ok((self.cursor < self.end).then(|| self.buffer[self.cursor]))
     }
 
     pub fn peek_next(&mut self) -> Result<Option<u8>, ParseError> {
         self.fill_peek(2)?;
-        Ok(self.peeked.get(1).copied())
+        Ok((self.cursor + 1 < self.end).then(|| self.buffer[self.cursor + 1]))
     }
 
     pub fn fill_peek(&mut self, len: usize) -> Result<(), ParseError> {
-        while !self.eof && self.peeked.len() < len {
-            let mut byte = [0_u8; 1];
-            match self.reader.read(&mut byte)? {
-                0 => self.eof = true,
-                _ => self.peeked.push_back(byte[0]),
+        if self.end - self.cursor >= len || self.eof {
+            return Ok(());
+        }
+        self.buffer.copy_within(self.cursor..self.end, 0);
+        self.end -= self.cursor;
+        self.cursor = 0;
+        while !self.eof && self.end < len {
+            match self.reader.read(&mut self.buffer[self.end..]) {
+                Ok(0) => self.eof = true,
+                Ok(count) => self.end += count,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(err) => return Err(err.into()),
             }
         }
         Ok(())
@@ -1558,11 +1678,19 @@ pub(crate) struct Parser<'a> {
     /// Skip floating-point table bodies (`cell_rise`, power, CCSN) without
     /// materializing them. Structural metadata (pins, arcs, scalars) is kept.
     skip_tables: bool,
+    /// Validate nested groups while retaining only direct cell attributes.
+    project_cells: bool,
     /// End offset of the most recently consumed token. `advance()` overwrites
     /// it, so it is only meaningful right after a token has been consumed.
     previous_end: usize,
     /// Byte span (start, end) of every parsed cell group, in source order.
     cell_spans: Vec<(String, usize, usize)>,
+}
+
+fn keep_nested<T>(project_cells: bool, target: &mut Vec<T>, item: T) {
+    if !project_cells {
+        target.push(item);
+    }
 }
 
 impl<'a> Parser<'a> {
@@ -1576,6 +1704,7 @@ impl<'a> Parser<'a> {
             current: None,
             cell_filter,
             skip_tables,
+            project_cells: false,
             previous_end: 0,
             cell_spans: Vec::new(),
         };
@@ -1705,7 +1834,7 @@ impl<'a> Parser<'a> {
                                 self.cell_spans
                                     .push((cell_name, item_start, self.previous_end));
                             } else {
-                                self.skip_group_body()?;
+                                self.skip_group_body_fast()?;
                             }
                         }
                         "type" => {
@@ -1787,22 +1916,32 @@ impl<'a> Parser<'a> {
                 if self.consume_symbol(b'{')? {
                     match item_name.as_str() {
                         "pin" => {
-                            pins.push(
+                            keep_nested(
+                                self.project_cells,
+                                &mut pins,
                                 self.parse_pin_body(args.first().cloned().unwrap_or_default())?,
                             );
                         }
                         "bus" => {
-                            buses.push(
+                            keep_nested(
+                                self.project_cells,
+                                &mut buses,
                                 self.parse_bus_body(args.first().cloned().unwrap_or_default())?,
                             );
                         }
                         "bundle" => {
-                            bundles.push(
+                            keep_nested(
+                                self.project_cells,
+                                &mut bundles,
                                 self.parse_bundle_body(args.first().cloned().unwrap_or_default())?,
                             );
                         }
                         "dynamic_current" => {
-                            dynamic_currents.push(self.parse_dynamic_current_body()?);
+                            keep_nested(
+                                self.project_cells,
+                                &mut dynamic_currents,
+                                self.parse_dynamic_current_body()?,
+                            );
                         }
                         // `ff_bank`/`latch_bank` reuse the same parser; the extra
                         // bit-width arg is ignored. `statetable` is a tabular
@@ -1819,10 +1958,16 @@ impl<'a> Parser<'a> {
                             self.skip_group_body()?;
                         }
                         "leakage_power" => {
-                            leakage_powers.push(self.parse_leakage_power_body()?);
+                            keep_nested(
+                                self.project_cells,
+                                &mut leakage_powers,
+                                self.parse_leakage_power_body()?,
+                            );
                         }
                         "pg_pin" => {
-                            pg_pins.push(
+                            keep_nested(
+                                self.project_cells,
+                                &mut pg_pins,
                                 self.parse_pg_pin_body(args.first().cloned().unwrap_or_default())?,
                             );
                         }
@@ -1876,7 +2021,7 @@ impl<'a> Parser<'a> {
                 self.consume_symbol(b';')?;
             } else if self.consume_symbol(b':')? {
                 let value = self.read_simple_attribute_value()?;
-                attributes.push((item_name, value));
+                keep_nested(self.project_cells, &mut attributes, (item_name, value));
             } else {
                 return Err(self.error_here("expected '(' or ':' in pg_pin"));
             }
@@ -1987,7 +2132,11 @@ impl<'a> Parser<'a> {
                 let _args = self.read_args(&item_name)?;
                 if self.consume_symbol(b'{')? {
                     if item_name == "switching_group" {
-                        switching_groups.push(self.parse_switching_group_body()?);
+                        keep_nested(
+                            self.project_cells,
+                            &mut switching_groups,
+                            self.parse_switching_group_body()?,
+                        );
                     } else {
                         self.skip_group_body()?;
                     }
@@ -2026,7 +2175,11 @@ impl<'a> Parser<'a> {
                 let args = self.read_args(&item_name)?;
                 if self.consume_symbol(b'{')? {
                     if item_name == "pg_current" {
-                        pg_currents.push(self.parse_pg_current_body(args.first().cloned())?);
+                        keep_nested(
+                            self.project_cells,
+                            &mut pg_currents,
+                            self.parse_pg_current_body(args.first().cloned())?,
+                        );
                     } else {
                         self.skip_group_body()?;
                     }
@@ -2068,8 +2221,12 @@ impl<'a> Parser<'a> {
                 let args = self.read_args(&item_name)?;
                 if self.consume_symbol(b'{')? {
                     if item_name == "vector" {
-                        let tmpl = args.first().cloned();
-                        vectors.push(self.parse_timing_table_body("vector".to_string(), tmpl)?);
+                        if self.skip_tables {
+                            self.skip_group_body_fast()?;
+                        } else {
+                            let tmpl = args.first().cloned();
+                            vectors.push(self.parse_timing_table_body("vector".to_string(), tmpl)?);
+                        }
                     } else {
                         self.skip_group_body()?;
                     }
@@ -2100,14 +2257,24 @@ impl<'a> Parser<'a> {
                 let args = self.read_args(&item_name)?;
                 if self.consume_symbol(b'{')? {
                     match item_name.as_str() {
-                        "timing" => timing_arcs.push(self.parse_timing_body()?),
-                        "internal_power" => internal_powers.push(self.parse_internal_power_body()?),
+                        "timing" => keep_nested(
+                            self.project_cells,
+                            &mut timing_arcs,
+                            self.parse_timing_body()?,
+                        ),
+                        "internal_power" => keep_nested(
+                            self.project_cells,
+                            &mut internal_powers,
+                            self.parse_internal_power_body()?,
+                        ),
                         _ => self.skip_group_body()?,
                     }
                     self.consume_symbol(b';')?;
                 } else {
                     // Complex attribute, e.g. `rise_capacitance_range (0.55, 0.74)`.
-                    attributes.push((item_name, args.join(", ")));
+                    if !self.project_cells {
+                        attributes.push((item_name, args.join(", ")));
+                    }
                     self.consume_symbol(b';')?;
                 }
             } else if self.consume_symbol(b':')? {
@@ -2119,7 +2286,7 @@ impl<'a> Parser<'a> {
                     "power_down_function" => power_down_function = Some(value.clone()),
                     _ => {}
                 }
-                attributes.push((item_name, value));
+                keep_nested(self.project_cells, &mut attributes, (item_name, value));
             } else {
                 return Err(self.error_here("expected '(' or ':' after pin item name"));
             }
@@ -2194,12 +2361,18 @@ impl<'a> Parser<'a> {
                 if self.consume_symbol(b'{')? {
                     match item_name.as_str() {
                         "pin" => {
-                            pins.push(
+                            keep_nested(
+                                self.project_cells,
+                                &mut pins,
                                 self.parse_pin_body(args.first().cloned().unwrap_or_default())?,
                             );
                         }
                         "timing" => {
-                            timing_arcs.push(self.parse_timing_body()?);
+                            keep_nested(
+                                self.project_cells,
+                                &mut timing_arcs,
+                                self.parse_timing_body()?,
+                            );
                         }
                         _ => {
                             self.skip_group_body()?;
@@ -2257,12 +2430,18 @@ impl<'a> Parser<'a> {
                 if self.consume_symbol(b'{')? {
                     match item_name.as_str() {
                         "pin" => {
-                            pins.push(
+                            keep_nested(
+                                self.project_cells,
+                                &mut pins,
                                 self.parse_pin_body(args.first().cloned().unwrap_or_default())?,
                             );
                         }
                         "timing" => {
-                            timing_arcs.push(self.parse_timing_body()?);
+                            keep_nested(
+                                self.project_cells,
+                                &mut timing_arcs,
+                                self.parse_timing_body()?,
+                            );
                         }
                         _ => {
                             self.skip_group_body()?;
@@ -2328,11 +2507,13 @@ impl<'a> Parser<'a> {
                 if self.consume_symbol(b'{')? {
                     self.skip_group_body()?;
                 }
-                attributes.push((item_name, args.join(", ")));
+                if !self.project_cells {
+                    attributes.push((item_name, args.join(", ")));
+                }
                 self.consume_symbol(b';')?;
             } else if self.consume_symbol(b':')? {
                 let value = self.read_simple_attribute_value()?;
-                attributes.push((item_name, value));
+                keep_nested(self.project_cells, &mut attributes, (item_name, value));
             } else {
                 return Err(self.error_here("expected '(' or ':' in operating_conditions"));
             }
@@ -2381,7 +2562,11 @@ impl<'a> Parser<'a> {
                 let args = self.read_args(&item_name)?;
                 if self.consume_symbol(b'{')? {
                     if is_ccsn_stage_group(&item_name) {
-                        ccsn_stages.push(self.parse_ccsn_stage_body(item_name)?);
+                        keep_nested(
+                            self.project_cells,
+                            &mut ccsn_stages,
+                            self.parse_ccsn_stage_body(item_name)?,
+                        );
                     } else if is_timing_table_group(&item_name) {
                         if self.skip_tables {
                             self.skip_group_body_fast()?;
@@ -2606,6 +2791,7 @@ impl<'a> Parser<'a> {
         if depth > 0 {
             self.lexer.skip_braces(depth)?;
         }
+        self.previous_end = self.lexer.offset;
         self.current = self.lexer.next_token()?;
         Ok(())
     }
@@ -3066,13 +3252,13 @@ pub fn apply_edits_to_source(
         // Walk the log backwards and keep the first occurrence of every
         // key; that is the last edit of the attribute. Reversing afterwards
         // puts the survivors back in the order the edits were made in.
-        let mut seen: HashSet<EditKey> = HashSet::new();
+        let mut seen = HashSet::new();
         for edit in edits.iter().rev() {
             let key = (
-                edit.cell.clone(),
-                edit.pin.clone(),
-                edit.container.clone(),
-                edit.key.clone(),
+                edit.cell.as_str(),
+                edit.pin.as_deref(),
+                edit.container.as_ref(),
+                edit.key.as_str(),
             );
             if seen.insert(key) {
                 chosen.push(edit);
@@ -3084,32 +3270,48 @@ pub fn apply_edits_to_source(
     for edit in chosen {
         by_cell.entry(edit.cell.as_str()).or_default().push(edit);
     }
-    // Patch only the cell that `Document::cell` resolves to — the first
-    // cell of that name in the source. A second cell with the same name
-    // is a different cell and must not be rewritten.
-    let mut spans: Vec<&(String, usize, usize)> = Vec::new();
-    for cell_name in by_cell.keys() {
-        let span = cell_spans
-            .iter()
-            .find(|(name, _, _)| name.as_str() == *cell_name)
-            .ok_or_else(|| {
-                WriteError::Invalid(format!(
-                    "cell {cell_name:?} is not in the source text; its edits cannot be \
-                     written back"
-                ))
-            })?;
-        spans.push(span);
-    }
-    // Patch from the last cell backwards so earlier offsets stay valid.
-    spans.sort_by_key(|(_, start, _)| std::cmp::Reverse(*start));
-    let mut text = source;
-    for (name, start, end) in spans {
-        let cell_text = text.get(*start..*end).ok_or_else(|| {
+    // Consume each edited name at its first source occurrence, just as
+    // Document::cell does. Copy each untouched interval once.
+    let mut text = String::with_capacity(source.len());
+    let mut copied = 0;
+    let mut patch_error = None;
+    for (name, start, end) in cell_spans {
+        let Some(edits) = by_cell.remove(name.as_str()) else {
+            continue;
+        };
+        let cell_text = source.get(*start..*end).ok_or_else(|| {
             WriteError::Invalid(format!("cell {name:?} is outside the source text"))
         })?;
-        let patched = patch_cell_text(cell_text, name, &by_cell[name.as_str()])?;
-        text.replace_range(*start..*end, &patched);
+        let unchanged = source.get(copied..*start).ok_or_else(|| {
+            WriteError::Invalid(format!("cell {name:?} has an overlapping source span"))
+        })?;
+        match patch_cell_text(cell_text, name, &edits) {
+            Ok(patched) if patch_error.is_none() => {
+                text.push_str(unchanged);
+                text.push_str(&patched);
+            }
+            Ok(_) => {}
+            // Back-to-front patching reported the last source cell's error first.
+            Err(err) => patch_error = Some(err),
+        }
+        copied = *end;
+        if by_cell.is_empty() {
+            break;
+        }
     }
+    if let Some(name) = edits
+        .iter()
+        .find(|edit| by_cell.contains_key(edit.cell.as_str()))
+    {
+        return Err(WriteError::Invalid(format!(
+            "cell {:?} is not in the source text; its edits cannot be written back",
+            name.cell
+        )));
+    }
+    if let Some(err) = patch_error {
+        return Err(err);
+    }
+    text.push_str(&source[copied..]);
     Ok(text)
 }
 
@@ -3405,8 +3607,8 @@ pub(crate) fn describe_pin_locations(groups: &[SourceGroup], candidates: &[usize
 /// Apply attribute edits to one cell group's source text.
 ///
 /// Every edit is turned into a `(start, end, text)` range against the
-/// *original* text — an insertion is an empty range — and all of them are
-/// applied in a single back-to-front pass, so no edit can shift another.
+/// original text. Forward assembly copies unchanged byte ranges and emits
+/// insertions at the same byte offset in winning edit order.
 pub(crate) fn patch_cell_text(
     cell_text: &str,
     cell_name: &str,
@@ -3518,15 +3720,20 @@ pub(crate) fn patch_cell_text(
         }
     }
 
-    // Apply the edits back to front so the offsets stay valid. Edits at the
-    // same offset are applied in reverse order, so that they end up in the
-    // order they were made.
-    patches
-        .sort_by_key(|(start, _, _, order)| (std::cmp::Reverse(*start), std::cmp::Reverse(*order)));
-    let mut text = cell_text.to_string();
+    patches.sort_by_key(|(start, _, _, order)| (*start, *order));
+    let mut text = String::with_capacity(cell_text.len());
+    let mut copied = 0;
     for (start, end, rendered, _) in patches {
-        text.replace_range(start..end, &rendered);
+        let unchanged = cell_text.get(copied..start).ok_or_else(|| {
+            WriteError::Invalid(format!(
+                "cell {cell_name:?} has overlapping attribute edits"
+            ))
+        })?;
+        text.push_str(unchanged);
+        text.push_str(&rendered);
+        copied = end;
     }
+    text.push_str(&cell_text[copied..]);
     Ok(text)
 }
 
@@ -3900,8 +4107,10 @@ impl LibraryIndex {
             .ranges
             .get(name)
             .ok_or_else(|| CellLookupError::Unknown(name.to_string()))?;
-        let doc = parse_slice_as_library(&self.library_name, &self.data[start..end], true)
+        let mut parser = library_slice_parser(&self.library_name, &self.data[start..end], true)
             .map_err(CellLookupError::Parse)?;
+        parser.project_cells = true;
+        let doc = parser.parse_document().map_err(CellLookupError::Parse)?;
         let cell = doc
             .cells
             .into_iter()
@@ -3966,5 +4175,81 @@ impl Document {
             .iter()
             .map(|(name, vars)| (name.clone(), vars.to_vec()))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod lexer_read_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ShortReader {
+        bytes: io::Cursor<Vec<u8>>,
+        max_request: Arc<AtomicUsize>,
+        chunk: usize,
+        error_at_end: bool,
+    }
+
+    impl Read for ShortReader {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.max_request.fetch_max(out.len(), Ordering::Relaxed);
+            let size = out.len().min(self.chunk);
+            self.chunk = self.chunk % 5 + 1;
+            let count = self.bytes.read(&mut out[..size])?;
+            if count == 0 && self.error_at_end {
+                return Err(io::Error::other("injected read failure"));
+            }
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn block_reads_preserve_tokens_positions_and_hash_with_short_reads() {
+        let input = b"/* comment */library (x) {\r\n key : \"a\\\r\nb\"; // tail\n p:A'; }";
+        let max_request = Arc::new(AtomicUsize::new(0));
+        let mut short = Lexer::new(Box::new(ShortReader {
+            bytes: io::Cursor::new(input.to_vec()),
+            max_request: Arc::clone(&max_request),
+            chunk: 1,
+            error_at_end: false,
+        }))
+        .unwrap();
+        let mut normal = Lexer::new(Box::new(io::Cursor::new(input))).unwrap();
+        loop {
+            let token = short.next_token().unwrap();
+            assert_eq!(
+                format!("{token:?}"),
+                format!("{:?}", normal.next_token().unwrap())
+            );
+            if token.is_none() {
+                break;
+            }
+        }
+        assert_eq!(short.offset, input.len());
+        assert_eq!(
+            short.hash,
+            input.iter().fold(FNV_OFFSET, |hash, &byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
+            })
+        );
+        assert!(max_request.load(Ordering::Relaxed) >= 32 * 1024);
+    }
+
+    #[test]
+    fn line_comments_propagate_io_errors() {
+        let mut lexer = Lexer::new(Box::new(ShortReader {
+            bytes: io::Cursor::new(b"// comment".to_vec()),
+            max_request: Arc::new(AtomicUsize::new(0)),
+            chunk: 5,
+            error_at_end: true,
+        }))
+        .unwrap();
+        assert!(
+            lexer
+                .next_token()
+                .unwrap_err()
+                .to_string()
+                .contains("injected read failure")
+        );
     }
 }

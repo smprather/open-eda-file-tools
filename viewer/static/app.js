@@ -58,7 +58,46 @@ async function api(path) {
 
 // Snapshot of what the client is currently showing; dumped to a file by the
 // "Dump Debug" button (only present under `liberty-view --dev`).
-const debugState = { meta: null, openCells: {}, lastTable: null };
+const debugState = { meta: null, lastTable: null };
+
+let selectionVersion = 0;
+let plotlyPromise = null;
+const plotRequests = new WeakMap();
+
+function loadPlotly() {
+  if (window.Plotly) return Promise.resolve(window.Plotly);
+  if (!plotlyPromise) {
+    plotlyPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "/plotly.min.js";
+      const failed = () => {
+        script.remove();
+        reject(new Error("could not load Plotly"));
+      };
+      script.onload = () => window.Plotly ? resolve(window.Plotly) : failed();
+      script.onerror = failed;
+      document.head.appendChild(script);
+    }).catch((error) => {
+      plotlyPromise = null;
+      throw error;
+    });
+  }
+  return plotlyPromise;
+}
+
+async function drawPlot(method, element, ...args) {
+  const selection = selectionVersion;
+  const request = {};
+  plotRequests.set(element, request);
+  const isCurrent = () => selection === selectionVersion &&
+    plotRequests.get(element) === request && element.isConnected;
+  try {
+    const plotly = await loadPlotly();
+    if (isCurrent()) await plotly[method](element, ...args);
+  } catch (error) {
+    if (isCurrent()) element.textContent = `plot error: ${error.message}`;
+  }
+}
 
 // Full breadcrumb of the selection, "/"-joined (lib / cell / pin / arc / table),
 // so a screenshot carries the complete location without the tree.
@@ -83,6 +122,12 @@ async function loadMeta() {
     document
       .querySelectorAll(".node.selected")
       .forEach((n) => n.classList.remove("selected"));
+    beginSelection(null);
+    currentSymCell = null;
+    clearCellSymbol(document.getElementById("cell-symbol"));
+    clearActiveSource();
+    document.getElementById("source-section").classList.add("hidden");
+    document.getElementById("source").textContent = "";
     renderLibrary(m);
     setCrumb([LIB_NAME]);
   };
@@ -113,20 +158,45 @@ function energyLabel(joules) {
 }
 
 let filterTimer = null;
-async function loadCells(filter) {
+let filterRequest = 0;
+let visibleCells = new Map();
+let selectedCell = null;
+
+async function loadCells(filter, request = ++filterRequest) {
   const q = filter ? `?filter=${encodeURIComponent(filter)}` : "";
   const data = await api(`/api/cells${q}`);
+  if (request !== filterRequest) return;
   document.getElementById("cell-count").textContent =
     `${data.cells.length} / ${data.total} cells`;
-  const tree = document.getElementById("tree");
-  tree.innerHTML = "";
-  for (const name of data.cells) tree.appendChild(cellNode(name));
+  const next = new Map();
+  for (const name of data.cells) {
+    const existing = selectedCell?.name === name ? selectedCell : visibleCells.get(name);
+    next.set(name, existing || cellNode(name));
+  }
+  visibleCells = next;
+  document.getElementById("tree").replaceChildren(...[...next.values()].map((cell) => cell.li));
+}
+
+function beginSelection(cell) {
+  const previous = selectedCell;
+  selectedCell = cell;
+  if (previous && previous !== cell) previous.prune();
+  debugState.lastTable = null;
+  hideWave();
+  return ++selectionVersion;
 }
 
 // ---- tree rendering --------------------------------------------------------
-function selectRow(li) {
+function selectRow(li, cell) {
   document.querySelectorAll(".node.selected").forEach((n) => n.classList.remove("selected"));
   li.classList.add("selected");
+  return beginSelection(cell);
+}
+
+function currentTrees() {
+  const cells = [...visibleCells.values()];
+  if (selectedCell && !visibleCells.has(selectedCell.name)) cells.push(selectedCell);
+  return Object.fromEntries(cells.filter((cell) => cell.data).map((cell) => [cell.name, cell.data]));
 }
 
 function cellNode(name) {
@@ -137,26 +207,51 @@ function cellNode(name) {
   row.innerHTML = `<span class="toggle">▸</span>${name}`;
   const kids = document.createElement("ul");
   kids.className = "tree hidden";
-  let cellData = null;
+  let pending = null;
   let built = false;
   const toggleEl = row.querySelector(".toggle");
-  async function ensure() {
-    if (!cellData) {
-      cellData = await api(`/api/cells/${encodeURIComponent(name)}`);
-      debugState.openCells[name] = cellData;
-    }
-    return cellData;
+  const cell = {name, li, data: null, prune};
+  const isOpen = () => !kids.classList.contains("hidden");
+  const retainTree = () => selectedCell === cell || (visibleCells.get(name) === cell && isOpen());
+
+  function prune() {
+    if (retainTree()) return;
+    cell.data = null;
+    kids.replaceChildren();
+    built = false;
   }
-  // Arrow marker (single-click) or row (double-click) toggles expand/collapse;
-  // a single row click only selects.
+
+  async function ensure() {
+    if (cell.data) return cell.data;
+    if (!pending) {
+      pending = api(`/api/cells/${encodeURIComponent(name)}`).finally(() => { pending = null; });
+    }
+    const data = await pending;
+    if (retainTree()) cell.data = data;
+    return data;
+  }
+
+  // Arrow marker (single-click) or row (double-click) toggles expand/collapse.
   const toggle = async () => {
     const open = !kids.classList.toggle("hidden");
     toggleEl.textContent = open ? "▾" : "▸";
-    if (open && !built) {
-      built = true;
-      for (const child of (await ensure()).children || []) {
-        kids.appendChild(treeNode(child, name, [LIB_NAME, name]));
+    if (!open) {
+      prune();
+      return;
+    }
+    if (built) return;
+    try {
+      const data = await ensure();
+      if (isOpen() && retainTree() && !built) {
+        for (const child of data.children || []) {
+          kids.appendChild(treeNode(child, cell, [LIB_NAME, name]));
+        }
+        built = true;
       }
+    } catch (error) {
+      console.error(error);
+      kids.classList.add("hidden");
+      toggleEl.textContent = "▸";
     }
   };
   toggleEl.onclick = (e) => {
@@ -165,20 +260,26 @@ function cellNode(name) {
   };
   row.ondblclick = toggle;
   row.onclick = async () => {
-    selectRow(li);
-    const cd = await ensure();
-    renderAttrs(cd);
-    if (cd.pg_pins) renderPgPins(cd.pg_pins);
-    showCellSymbolFor(name);
-    showSource(name, { kind: "path", path: [], label: `${name} · cell` });
+    const selection = selectRow(li, cell);
     setCrumb([LIB_NAME, name]);
+    showSource(name, {path: []});
+    try {
+      const data = await ensure();
+      if (selection !== selectionVersion) return;
+      renderAttrs(data);
+      if (data.pg_pins) renderPgPins(data.pg_pins);
+      showCellSymbolFor(name);
+    } catch (error) {
+      if (selection === selectionVersion) showTableError("cell", error);
+    }
   };
   li.appendChild(row);
   li.appendChild(kids);
-  return li;
+  return cell;
 }
 
-function treeNode(node, cellName, crumb) {
+function treeNode(node, cell, crumb) {
+  const cellName = cell.name;
   const trail = crumb.concat(node.label);
   const li = document.createElement("li");
   li.className = `node ${node.type}`;
@@ -197,7 +298,7 @@ function treeNode(node, cellName, crumb) {
   if (node.multi) {
     // Collapsed branch: several 1-D line tables plotted together with a legend.
     row.onclick = () => {
-      selectRow(li);
+      selectRow(li, cell);
       showCellSymbolFor(cellName);
       loadMultiTable(cellName, node.multi, node.ylabel);
       showSource(cellName, node.src, node.multi.map((m) => m.ref.table));
@@ -209,7 +310,7 @@ function treeNode(node, cellName, crumb) {
 
   if (node.type === "table") {
     row.onclick = () => {
-      selectRow(li);
+      selectRow(li, cell);
       showCellSymbolFor(cellName);
       loadTable(cellName, node.ref);
       showSource(cellName, node.src);
@@ -221,7 +322,7 @@ function treeNode(node, cellName, crumb) {
 
   if (node.type === "leakage") {
     row.onclick = () => {
-      selectRow(li);
+      selectRow(li, cell);
       showCellSymbolFor(cellName);
       renderLeakage(node.leakage);
       showSource(cellName, node.src);
@@ -245,7 +346,7 @@ function treeNode(node, cellName, crumb) {
       toggleEl.textContent = open ? "▾" : "▸";
       if (open && !built) {
         built = true;
-        for (const child of node.children) kids.appendChild(treeNode(child, cellName, trail));
+        for (const child of node.children) kids.appendChild(treeNode(child, cell, trail));
       }
     };
     toggleEl.onclick = (e) => {
@@ -255,7 +356,7 @@ function treeNode(node, cellName, crumb) {
     row.ondblclick = toggle;
   }
   row.onclick = () => {
-    selectRow(li);
+    selectRow(li, cell);
     showCellSymbolFor(cellName);
     // A node carries its own scalar attributes (pin caps, arc meta, …) — show
     // them in the main view.
@@ -313,10 +414,9 @@ function eqHtml(label, func) {
 // Show the owning cell's symbol; cheap no-op if it's already displayed.
 function showCellSymbolFor(cellName) {
   if (cellName === currentSymCell) return;
-  const cd = debugState.openCells[cellName];
-  if (!cd) return;
+  if (selectedCell?.name !== cellName || !selectedCell.data) return;
   currentSymCell = cellName;
-  renderCellSymbol(cd);
+  renderCellSymbol(selectedCell.data);
 }
 
 function clearCellSymbol(host) {
@@ -701,7 +801,7 @@ function updateDriverWaveform(w, refs) {
     mode: "lines+markers",
     name: `${L.slew}=${s}`,
   }));
-  Plotly.react(refs.plot, traces, {
+  drawPlot("react", refs.plot, traces, {
     ...PLOT_LAYOUT,
     xaxis: { title: L.time },
     yaxis: { title: L.voltage, range: [0, 1] },
@@ -711,6 +811,7 @@ function updateDriverWaveform(w, refs) {
 
 // ---- leaf table rendering --------------------------------------------------
 async function loadTable(cell, ref) {
+  const selection = selectionVersion;
   const params = new URLSearchParams({
     cell,
     pin: ref.pin,
@@ -721,12 +822,19 @@ async function loadTable(cell, ref) {
   });
   try {
     const data = await api(`/api/table?${params}`);
+    if (selection !== selectionVersion) return;
     debugState.lastTable = { cell, ref, data };
     renderTable(data, ref);
-  } catch (e) {
-    document.getElementById("view").innerHTML =
-      `<div class="muted">table error: ${e.message}</div>`;
+  } catch (error) {
+    if (selection === selectionVersion) showTableError("table", error);
   }
+}
+
+function showTableError(kind, error) {
+  const message = document.createElement("div");
+  message.className = "muted";
+  message.textContent = `${kind} error: ${error.message}`;
+  document.getElementById("view").replaceChildren(message);
 }
 
 function renderTable(data, ref) {
@@ -855,7 +963,7 @@ function showCcsWave(table, slew, cap, cell, L) {
   if (cell.t_peak != null) {
     shapes.push({ type: "line", x0: cell.t_peak, x1: cell.t_peak, yref: "paper", y0: 0, y1: 1, line: { color: "#e6c07b", dash: "dot", width: 1 } });
   }
-  Plotly.newPlot("wave", traces, {
+  drawPlot("newPlot", document.getElementById("wave"), traces, {
     ...PLOT_LAYOUT,
     height: PLOT_H,
     // Default view to the active region; double-click autoscales to the full tail.
@@ -885,7 +993,7 @@ function renderLine(view, data, ref) {
   view.appendChild(div);
   // Power is energy (fJ); always keep 0 on the y-axis so magnitudes read true.
   const isPower = /power/.test(data.table || "");
-  Plotly.newPlot(div, [{ x: data.index_1, y: data.values, mode: "lines+markers", line: { color: "#5aa9e6" } }], {
+  drawPlot("newPlot", div, [{ x: data.index_1, y: data.values, mode: "lines+markers", line: { color: "#5aa9e6" } }], {
     ...PLOT_LAYOUT,
     height: PLOT_H,
     margin: { ...PLOT_LAYOUT.margin, t: 32 },
@@ -898,6 +1006,7 @@ function renderLine(view, data, ref) {
 // Several 1-D line tables on one plot, differentiated by legend (e.g. a power
 // pg node's rise_power + fall_power -> y-axis "power", legend "rise"/"fall").
 async function loadMultiTable(cell, items, ylabel) {
+  const selection = selectionVersion;
   try {
     const datas = await Promise.all(
       items.map((it) => {
@@ -909,11 +1018,11 @@ async function loadMultiTable(cell, items, ylabel) {
         return api(`/api/table?${params}`);
       })
     );
+    if (selection !== selectionVersion) return;
     debugState.lastTable = { cell, multi: items, ylabel, datas };
     renderMultiLine(datas, items.map((i) => i.name), ylabel);
-  } catch (e) {
-    document.getElementById("view").innerHTML =
-      `<div class="muted">table error: ${e.message}</div>`;
+  } catch (error) {
+    if (selection === selectionVersion) showTableError("table", error);
   }
 }
 
@@ -929,7 +1038,7 @@ function renderMultiLine(datas, names, ylabel) {
   const traces = datas.map((d, i) => ({
     x: d.index_1, y: d.values, mode: "lines+markers", name: names[i],
   }));
-  Plotly.newPlot(div, traces, {
+  drawPlot("newPlot", div, traces, {
     ...PLOT_LAYOUT,
     height: PLOT_H,
     margin: { ...PLOT_LAYOUT.margin, t: 32 },
@@ -946,7 +1055,7 @@ function renderHeatmap(view, data, ref) {
   const hover = `${L.index_1}=%{y}<br>${L.index_2}=%{x}<br>${L.value}=%{z}<extra></extra>`;
   const heat = document.createElement("div");
   view.appendChild(heat);
-  Plotly.newPlot(heat, [{
+  drawPlot("newPlot", heat, [{
     z: data.values, x: data.index_2, y: data.index_1,
     type: "heatmap", colorscale: "Viridis", hovertemplate: hover,
   }], {
@@ -1111,7 +1220,7 @@ function renderSurfacePlot(surf, data, L, hover) {
     const [rlo, rhi] = pctRange(rz);
     const hoverR = `${L.index_1}=%{y}<br>${L.index_2}=%{x}<br>resistance=%{z:.4g} kΩ<extra></extra>`;
     const valBare = (L.value || "").replace(/\s*\([^)]*\)\s*$/, ""); // drop unit suffix
-    Plotly.newPlot(surf, [
+    drawPlot("newPlot", surf, [
       { z: data.values, x: data.index_2, y: data.index_1, scene: "scene", type: "surface", colorscale: "Viridis", showscale: false, opacity: 0.8, hovertemplate: hover },
       { ...points, z: pz, scene: "scene", hovertemplate: hover },
       { z: R, x: data.index_2, y: data.index_1, scene: "scene2", type: "surface", colorscale: "Cividis", showscale: false, opacity: 0.8, cmin: rlo, cmax: rhi, hovertemplate: hoverR },
@@ -1130,7 +1239,7 @@ function renderSurfacePlot(surf, data, L, hover) {
     return;
   }
 
-  Plotly.newPlot(surf, [{
+  drawPlot("newPlot", surf, [{
     z: data.values, x: data.index_2, y: data.index_1,
     type: "surface", colorscale: "Viridis", showscale: false, opacity: 0.8, hovertemplate: hover,
   }, {
@@ -1166,7 +1275,7 @@ function renderWaveFamilies(plot, data, L, groupBy) {
     }));
   const xTitle = groupBy === "index_2" ? L.index_1 : L.index_2;
   const isPower = /power/.test(data.table || "");
-  Plotly.newPlot(plot, traces, {
+  drawPlot("newPlot", plot, traces, {
     ...PLOT_LAYOUT,
     height: PLOT_H,
     margin: { ...PLOT_LAYOUT.margin, t: 18 },
@@ -1219,7 +1328,7 @@ function showWave(data, i, j) {
   document.getElementById("wave-section").classList.remove("hidden");
   document.getElementById("wave-title").textContent =
     `${data.table} wave @ ${L.index_1}=${data.index_1[i]}, ${L.index_2}=${data.index_2[j]}`;
-  Plotly.newPlot("wave", [{
+  drawPlot("newPlot", document.getElementById("wave"), [{
     x: data.index_3, y: data.values[i][j], mode: "lines", line: { color: "#7bd88f" },
   }], {
     ...PLOT_LAYOUT,
@@ -1230,15 +1339,57 @@ function showWave(data, i, j) {
 }
 
 function hideWave() {
+  plotRequests.delete(document.getElementById("wave"));
   document.getElementById("wave-section").classList.add("hidden");
 }
 
 // ---- raw cell source (bottom pane) -----------------------------------------
-// One byte-slice per cell from the server's in-memory buffer (cached per cell, so
-// re-selecting never refetches — cost is O(cell size), snappy on multi-GB libs).
-// The view is then scoped to the selected node's group (cell/pin/bus/bundle) by
-// brace-matching that group out of the cached cell text, here in the browser.
-const _sourceCache = {};
+// Keep the active source and at most two million characters of recent sources.
+const RECENT_SOURCE_CHARS = 2_000_000;
+const recentSources = new Map();
+const pendingSources = new Map();
+let recentSourceChars = 0;
+let activeSource = null;
+
+function rememberSource(source) {
+  if (!source?.data) return;
+  const {cell, data} = source;
+  recentSources.set(cell, data);
+  recentSourceChars += data.text.length;
+  while (recentSourceChars > RECENT_SOURCE_CHARS) {
+    const [name, oldest] = recentSources.entries().next().value;
+    recentSources.delete(name);
+    recentSourceChars -= oldest.text.length;
+  }
+}
+
+function clearActiveSource() {
+  rememberSource(activeSource);
+  activeSource = null;
+}
+
+async function cellSource(cell) {
+  if (activeSource?.cell !== cell) {
+    const data = recentSources.get(cell);
+    if (data) {
+      recentSources.delete(cell);
+      recentSourceChars -= data.text.length;
+    }
+    rememberSource(activeSource);
+    activeSource = {cell, data};
+  }
+  const source = activeSource;
+  if (source.data) return source.data;
+  let pending = pendingSources.get(cell);
+  if (!pending) {
+    pending = api(`/api/cells/${encodeURIComponent(cell)}/source`)
+      .finally(() => pendingSources.delete(cell));
+    pendingSources.set(cell, pending);
+  }
+  const data = await pending;
+  if (activeSource === source) source.data = data;
+  return data;
+}
 
 function _escRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -1319,38 +1470,108 @@ function _walkPath(cellText, path) {
 // `<group> (template) {…}` block has its own template, so the lookup is scoped
 // to the innermost enclosing block (CCS `vector` groups deref correctly).
 function _annotateIndices(text, templates) {
-  const re = /(?:^|\n)[ \t]*[A-Za-z_]\w*[ \t]*\(([^)]*)\)[ \t]*\{/g;
-  const blocks = [];
-  let m;
-  while ((m = re.exec(text))) {
-    const vars = templates[m[1].trim()];
-    if (!vars) continue;
-    const open = text.indexOf("{", m.index);
-    const end = _matchBrace(text, open);
-    if (end >= 0) blocks.push({ open, end, vars });
-  }
-  if (!blocks.length) return text;
-  const varsAt = (p) => {
-    let best = null;
-    for (const b of blocks) {
-      if (p > b.open && p < b.end && (!best || b.open > best.open)) best = b;
+  const frames = [];
+  const annotations = [];
+  let active = null;
+  let header = false;
+  let argsStart = null;
+  let vars = null;
+  let lineStart = true;
+  const whitespace = /\s+/y;
+  const word = /(?:\\[\s\S]|\/(?![/*])|[^\\/\s,{}()[\];:])+/y;
+  for (let i = 0; i < text.length;) {
+    whitespace.lastIndex = i;
+    const space = whitespace.exec(text);
+    if (space) {
+      const lastBreak = space[0].lastIndexOf("\n");
+      lineStart = (lastBreak >= 0 || lineStart) && /^[ \t]*$/.test(space[0].slice(lastBreak + 1));
+      i = whitespace.lastIndex;
+      continue;
     }
-    return best && best.vars;
-  };
-  // Annotate index_N lines with their variable, and the `values` line with the
-  // row (outer) dimension = index_1's variable. One pass so offsets stay valid.
-  return text.replace(
-    /^([ \t]*(?:index_([123])|values)\b[^\n]*)$/gm,
-    (line, body, n, off) => {
-      const vars = varsAt(off) || [];
-      if (n) {
-        const v = vars[Number(n) - 1];
-        return v ? `${body}  // ${v}` : line;
+
+    const c = text[i], next = text[i + 1];
+    if (c === "#" || (c === "/" && next === "/")) {
+      const end = text.indexOf("\n", i + 1);
+      i = end < 0 ? text.length : end;
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      const end = text.indexOf("*/", i + 2);
+      i = end < 0 ? text.length : end + 2;
+      lineStart = false;
+      continue;
+    }
+    if (c === "\\" && (next === "\n" || next === "\r")) {
+      i++;
+      continue;
+    }
+
+    let end = i + 1;
+    let candidate = false;
+    if (c === '"' || c === "'") {
+      while (end < text.length) {
+        const char = text[end++];
+        if (char === "\\") end++;
+        else if (char === c) break;
       }
-      const v = vars[0];
-      return v ? `${body}  // ------> ${v} ----->` : line;
+      vars = null;
+    } else if (c === "(") {
+      argsStart = header ? i + 1 : null;
+      vars = null;
+    } else if (c === ")") {
+      const template = argsStart === null ? "" : text.slice(argsStart, i).trim();
+      vars = Object.hasOwn(templates, template) ? templates[template] : null;
+      argsStart = null;
+    } else if (c === "{") {
+      frames.push(active);
+      if (vars) active = {vars, closed: false};
+      vars = null;
+      argsStart = null;
+    } else if (c === "}") {
+      if (frames.length) {
+        const parent = frames.pop();
+        if (active !== parent) active.closed = true;
+        active = parent;
+      }
+      vars = null;
+      argsStart = null;
+    } else {
+      word.lastIndex = i;
+      const match = word.exec(text);
+      if (match) {
+        end = word.lastIndex;
+        const name = match[0];
+        if (lineStart) {
+          candidate = /^[A-Za-z_]\w*$/.test(name);
+          const index = /^index_([123])$/.exec(name);
+          if ((index || name === "values") && active) {
+            const variable = active.vars[index ? Number(index[1]) - 1 : 0];
+            if (variable) {
+              const newline = text.indexOf("\n", end);
+              const suffix = index ? `  // ${variable}` : `  // ------> ${variable} ----->`;
+              annotations.push({frame: active, end: newline < 0 ? text.length : newline, suffix});
+            }
+          }
+        }
+      }
+      vars = null;
     }
-  );
+    header = candidate;
+    lineStart = false;
+    i = end;
+  }
+
+  // An unclosed template can occur when the source hit the server's cap.
+  // Emit annotations only for complete groups, leaving every original byte.
+  let start = 0;
+  const parts = [];
+  for (const annotation of annotations) {
+    if (!annotation.frame.closed) continue;
+    parts.push(text.slice(start, annotation.end), annotation.suffix);
+    start = annotation.end;
+  }
+  parts.push(text.slice(start));
+  return parts.join("");
 }
 
 function _escHtml(s) {
@@ -1577,23 +1798,25 @@ function _breakLines(text) {
 }
 
 async function showSource(cell, src, keep) {
-  src = src || { kind: "cell", name: cell };
+  const selection = selectionVersion;
   const sec = document.getElementById("source-section");
   const title = document.getElementById("source-title");
   const pre = document.getElementById("source");
   sec.classList.remove("hidden");
-  if (_sourceCache[cell] === undefined) {
-    try {
-      _sourceCache[cell] = await api(`/api/cells/${encodeURIComponent(cell)}/source`);
-    } catch (e) {
-      title.textContent = `source: ${cell} — error: ${e.message}`;
-      pre.textContent = "";
-      return;
-    }
+  let d;
+  try {
+    d = await cellSource(cell);
+  } catch (error) {
+    if (selection !== selectionVersion) return;
+    title.textContent = `source: ${cell} — error: ${error.message}`;
+    pre.textContent = "";
+    return;
   }
-  const d = _sourceCache[cell];
-  const path = (src && src.path) || [];
-  title.textContent = "";  // label dropped to save vertical space
+  if (selection !== selectionVersion) return;
+  const path = src?.path || [];
+  title.textContent = d.truncated
+    ? `Source truncated (${d.length.toLocaleString()} characters in cell)`
+    : "";
   const templates = (debugState.meta && debugState.meta.templates) || {};
   // Strip child groups shown elsewhere; break run-on statements; drop blanks.
   // `keep` (e.g. a collapsed multi-line node's own tables) stays in the source.
@@ -1619,7 +1842,7 @@ async function dumpDebug() {
     selected:
       document.querySelector(".node.selected > .row")?.textContent?.trim() || null,
     meta: debugState.meta,
-    openCells: debugState.openCells,
+    openCells: currentTrees(),
     lastTable: debugState.lastTable,
   };
   try {
@@ -1723,7 +1946,8 @@ document.addEventListener("keydown", _treeKey);
 document.getElementById("filter").addEventListener("input", (e) => {
   clearTimeout(filterTimer);
   const v = e.target.value;
-  filterTimer = setTimeout(() => loadCells(v), 200);
+  const request = ++filterRequest;
+  filterTimer = setTimeout(() => loadCells(v, request).catch(console.error), 200);
 });
 
 loadMeta().catch((e) => (document.getElementById("lib-name").textContent = "error: " + e.message));

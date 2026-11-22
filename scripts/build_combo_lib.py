@@ -45,7 +45,7 @@ def stream_body(fh, out, cell_suffix: str = "") -> None:
             continue
         if line.strip() == "}" and depth == 0:
             continue  # stray / library-close brace at body level -> drop
-        if cell_suffix:
+        if cell_suffix and depth == 0:
             m = _CELL_RE.match(line)
             if m:
                 line = f"{m.group(1)}{m.group(2)}{cell_suffix}{m.group(3)}"

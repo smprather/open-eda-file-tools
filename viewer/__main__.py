@@ -48,20 +48,20 @@ def _open_when_ready(url: str, timeout: float = 30.0) -> None:
     """Wait for the data API to answer, then open the browser.
 
     ``uvicorn.run`` blocks, so this runs in a daemon thread. We probe
-    ``/api/meta`` rather than ``/`` so the browser opens only once the *data*
+    ``/api/ready`` rather than ``/`` so the browser opens only once the *data*
     layer is live — the static shell is served before ``LibraryIndex.open`` has
     run, so opening on ``/`` lets the page fire its first ``/api/*`` calls into a
     not-quite-ready server and surface a transport "NetworkError". Probing
-    ``/api/meta`` both confirms the API works and warms ``_data`` so the browser's
-    own first request is instant. On Linux/WSL the default ``webbrowser.open`` can
-    resolve to a non-GUI handler, so force ``xdg-open`` via a BackgroundBrowser.
+    ``/api/ready`` warms the index with an empty response. On Linux/WSL the
+    default browser can resolve to a non-GUI handler, so use ``xdg-open``
+    through a BackgroundBrowser.
     """
     deadline = time.monotonic() + timeout
-    probe = url.rstrip("/") + "/api/meta"
+    probe = url.rstrip("/") + "/api/ready"
     while time.monotonic() < deadline:
         try:
-            urllib.request.urlopen(probe, timeout=1.0)  # noqa: S310 (localhost)
-            break
+            with urllib.request.urlopen(probe, timeout=1.0):  # noqa: S310 (localhost)
+                break
         except urllib.error.HTTPError:
             break  # any HTTP status means the server is up and answering
         except OSError:

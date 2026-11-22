@@ -13,13 +13,14 @@ entry points (`liberty-tools`, `liberty-format`, `liberty-view`, `lef-tools`,
 | Task | Best Entry Point | Key Flag / Option | Output / Return |
 | --- | --- | --- | --- |
 | Parse full Liberty `.lib` / `.lib.gz` | `liberty_tools.parse_file(path, cells=...)` | `cells=["..."]` skips unselected cells at byte level | `LibertyDocument` |
-| Parse Liberty structure only (pins, `ff`/`latch`, arcs — no float tables) | `liberty_tools.parse_file(path, skip_tables=True)` | `skip_tables=True` (36% faster, skips table bodies) | `LibertyDocument` (table lists empty) |
+| Parse Liberty structure only (pins, `ff`/`latch`, arcs — no float tables) | `liberty_tools.parse_file(path, skip_tables=True)` | `skip_tables=True` skips table bodies | `LibertyDocument` (table lists empty) |
 | Lazy random-access cell lookup on huge `.lib` | `liberty_tools.LibraryIndex.open(path)` | `.cell(name)` parses one cell on demand | `LibraryIndex` |
 | Extract timing or switching-energy tables to Polars | `doc.to_polars(kind="timing" \| "power", **filters)` | `when="..."` uses Boolean implication | `polars.DataFrame` |
 | Compare two Liberty libraries | `liberty_tools.compare(a, b, ...)` | Aligns grids by axis role, never guesses | `Comparison` |
 | Format a Liberty file transparently | `liberty-tools format FILE` (or `liberty-format FILE`) | `--in-place`, `--check`, `-o PATH` | Formatted `.lib` |
 | Parse cell LEF macros, pins, ports, rects | `lef_tools.parse_lef(paths, macros=...)` | Coordinates always in **LEF microns** | `LefLibrary` |
 | Dump placed DEF instances + bboxes (CSV, Parquet, table) | `def-tools instances --lef ... --def ...` | `--format csv\|parquet\|table`, `--lib`, `--clock-cells` / `--clock-data` / `--twf`, `--columns` | Coordinates in **microns** (`DBU / UNITS DISTANCE MICRONS`) |
+| Dump hierarchical DEF instances | `def-tools instances --def top.def --block-def CPU=cpu.def` | Repeat `--block-def MACRO=PATH` for each definition | Placed blocks and descendants in top-level microns |
 | Stream placed DEF instance bboxes in Python | `def_tools.instance_bboxes(lefs, def_path)` | Streaming Rust iterator | `InstanceBBoxIter` (coordinates in **DEF DBU**) |
 | Query routed net shapes for one net + layer | `def-tools net-shapes --def ... --net VDD --layer met1` | `--cache-dir` for repeated queries | CSV in **DEF DBU** |
 | Extract SDC clocks (`create_clock` / `create_generated_clock`) | `sdc_tools.clocks(sdc_path)` or `sdc-tools clocks` | Evaluates in safe `tclsh` >= 8.6 with stubs | `list[Clock]` / TSV / JSON |
@@ -107,7 +108,7 @@ import liberty_tools as lt
 
 # Parse a .lib or .lib.gz file.
 # - cells=[...]: skip unselected cell bodies at parse time.
-# - skip_tables=True: byte-skip all floating-point table bodies (36% faster) when
+# - skip_tables=True: byte-skip floating-point table bodies, including CCS power, when
 #   only pins, directions, attributes, ff/latch, or timing-arc scalars are needed.
 lt.parse_file(
     path: str | Path,
@@ -116,7 +117,7 @@ lt.parse_file(
     skip_tables: bool = False,
 ) -> lt.LibertyDocument
 
-# Lazy cell-indexed reader (~0.15s open on a 97 MB library):
+# Lazy cell-indexed reader (parse each requested cell on demand):
 index = lt.LibraryIndex.open(path: str | Path) -> lt.LibraryIndex
 index.library_name -> str
 index.cell_names() -> list[str]
@@ -152,6 +153,7 @@ doc.energy_unit_joules() -> float | None
 doc.driver_waveforms() -> list[lt.TimingTable]
 doc.timing_tables(**filters) -> list[dict[str, object]]
 doc.internal_power_tables(**filters) -> list[dict[str, object]]
+# Native Arrow batches preserve the list APIs’ column order and null rules.
 doc.to_polars(kind: Literal["timing", "power"] = "timing", **filters) -> polars.DataFrame
 doc.to_string() -> str
 doc.write(path: str | Path) -> None
@@ -316,6 +318,12 @@ rect.y1_microns -> float
 import def_tools
 
 # Streaming iterators (coordinates in DEF database units, integer DBU):
+# Load a mapped DEF hierarchy once and traverse it repeatedly.
+hierarchy = def_tools.read_def_hierarchy(lefs, top_def, [("CPU", cpu_def)])
+hierarchy.dbu_per_micron  # int, common DBU per micron
+for bbox in hierarchy.instances():  # same InstanceBBox type, full instance path
+    print(bbox.instance, bbox.llx, bbox.lly)
+
 for bbox in def_tools.instance_bboxes(lefs: Sequence[str | Path], def_path: str | Path):
     bbox.instance -> str
     bbox.macro_name -> str
@@ -571,6 +579,12 @@ let rows = def::scan_instance_bboxes(def_path, &lef_paths)?;
 for row in rows {
     let row = row?;   // row.instance, .macro_name, .status, .orient, .llx..ury
 }
+// Multi-DEF topology and coordinates in a common DBU scale.
+let hierarchy = def::read_def_hierarchy(top_def, &lef_paths, &block_defs)?;
+let common_dbu = hierarchy.dbu_per_micron();
+for row in hierarchy.instances() {
+    let row = row?;
+}
 let dbu_per_micron: i64 = def::dbu_per_micron(def_path)?;   // default 1000; reads up to COMPONENTS (whole file if none), works without it
 let shapes = def::scan_net_shapes(def_path, "VDD", "met1")?;
 let skipped = shapes.skipped();   // SkippedRoutes { after_via, polygon, subnet }
@@ -631,7 +645,7 @@ index.library_name();                 // &str
 index.cell_names();                   // Vec<String>
 index.num_cells();                    // usize
 index.cell("AND2")?;                  // full parse: pins/arcs/tables/units
-index.cell_attributes("AND2")?;       // structural only (skip_tables)
+index.cell_attributes("AND2")?;       // direct attributes and sequential flag
 index.cell_source("AND2")?;           // raw source slice of that cell
 index.voltage_unit(); index.current_unit(); index.time_unit();
 index.capacitive_load_unit(); index.energy_unit_joules();

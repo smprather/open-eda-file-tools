@@ -17,9 +17,10 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Lock
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .data import LibertyData
@@ -83,6 +84,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Liberty Viewer", lifespan=lifespan)
 _data: LibertyData | None = None
+_data_lock = Lock()
 
 
 # The app shell + our own JS/CSS, in addition to all /api/ JSON. `plotly.min.js`
@@ -104,12 +106,22 @@ async def no_store(request: Request, call_next):
 
 def get_data() -> LibertyData:
     global _data
-    if _data is None:
-        path = os.environ.get("LIBERTY_FILE", "dev.lib")
-        if not Path(path).exists():
-            raise HTTPException(500, f"LIBERTY_FILE not found: {path}")
-        _data = LibertyData.load(path)
-    return _data
+    data = _data
+    if data is not None:
+        return data
+    with _data_lock:
+        if _data is None:
+            path = os.environ.get("LIBERTY_FILE", "dev.lib")
+            if not Path(path).exists():
+                raise HTTPException(500, f"LIBERTY_FILE not found: {path}")
+            _data = LibertyData.load(path)
+        return _data
+
+
+@app.get("/api/ready")
+def ready():
+    get_data()
+    return Response(status_code=204)
 
 
 @app.get("/api/meta")

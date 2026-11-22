@@ -14,6 +14,9 @@ use crate::lef::{Lexer, Token, open_input};
 mod targeted;
 pub use targeted::{ClockNetRecord, DefConnection, TargetedDefScan, scan_clock_nets_and_instances};
 
+mod hierarchy;
+pub use hierarchy::{DefHierarchy, HierarchicalInstanceIter, read_def_hierarchy};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[doc(hidden)]
 pub enum ColumnKind {
@@ -176,8 +179,8 @@ pub(crate) struct NetRecord {
 pub struct Component<'a> {
     pub instance: &'a str,
     pub macro_name: &'a str,
-    pub status: &'static str,
-    pub orient: &'static str,
+    pub status: &'a str,
+    pub orient: &'a str,
     pub llx: i64,
     pub lly: i64,
     pub urx: i64,
@@ -217,6 +220,22 @@ pub struct InstanceBBox {
     pub lly: i64,
     pub urx: i64,
     pub ury: i64,
+}
+
+impl InstanceBBox {
+    #[doc(hidden)]
+    pub fn as_component(&self) -> Component<'_> {
+        Component {
+            instance: &self.instance,
+            macro_name: &self.macro_name,
+            status: &self.status,
+            orient: &self.orient,
+            llx: self.llx,
+            lly: self.lly,
+            urx: self.urx,
+            ury: self.ury,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -791,6 +810,8 @@ pub(crate) fn component_name_lengths(record: &RawRecord) -> Result<Option<(usize
     Ok(placed.then_some((instance_len, macro_len)))
 }
 
+type RowRenderer<'a> = dyn Fn(&mut String, &Component<'_>) + Sync + 'a;
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_instance_table_stream<W: Write>(
     scanner: &mut DefScanner,
@@ -800,7 +821,27 @@ pub(crate) fn write_instance_table_stream<W: Write>(
     macro_width: Option<usize>,
     sequential: Option<&HashSet<String>>,
     clock: Option<&HashSet<String>>,
+    out: W,
+) -> Result<usize, String> {
+    write_instance_table_rows(
+        scanner.dbu_per_micron,
+        columns,
+        (instance_width, macro_width),
+        sequential,
+        clock,
+        out,
+        |out, render| write_component_rows(scanner, macros, render, out),
+    )
+}
+
+fn write_instance_table_rows<W: Write>(
+    dbu_per_micron: i64,
+    columns: &[ColumnSpec],
+    (instance_width, macro_width): (Option<usize>, Option<usize>),
+    sequential: Option<&HashSet<String>>,
+    clock: Option<&HashSet<String>>,
     mut out: W,
+    emit: impl FnOnce(&mut W, &RowRenderer<'_>) -> Result<usize, String>,
 ) -> Result<usize, String> {
     let widths: Vec<usize> = columns
         .iter()
@@ -835,7 +876,7 @@ pub(crate) fn write_instance_table_stream<W: Write>(
     writeln!(out).map_err(|e| e.to_string())?;
     writeln!(out, "{}", "-".repeat(line_width)).map_err(|e| e.to_string())?;
 
-    let dbu = scanner.dbu_per_micron as f64;
+    let dbu = dbu_per_micron as f64;
     let flag = |value: bool| if value { "true" } else { "false" };
     let render = |buffer: &mut String, row: &Component<'_>| {
         for (index, column) in columns.iter().enumerate() {
@@ -867,7 +908,7 @@ pub(crate) fn write_instance_table_stream<W: Write>(
         }
         buffer.push('\n');
     };
-    let count = write_component_rows(scanner, macros, &render, &mut out)?;
+    let count = emit(&mut out, &render)?;
     out.flush().map_err(|e| e.to_string())?;
     Ok(count)
 }
@@ -877,7 +918,7 @@ pub(crate) fn write_instance_table_stream<W: Write>(
 pub(crate) fn write_component_rows<W: Write>(
     scanner: &mut DefScanner,
     macros: &MacroMap,
-    render: &(impl Fn(&mut String, &Component<'_>) + Sync),
+    render: &RowRenderer<'_>,
     out: &mut W,
 ) -> Result<usize, String> {
     let mut count = 0usize;
@@ -954,7 +995,25 @@ pub(crate) fn write_instance_bbox_csv_stream<W: Write>(
     columns: &[ColumnSpec],
     sequential: Option<&HashSet<String>>,
     clock: Option<&HashSet<String>>,
+    out: W,
+) -> Result<usize, String> {
+    write_instance_csv_rows(
+        scanner.dbu_per_micron,
+        columns,
+        sequential,
+        clock,
+        out,
+        |out, render| write_component_rows(scanner, macros, render, out),
+    )
+}
+
+fn write_instance_csv_rows<W: Write>(
+    dbu_per_micron: i64,
+    columns: &[ColumnSpec],
+    sequential: Option<&HashSet<String>>,
+    clock: Option<&HashSet<String>>,
     mut out: W,
+    emit: impl FnOnce(&mut W, &RowRenderer<'_>) -> Result<usize, String>,
 ) -> Result<usize, String> {
     let mut header = String::new();
     for (index, column) in columns.iter().enumerate() {
@@ -967,7 +1026,7 @@ pub(crate) fn write_instance_bbox_csv_stream<W: Write>(
     out.write_all(header.as_bytes())
         .map_err(|e| e.to_string())?;
 
-    let dbu = scanner.dbu_per_micron as f64;
+    let dbu = dbu_per_micron as f64;
     let flag = |value: bool| if value { "true" } else { "false" };
     let render = |buffer: &mut String, row: &Component<'_>| {
         for (index, column) in columns.iter().enumerate() {
@@ -995,7 +1054,7 @@ pub(crate) fn write_instance_bbox_csv_stream<W: Write>(
         }
         buffer.push('\n');
     };
-    let count = write_component_rows(scanner, macros, &render, &mut out)?;
+    let count = emit(&mut out, &render)?;
     out.flush().map_err(|e| e.to_string())?;
     Ok(count)
 }
@@ -1350,13 +1409,33 @@ pub fn parse_components<'a>(
     batch: &'a [RawRecord],
     macros: &MacroMap,
 ) -> Result<Vec<Component<'a>>, String> {
-    parse_components_with_fallback(batch, macros, None)
+    parse_components_impl(batch, macros, None, 1)
 }
 
+/// [`parse_components`] with `fallback` standing in for macros missing from
+/// `macros`.
 fn parse_components_with_fallback<'a>(
     batch: &'a [RawRecord],
     macros: &MacroMap,
     fallback: Option<&MacroDef>,
+) -> Result<Vec<Component<'a>>, String> {
+    parse_components_impl(batch, macros, fallback, 1)
+}
+
+/// [`parse_components`] with placements multiplied by `scale`.
+fn parse_components_scaled<'a>(
+    batch: &'a [RawRecord],
+    macros: &MacroMap,
+    scale: i64,
+) -> Result<Vec<Component<'a>>, String> {
+    parse_components_impl(batch, macros, None, scale)
+}
+
+fn parse_components_impl<'a>(
+    batch: &'a [RawRecord],
+    macros: &MacroMap,
+    fallback: Option<&MacroDef>,
+    scale: i64,
 ) -> Result<Vec<Component<'a>>, String> {
     let chunks: Vec<Result<Vec<Component<'a>>, String>> = crate::threads::install(|| {
         batch
@@ -1364,7 +1443,7 @@ fn parse_components_with_fallback<'a>(
             .map(|chunk| {
                 let mut rows = Vec::with_capacity(chunk.len());
                 for record in chunk {
-                    if let Some(row) = parse_component_record(record, macros, fallback)? {
+                    if let Some(row) = parse_component_record(record, macros, fallback, scale)? {
                         rows.push(row);
                     }
                 }
@@ -1434,6 +1513,7 @@ fn parse_component_record<'a>(
     record: &'a RawRecord,
     macros: &MacroMap,
     fallback: Option<&MacroDef>,
+    scale: i64,
 ) -> Result<Option<Component<'a>>, String> {
     let mut tokens = ByteTokens::new(&record.bytes);
     tokens.expect(b"-", record.offset, "component record")?;
@@ -1509,20 +1589,28 @@ fn parse_component_record<'a>(
             ));
         }
     };
+    let overflow = || {
+        format!(
+            "coordinate out of range for instance '{instance_str}' near DEF byte {}",
+            record.offset
+        )
+    };
+    let llx = placement.x.checked_mul(scale).ok_or_else(overflow)?;
+    let lly = placement.y.checked_mul(scale).ok_or_else(overflow)?;
     Ok(Some(Component {
         instance: instance_str,
         macro_name: macro_str,
         status: placement.status,
         orient: placement.orient,
-        llx: placement.x,
-        lly: placement.y,
-        urx: placement.x.checked_add(width).ok_or_else(|| {
+        llx,
+        lly,
+        urx: llx.checked_add(width).ok_or_else(|| {
             format!(
                 "bbox x coordinate out of range for {instance_str:?} near DEF byte {}",
                 record.offset
             )
         })?,
-        ury: placement.y.checked_add(height).ok_or_else(|| {
+        ury: lly.checked_add(height).ok_or_else(|| {
             format!(
                 "bbox y coordinate out of range for {instance_str:?} near DEF byte {}",
                 record.offset
@@ -2968,13 +3056,20 @@ pub(crate) fn to_dbu(
 /// earlier section (VIAS, NONDEFAULTRULES, ...) is skipped whole, and every
 /// other token is stepped over one at a time, so a section end such as
 /// `END VIAS` (which has no `;`) never swallows the statement after it.
-fn read_def_header(lexer: &mut Lexer<Box<dyn Read + Send>>) -> io::Result<(Option<i64>, bool)> {
+fn read_def_header(
+    lexer: &mut Lexer<Box<dyn Read + Send>>,
+    mut die_bounds: Option<&mut Option<[i64; 4]>>,
+) -> io::Result<(Option<i64>, bool)> {
     let mut dbu_per_micron = None;
     while let Some(token) = lexer.next_token()? {
         if token.text == "-" {
             lexer.skip_until_semicolon()?;
         } else if token.text.eq_ignore_ascii_case("UNITS") {
             parse_def_units(lexer, &mut dbu_per_micron)?;
+        } else if let Some(bounds) = die_bounds.as_deref_mut()
+            && token.text.eq_ignore_ascii_case("DIEAREA")
+        {
+            *bounds = Some(hierarchy::read_die_area(lexer)?);
         } else if token.text.eq_ignore_ascii_case("COMPONENTS") {
             return Ok((dbu_per_micron, true));
         }
@@ -2987,21 +3082,48 @@ pub struct DefScanner {
     lexer: Lexer<Box<dyn Read + Send>>,
     pub dbu_per_micron: i64,
     done: bool,
+    closed_components: bool,
 }
 
 impl DefScanner {
     pub fn from_path(path: &Path) -> io::Result<Self> {
+        Self::open(path, None).map(|(scanner, _)| scanner)
+    }
+
+    fn open(
+        path: &Path,
+        die_bounds: Option<&mut Option<[i64; 4]>>,
+    ) -> io::Result<(Self, Option<usize>)> {
+        let hierarchy = die_bounds.is_some();
         let input = open_input(path)?;
         let mut lexer = Lexer::new(input);
-        let (dbu_per_micron, found_components) = read_def_header(&mut lexer)?;
+        let (dbu_per_micron, found_components) = read_def_header(&mut lexer, die_bounds)?;
         if found_components {
-            let _count = lexer.next_token()?;
+            let count = lexer.next_token()?;
+            let declared = if hierarchy {
+                Some(
+                    count
+                        .and_then(|token| token.text.parse().ok())
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "invalid DEF COMPONENTS count",
+                            )
+                        })?,
+                )
+            } else {
+                None
+            };
             expect_semicolon(&mut lexer)?;
-            return Ok(Self {
-                lexer,
-                dbu_per_micron: dbu_per_micron.unwrap_or(1000),
-                done: false,
-            });
+            return Ok((
+                Self {
+                    lexer,
+                    dbu_per_micron: dbu_per_micron.unwrap_or(1000),
+                    done: false,
+                    closed_components: false,
+                },
+                declared,
+            ));
         }
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -3032,6 +3154,7 @@ impl DefScanner {
                     .as_ref()
                     .is_some_and(|t| t.text.eq_ignore_ascii_case("COMPONENTS"))
                 {
+                    self.closed_components = true;
                     return Ok(None);
                 }
                 continue;
@@ -3507,7 +3630,7 @@ mod tests {
             bytes: b"- u1 INV + PLACED ( 10 20 ) E".to_vec(),
             offset: 0,
         };
-        let bbox = parse_component_record(&raw, &macros, None)
+        let bbox = parse_component_record(&raw, &macros, None, 1)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -3527,6 +3650,7 @@ mod tests {
             &item,
             &parse_one_macro("MACRO INV\nSIZE 1.2 BY 2.4 ;\nEND INV\n", 1000),
             None,
+            1,
         )
         .unwrap()
         .unwrap();
@@ -3552,7 +3676,7 @@ mod tests {
         let mut scanner = DefScanner::from_path(&tmp).unwrap();
         let item = scanner.next_record().unwrap().unwrap();
         let macros = parse_one_macro("MACRO INV\nSIZE 1.2 BY 2.4 ;\nEND INV\n", 1000);
-        let bbox = parse_component_record(&item, &macros, None)
+        let bbox = parse_component_record(&item, &macros, None, 1)
             .unwrap()
             .unwrap();
         std::fs::remove_file(&tmp).unwrap();
@@ -3686,7 +3810,7 @@ pub fn scan_instance_bboxes_with_library(
 pub fn dbu_per_micron(def: &Path) -> Result<i64, crate::Error> {
     let input = open_input(def)?;
     let mut lexer = Lexer::new(input);
-    let (dbu_per_micron, _) = read_def_header(&mut lexer)?;
+    let (dbu_per_micron, _) = read_def_header(&mut lexer, None)?;
     Ok(dbu_per_micron.unwrap_or(1000))
 }
 

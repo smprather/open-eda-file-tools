@@ -419,3 +419,24 @@ def test_flag_columns_are_booleans_in_parquet(tmp_path: Path) -> None:
     assert frame["is_seq"].to_list() == [False, True]
     assert frame["is_clock"].to_list() == [True, False]
     assert frame.schema["is_seq"] == pl.Boolean
+
+
+def test_sequential_flags_respect_first_cell_and_later_library(tmp_path):
+    from def_tools.clock_roles import cell_clock_roles, cell_sequential_flags
+
+    first = tmp_path / "first.lib"
+    first.write_text("""
+        library (first) {
+            cell (a) { ff (IQ, IQN) { clocked_on : CK; } }
+            cell (a) {}
+            cell (b) { latch (IQ, IQN) { enable : CK; } }
+        }
+    """)
+    second = tmp_path / "second.lib"
+    second.write_text("library (second) { cell (a) {} cell (a) { ff (IQ, IQN) {} } }")
+
+    for paths, expected in (([first, second], {"a": False, "b": True}),
+                            ([second, first], {"a": True, "b": True})):
+        roles = cell_clock_roles(paths)
+        assert cell_sequential_flags(paths) == expected
+        assert {name: role.sequential for name, role in roles.items()} == expected

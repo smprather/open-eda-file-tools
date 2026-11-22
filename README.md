@@ -60,7 +60,7 @@ arc = doc.cell("and2_x1").pin("y").timing_arcs(related_pin="a")[0]
 table = arc.table("cell_rise")
 
 table.lookup(load=0.108, transition=0.0966)   # one value, addressed by axis role
-doc.to_polars(cell="and2_x1", table="cell_rise")   # long-form Polars rows
+doc.to_polars(cell="and2_x1", table="cell_rise")   # long-form frame via Arrow IPC
 ```
 
 Beyond timing tables, the library reads switching energy (`internal_power`),
@@ -102,6 +102,9 @@ lef-tools show --lef cells.lef --macro sky130_fd_sc_hd__buf_1
 ```bash
 # every placed instance with its bounding box, in microns
 def-tools instances --lef "pdk/*.lef" --def design.def.gz --format parquet --output instances.parquet
+
+# expand a child DEF at every placement of its mapped macro
+def-tools instances --lef "pdk/*.lef" --def top.def --block-def CPU=cpu.def.gz
 
 # routed shapes of one net on one layer
 def-tools net-shapes --def design.def.gz --net VDD --layer met1 -o vdd_met1.csv
@@ -195,13 +198,14 @@ Measured with the release build:
 
 | Operation | Result |
 | --- | --- |
-| Full parse of a 96.8 MB Liberty library | about 1.5 s, about 150 MB peak RSS |
-| `LibraryIndex.open` on the same file | about 0.15 s, cells parsed on demand |
-| `skip_tables=True` on the IHP sg13g2 standard-cell library | 23.8 ms → 15.3 ms |
+| Full parse of the 1.72 MB IHP SG13G2 typical Liberty, plain | 25.2 ms → 18.6 ms |
+| Full parse of the same Liberty as gzip | 69.4 ms → 19.2 ms |
+| Timing frame from the same library (52,442 rows) | 143.0 ms → 8.1 ms |
 | `def-tools instances` CSV, 118 MB routed DEF (302k instances) | 0.08 s |
 | `def-tools net-shapes`, one net in the same DEF | 0.02 s |
 
-Parsing releases the GIL, so several libraries can be parsed at once from
+The Liberty figures compare five-run medians against revision `ed884cc`.
+Reproduce them with `scripts/liberty_bench.py`. Parsing releases the GIL, so several libraries can be parsed at once from
 Python threads. DEF, SPEF and DSPF work is batched and parallelized in Rust,
 on all logical CPUs by default; `--threads N` or `set_threads(N)` limits it.
 More numbers in [docs/def.md](docs/def.md#performance-and-cpu-use).

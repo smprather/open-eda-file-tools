@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, overload
 
 import liberty_tools as lt
@@ -99,8 +100,11 @@ def _fmt_bool(raw: str | None) -> str | None:
     """Render a Liberty boolean string in the canonical viewer format (minimized
     sum-of-products via :class:`liberty_tools.BooleanExpression`). Falls back to
     the verbatim text if it doesn't parse as a boolean expression."""
-    if not raw:
-        return raw
+    return _format_boolean_text(raw) if raw else raw
+
+
+@lru_cache(maxsize=4096)
+def _format_boolean_text(raw: str) -> str:
     try:
         return str(lt.BooleanExpression(raw))
     except ValueError:
@@ -243,6 +247,10 @@ class LibertyData:
     templates: dict[str, list[str | None]] = field(default_factory=dict)
     unit_by_kind: dict[str, str | None] = field(default_factory=dict)
     _vmap: dict[str, float] | None = None
+    _cell_names: list[str] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._cell_names = self.doc.cell_names()
 
     @classmethod
     def load(cls, path: str) -> "LibertyData":
@@ -329,7 +337,7 @@ class LibertyData:
     def cell_names(
         self, filter_: str | None = None, offset: int = 0, limit: int = 500
     ) -> dict[str, Any]:
-        names = self.doc.cell_names()
+        names = self._cell_names
         if filter_:
             f = filter_.lower()
             names = [n for n in names if f in n.lower()]
@@ -400,11 +408,11 @@ class LibertyData:
         node["children"].extend(self._ccsp_nodes(cell))
         # Each node carries the source scope (cell/pin/bus/bundle group) to show
         # in the bottom pane; descendants inherit their nearest named ancestor.
-        self._collapse_line_groups(node, cell_name)
+        self._collapse_line_groups(node)
         _propagate_src(node, node["src"])
         return node
 
-    def _collapse_line_groups(self, node: dict[str, Any], cell_name: str) -> None:
+    def _collapse_line_groups(self, node: dict[str, Any]) -> None:
         """Collapse a branch whose children are all 1-D `power` line tables into a
         single multi-curve leaf (e.g. `pg=VDD` -> rise_power + fall_power on one
         plot, legend `rise`/`fall`). The children are removed; the branch becomes
@@ -413,26 +421,14 @@ class LibertyData:
         kids = node.get("children")
         if not kids:
             return
-        for k in kids:
-            self._collapse_line_groups(k, cell_name)
-        if len(kids) < 2 or not all(
-            k.get("type") == "table" and (k.get("ref") or {}).get("group") == "power"
-            for k in kids
-        ):
-            return
-        try:
-            payloads = [
-                self.table(
-                    cell_name, r["pin"], r["group"], r["arc_index"], r["table"], r.get("container", "")
-                )
-                for r in (k["ref"] for k in kids)
-            ]
-        except Exception:
-            return
-        if not all(p.get("ndim") == 1 for p in payloads):
+        for child in kids:
+            self._collapse_line_groups(child)
+        line_tables = [child.pop("_line_table", False) for child in kids]
+        if len(kids) < 2 or not all(line_tables):
             return
         base, legends = _split_common_label([k["ref"]["table"] for k in kids])
-        m = re.search(r"\(([^)]*)\)", (payloads[0].get("labels") or {}).get("value", ""))
+        table = kids[0]["ref"]["table"]
+        m = re.search(r"\(([^)]*)\)", self._axis_labels(None, table)["value"])
         node["multi"] = [{"ref": k["ref"], "name": lg} for k, lg in zip(kids, legends)]
         node["ylabel"] = base + (f" ({m.group(1)})" if m else "")
         node["leaf"] = True
@@ -654,11 +650,21 @@ class LibertyData:
             "meta": {"related_pg_pin": grp.related_pg_pin},
             "attributes": _meta_attrs({"related_pg_pin": grp.related_pg_pin}),
             "src": _path_src(prefix, f"{pin.name} · internal_power"),
-            "children": [
-                self._table_leaf(container, pin.name, "power", idx, t, prefix)
-                for t in grp.tables()
-            ],
+            "children": self._power_table_leaves(pin, container, idx, grp, prefix),
         }
+
+    def _power_table_leaves(
+        self, pin: lt.Pin, container: str, idx: int, group: lt.InternalPower,
+        prefix: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        shapes: dict[str, bool] = {}
+        leaves = []
+        for name, ndim, vectors in group._table_shapes():
+            line = shapes.setdefault(name, ndim == 1 and not vectors)
+            leaf = self._table_leaf(container, pin.name, "power", idx, name, prefix)
+            leaf["_line_table"] = line
+            leaves.append(leaf)
+        return leaves
 
     def _power_default_node(
         self,
@@ -715,10 +721,7 @@ class LibertyData:
 
         def tables_for(idx: int, grp: lt.InternalPower) -> list[dict[str, Any]]:
             prefix = [pin_step, _step("internal_power", indices=[idx])]
-            return [
-                self._table_leaf(container, pin.name, "power", idx, t, prefix)
-                for t in grp.tables()
-            ]
+            return self._power_table_leaves(pin, container, idx, grp, prefix)
 
         # Lone group: flat node with the pg pin in the label (unchanged layout).
         if len(members) == 1:
@@ -986,6 +989,7 @@ class LibertyData:
         i1, i2, i3 = tbl.index_1, tbl.index_2, tbl.index_3
         ndim = _ndim(i1, i2, i3)
         n1, n2, n3 = len(i1) or 1, len(i2) or 1, len(i3) or 1
+        values = tbl.values
         return {
             "table": table,
             "kind": "table",
@@ -993,8 +997,8 @@ class LibertyData:
             "index_1": i1,
             "index_2": i2,
             "index_3": i3,
-            "values": _reshape(tbl.values, n1, n2, n3, ndim),
-            "scalar": tbl.values[0] if ndim == 0 and tbl.values else None,
+            "values": _reshape(values, n1, n2, n3, ndim),
+            "scalar": values[0] if ndim == 0 and values else None,
             "labels": self._axis_labels(tbl.template, table),
         }
 

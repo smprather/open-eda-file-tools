@@ -637,3 +637,49 @@ def test_editing_a_detached_cell_is_refused(liberty):
 
     with pytest.raises(RuntimeError):
         cell.set_attribute("area", "59.8752")
+
+
+def test_issued_sibling_handles_keep_their_attribute_snapshot(tmp_path: Path):
+    path = tmp_path / "snapshot.lib"
+    path.write_text("library (l) { cell (c) { area : 1; pin (Y) { function : A; } } }")
+    doc = lt.parse_file(path)
+    cell = doc.cell("c")
+    sibling = doc.cell("c")
+    pin = cell.pin("Y")
+    sibling_pin = sibling.pin("Y")
+    cell.set_area(2)
+    pin.set_attribute("function", "B")
+
+    assert cell.area == doc.cell("c").area == 2
+    assert sibling.area == 1
+    assert pin.function == sibling.pin("Y").function == "B"
+    assert sibling_pin.function == "A"
+    del doc
+    assert cell.pin("Y").function == "B"
+
+
+def test_bulk_insertions_keep_winning_edit_order_at_same_offset(tmp_path: Path):
+    path = tmp_path / "same-offset.lib"
+    source = "library (t) {\r\n  cell (c) {\r\n    area : 1;\r\n  }\r\n}\r\n"
+    path.write_bytes(source.encode())
+    doc = lt.parse_file(path)
+    cell = doc.cell("c")
+    cell.set_attribute("first", 1)
+    cell.set_attribute("second", 2)
+    cell.set_attribute("first", 3)
+    expected = source.replace("  }\r\n", "    second : 2;\r\n    first : 3;\r\n  }\r\n")
+    assert doc.to_string() == expected
+
+
+def test_writer_reports_latest_invalid_cell_when_multiple_edits_fail(tmp_path: Path):
+    path = tmp_path / "invalid-edits.lib"
+    source = "library (t) {" + "".join(
+        f"cell ({name}) {{ pin (P) {{}} bus (B) {{ pin (P) {{}} }} }}"
+        for name in ("first", "last")
+    ) + "}"
+    path.write_text(source)
+    doc = lt.parse_file(path)
+    for name in ("first", "last"):
+        doc.cell(name).pin("P").set_attribute("capacitance", "9.0")
+    with pytest.raises(ValueError, match=r'cell "last" has .*pins named'):
+        doc.to_string()

@@ -34,6 +34,68 @@ uv run def-tools instances \
   --output instances.csv
 ```
 
+### Hierarchical DEF instances
+
+Pass a top DEF with `--def` and repeat `--block-def MACRO=PATH` for each macro
+whose contents live in another DEF. Match the macro name used in
+`COMPONENTS`. The child file's `DESIGN` statement may use a different name.
+Both the top and the children accept plain DEF or gzip input.
+
+```bash
+def-tools instances --lef "pdk/*.lef" --def top.def \
+  --block-def cpu=cpu.def.gz --block-def cache=cache.def \
+  --format parquet --output instances.parquet
+```
+
+The dump emits each placed block, followed by its descendants in DEF file
+order. Instance paths use `/`, such as `cpu0/cache/ff0`. Bounding boxes and the
+optional `orient` column are relative to the top design. Placement status
+comes from the row's own source DEF. A child DEF's `DIEAREA` bounding rectangle
+defines the mapped block's footprint and anchors its placement. Leaf cells
+use their LEF sizes. Unplaced components have no bounding box and are skipped.
+Cyclic block mappings and incomplete `COMPONENTS` sections are errors.
+
+In Python, use `def_tools.read_def_hierarchy(lefs, def_path, block_defs)` and
+iterate `hierarchy.instances()`. In Rust, use `def::read_def_hierarchy` and
+`DefHierarchy::instances`. Both APIs return integer bounding boxes at the
+hierarchy's common DBU scale, the least common multiple of the input DEF
+scales. Read the scale from `hierarchy.dbu_per_micron` in Python or
+`hierarchy.dbu_per_micron()` in Rust. The CLI outputs microns. For hierarchical
+`--clock-cells` input, name descendants by their full instance paths.
+Net and pin classification uses the top DEF's connectivity.
+
+#### Four-CVA6 example
+
+The routed `~/openlane2-cva6/cva6.def.gz` has a
+`1823600 × 1842320` DBU die at 1,000 DBU/µm. This top DEF places four
+copies with 50 µm margins and gaps.
+
+```bash
+cat > cva6_quad.def <<'END_DEF'
+VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN cva6_quad ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 3797200 3834640 ) ;
+COMPONENTS 4 ;
+  - cva6_sw cva6_top + FIXED ( 50000 50000 ) N ;
+  - cva6_se cva6_top + FIXED ( 1923600 50000 ) N ;
+  - cva6_nw cva6_top + FIXED ( 50000 1942320 ) N ;
+  - cva6_ne cva6_top + FIXED ( 1923600 1942320 ) N ;
+END COMPONENTS
+END DESIGN
+END_DEF
+pdk=~/pdk/IHP-Open-PDK/ihp-sg13g2/libs.ref
+def-tools instances --threads 4 \
+  --lef "$pdk/sg13g2_stdcell/lef/sg13g2_stdcell.lef" "$pdk/sg13g2_io/lef/sg13g2_io.lef" \
+  --def cva6_quad.def --block-def "cva6_top=$HOME/openlane2-cva6/cva6.def.gz" \
+  --output cva6_quad.csv
+```
+
+The fixture produces 1,206,204 rows, with four block rows and 301,550
+placed descendants per block.
+
 ### Conditional Columns
 
 The instance dumper only emits columns supported by the inputs provided:

@@ -8,7 +8,7 @@ Both clock identifiers use this one model: the SDC forward trace
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -127,19 +127,32 @@ def cell_clock_roles(libs: Sequence[Path | str]) -> dict[str, CellClockRole]:
     concurrently. A later library wins for a duplicated cell name.
     """
     from liberty_tools import parse_file
+
+    def read_roles(path: Path | str) -> dict[str, CellClockRole]:
+        doc = parse_file(path, skip_tables=True)
+        return {name: cell_clock_role(doc.cell(name)) for name in dict.fromkeys(doc.cells())}
+
+    return _merge_library_maps(libs, read_roles)
+
+
+def cell_sequential_flags(libs: Sequence[Path | str]) -> dict[str, bool]:
+    """First-cell sequential classification, with later libraries taking precedence."""
+    from liberty_tools._native import _sequential_flags
+
+    return _merge_library_maps(libs, lambda path: dict(_sequential_flags(str(path))))
+
+
+def _merge_library_maps[T](
+    libs: Sequence[Path | str], read: Callable[[Path | str], dict[str, T]]
+) -> dict[str, T]:
     from liberty_tools._native import get_threads
 
-    if not libs:
-        return {}
-    with ThreadPoolExecutor(max_workers=min(len(libs), get_threads())) as pool:
-        documents = list(
-            pool.map(lambda path: parse_file(str(path), skip_tables=True), libs)
-        )
-    roles: dict[str, CellClockRole] = {}
-    for document in documents:
-        for name in document.cells():
-            roles[name] = cell_clock_role(document.cell(name))
-    return roles
+    result: dict[str, T] = {}
+    if libs:
+        with ThreadPoolExecutor(max_workers=min(len(libs), get_threads())) as pool:
+            for mapping in pool.map(read, libs):
+                result.update(mapping)
+    return result
 
 
 def native_macro_roles(roles: dict[str, CellClockRole]) -> list[NativeMacroRole]:

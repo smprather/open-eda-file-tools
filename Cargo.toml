@@ -27,7 +27,7 @@ lto = "fat"
 
 [dependencies]
 open-eda-file-tools-core = { path = "core" }
-arrow = { version = "60.1", default-features = false }
+arrow = { version = "60.1", default-features = false, features = ["ipc"] }
 # zlib-rs backend: pure-Rust; the writer's .lib.gz output path.
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 parquet = { version = "60.1", default-features = false, features = ["arrow", "zstd"] }

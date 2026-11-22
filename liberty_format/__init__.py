@@ -11,7 +11,9 @@ comparing the Rust lexer's token stream (see :func:`format_text`).
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from io import StringIO
 
 from liberty_tools import _native
 
@@ -84,14 +86,16 @@ def _scan_line(s: str, in_block: bool, in_str: str | None) -> _LineScan:
     return _LineScan(depth_delta, first_is_close, in_block, in_str)
 
 
-def reindent(text: str, indent: str = "  ") -> str:
-    """Reindent ``text`` by brace depth. Pure whitespace/blank-line normalization."""
-    out: list[str] = []
+def _reindent_lines(lines: Iterable[str], indent: str) -> Iterator[str]:
+    """Yield reindented lines, carrying the scan state across physical lines."""
     depth = 0
     in_block = False
     in_str: str | None = None
     blank_run = 0
-    for raw in text.split("\n"):
+    pending_empty = 0
+    emitted = False
+    for raw in lines:
+        raw = raw.removesuffix("\n")
         scan = _scan_line(raw, in_block, in_str)
         if in_block or in_str is not None:
             # line begins inside a block comment or a multi-line string: every
@@ -112,21 +116,36 @@ def reindent(text: str, indent: str = "  ") -> str:
                 eff = depth - (1 if scan.first_is_close else 0)
                 line = indent * max(eff, 0) + body
                 is_blank = False
-        if is_blank:
-            blank_run += 1
-            if blank_run > 1:
-                depth += scan.depth_delta
-                in_block, in_str = scan.end_in_block, scan.end_in_str
-                continue
-        else:
-            blank_run = 0
-        out.append(line)
         depth += scan.depth_delta
         in_block, in_str = scan.end_in_block, scan.end_in_str
-    # exactly one trailing newline
-    while out and out[-1] == "":
-        out.pop()
-    return "\n".join(out) + "\n"
+        blank_run = blank_run + 1 if is_blank else 0
+        if blank_run > 1:
+            continue
+        if not line:
+            pending_empty += 1
+            continue
+        # Defer empty lines so the output always ends in a single newline.
+        for _ in range(pending_empty):
+            yield "\n"
+        pending_empty = 0
+        yield line + "\n"
+        emitted = True
+    if not emitted:
+        yield "\n"
+
+
+def reindent(text: str, indent: str = "  ") -> str:
+    """Reindent ``text`` by brace depth. Pure whitespace/blank-line normalization."""
+    return "".join(_reindent_lines(StringIO(text), indent))
+
+
+def _verify_tokens(comparison: tuple[bool, int, int]) -> None:
+    equal, before, after = comparison
+    if not equal:
+        raise TransparencyError(
+            "formatting changed the token stream "
+            f"({before} -> {after} tokens); refusing to emit"
+        )
 
 
 def format_text(text: str, indent: str = "  ") -> str:
@@ -137,11 +156,5 @@ def format_text(text: str, indent: str = "  ") -> str:
     untouched.
     """
     formatted = reindent(text, indent)
-    before = _native.tokenize_str(text)
-    after = _native.tokenize_str(formatted)
-    if before != after:
-        raise TransparencyError(
-            "formatting changed the token stream "
-            f"({len(before)} -> {len(after)} tokens); refusing to emit"
-        )
+    _verify_tokens(_native._compare_token_strings(text, formatted))
     return formatted

@@ -1,18 +1,56 @@
 pub mod def;
 pub mod lef;
+mod liberty_data;
+mod liberty_rows;
 pub mod otw;
 pub mod pex;
 mod sdc;
 pub mod threads;
+use liberty_data::Shared;
+use liberty_rows::{TableIpc, TableRows};
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyString};
-use std::collections::HashSet;
-use std::io::{self, Read};
-use std::sync::{Arc, Mutex};
+use pyo3::types::{PyBytes, PyDict, PyList, PyString};
+use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use open_eda_file_tools_core::liberty;
 use open_eda_file_tools_core::liberty::*;
+type PinTarget = Option<(String, Option<(ContainerKind, String)>)>;
+
+#[derive(Default)]
+struct PendingEdits {
+    ordered: Vec<AttrEdit>,
+    by_cell: HashMap<String, HashMap<PinTarget, Vec<usize>>>,
+}
+
+impl PendingEdits {
+    fn push(&mut self, edit: AttrEdit) {
+        let target = edit.pin.clone().map(|name| (name, edit.container.clone()));
+        self.by_cell
+            .entry(edit.cell.clone())
+            .or_default()
+            .entry(target)
+            .or_default()
+            .push(self.ordered.len());
+        self.ordered.push(edit);
+    }
+
+    fn for_target(
+        &self,
+        cell: &str,
+        target: &PinTarget,
+    ) -> impl Iterator<Item = &AttrEdit> + use<'_> {
+        self.by_cell
+            .get(cell)
+            .and_then(|pins| pins.get(target))
+            .into_iter()
+            .flatten()
+            .map(|&index| &self.ordered[index])
+    }
+}
+
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 struct Document {
@@ -42,7 +80,8 @@ struct Document {
     /// `normalized_driver_waveform` tables: index_1 = input slew, index_2 =
     /// normalized voltage (0..1), values = time. `name` = driver_waveform_name.
     driver_waveforms: Vec<TimingTableData>,
-    cells: Vec<CellData>,
+    cells: Vec<Shared<CellData>>,
+    first_cell: HashMap<String, usize>,
     bus_types: Vec<BusTypeData>,
     /// Path the document was parsed from (None for synthetic documents).
     source_path: Option<String>,
@@ -54,35 +93,22 @@ struct Document {
     cell_spans: Vec<(String, usize, usize)>,
     /// Pending attribute edits, shared with the `Cell`/`Pin` handles handed out
     /// by `Document::cell` / `Cell::pin` so that mutations survive the copy.
-    edits: Arc<Mutex<Vec<AttrEdit>>>,
+    edits: Arc<Mutex<PendingEdits>>,
 }
 
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 struct Cell {
-    #[pyo3(get)]
-    name: String,
+    data: Shared<CellData>,
     #[pyo3(get)]
     area: Option<f64>,
-    pins: Vec<PinData>,
-    buses: Vec<BusData>,
-    bundles: Vec<BundleData>,
     attributes: Vec<(String, String)>,
-    dynamic_currents: Vec<DynamicCurrentData>,
-    ff: Option<FfData>,
-    latch: Option<LatchData>,
-    leakage_powers: Vec<LeakagePowerData>,
-    pg_pins: Vec<PgPinData>,
-    /// Unit scales inherited from the library header.
-    units: UnitContext,
-    /// Edit log of the owning document (None for detached cells).
-    edits: Option<Arc<Mutex<Vec<AttrEdit>>>>,
+    edits: Option<Arc<Mutex<PendingEdits>>>,
 }
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 struct Pin {
-    #[pyo3(get)]
-    name: String,
+    data: Shared<PinData>,
     #[pyo3(get)]
     direction: Option<String>,
     #[pyo3(get)]
@@ -91,64 +117,28 @@ struct Pin {
     three_state: Option<String>,
     #[pyo3(get)]
     power_down_function: Option<String>,
-    timing_arcs: Vec<TimingArcData>,
-    internal_powers: Vec<InternalPowerData>,
     attributes: Vec<(String, String)>,
-    /// Unit scales inherited from the library header.
-    units: UnitContext,
-    /// Edit log of the owning document (None for detached pins).
-    edits: Option<Arc<Mutex<Vec<AttrEdit>>>>,
-    /// Name of the owning cell (needed to locate a pin in the source).
+    edits: Option<Arc<Mutex<PendingEdits>>>,
     cell_name: Option<String>,
-    /// The bus or bundle that owns this pin, `None` for a cell-level pin.
-    /// The writer needs it to tell two pins of the same name apart.
     container: Option<(ContainerKind, String)>,
 }
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 struct InternalPower {
-    #[pyo3(get)]
-    related_pin: Option<String>,
-    #[pyo3(get)]
-    related_pg_pin: Option<String>,
-    #[pyo3(get)]
-    when: Option<String>,
-    tables: Vec<TimingTableData>,
+    data: Shared<InternalPowerData>,
 }
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 struct Bus {
-    #[pyo3(get)]
-    name: String,
-    #[pyo3(get)]
-    direction: Option<String>,
-    #[pyo3(get)]
-    function: Option<String>,
-    #[pyo3(get)]
-    bus_type: Option<String>,
-    pins: Vec<PinData>,
-    timing_arcs: Vec<TimingArcData>,
-    /// Edit log of the owning document (None for detached buses).
-    edits: Option<Arc<Mutex<Vec<AttrEdit>>>>,
-    /// Name of the owning cell.
+    data: Shared<BusData>,
+    edits: Option<Arc<Mutex<PendingEdits>>>,
     cell_name: Option<String>,
 }
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 struct Bundle {
-    #[pyo3(get)]
-    name: String,
-    #[pyo3(get)]
-    direction: Option<String>,
-    #[pyo3(get)]
-    function: Option<String>,
-    #[pyo3(get)]
-    members: Vec<String>,
-    pins: Vec<PinData>,
-    timing_arcs: Vec<TimingArcData>,
-    /// Edit log of the owning document (None for detached bundles).
-    edits: Option<Arc<Mutex<Vec<AttrEdit>>>>,
-    /// Name of the owning cell.
+    data: Shared<BundleData>,
+    edits: Option<Arc<Mutex<PendingEdits>>>,
     cell_name: Option<String>,
 }
 #[pyclass(from_py_object)]
@@ -161,79 +151,17 @@ struct BusType {
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 struct TimingArc {
-    #[pyo3(get)]
-    related_pin: Option<String>,
-    #[pyo3(get)]
-    timing_type: Option<String>,
-    #[pyo3(get)]
-    when: Option<String>,
-    #[pyo3(get)]
-    sdf_cond: Option<String>,
-    #[pyo3(get)]
-    timing_sense: Option<String>,
-    tables: Vec<TimingTableData>,
-    ccsn_stages: Vec<CcsnStageData>,
+    data: Shared<TimingArcData>,
 }
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 struct CcsnStage {
-    #[pyo3(get)]
-    name: String,
-    #[pyo3(get)]
-    is_inverting: Option<String>,
-    #[pyo3(get)]
-    is_needed: Option<String>,
-    #[pyo3(get)]
-    is_pass_gate: Option<String>,
-    #[pyo3(get)]
-    stage_type: Option<String>,
-    #[pyo3(get)]
-    miller_cap_rise: Option<f64>,
-    #[pyo3(get)]
-    miller_cap_fall: Option<f64>,
-    #[pyo3(get)]
-    when: Option<String>,
-    #[pyo3(get)]
-    mode: Option<String>,
-    dc_current: Option<TimingTableData>,
-    output_voltage_rise: Vec<TimingTableData>,
-    output_voltage_fall: Vec<TimingTableData>,
+    data: Shared<CcsnStageData>,
 }
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 struct TimingTable {
-    #[pyo3(get)]
-    name: String,
-    #[pyo3(get)]
-    index_1: Vec<f64>,
-    #[pyo3(get)]
-    index_2: Vec<f64>,
-    #[pyo3(get)]
-    index_3: Vec<f64>,
-    /// The table values, **flat** and **row-major** over the axes:
-    /// `index_1` is the slowest axis, `index_3` the fastest.
-    ///
-    /// ```text
-    /// 2-D:  values[i * len(index_2) + j]
-    /// 3-D:  values[i * len(index_2) * len(index_3) + j * len(index_3) + k]
-    /// ```
-    #[pyo3(get)]
-    values: Vec<f64>,
-    /// The lookup-table template named in the group header, e.g. `cell_rise
-    /// (delay_template_7x7_x1)` -> `delay_template_7x7_x1`. Resolves axis
-    /// variable names via `Document::templates`.
-    #[pyo3(get)]
-    template: Option<String>,
-    /// Axis variable names resolved from the table's template:
-    /// [index_1 role, index_2 role, index_3 role]. `None` when the table has
-    /// no template or the template does not name that axis.
-    axis_vars: [Option<String>; 3],
-    /// CCS only: the `reference_time` of a `vector` group.
-    #[pyo3(get)]
-    reference_time: Option<f64>,
-    /// CCS only: nested `vector` sub-tables (one current-vs-time wave each) for
-    /// `output_current_*` / `ccsn_*` groups. Empty for ordinary NLDM tables.
-    vectors: Vec<TimingTableData>,
+    data: Shared<TimingTableData>,
 }
 #[pyclass(from_py_object)]
 #[derive(Clone)]
@@ -381,79 +309,92 @@ impl Latch {
         expr_of(&self.preset)
     }
 }
-impl From<CellData> for Cell {
-    fn from(value: CellData) -> Self {
+impl From<Shared<CellData>> for Cell {
+    fn from(data: Shared<CellData>) -> Self {
         Self {
-            name: value.name,
-            area: value.area,
-            pins: value.pins,
-            buses: value.buses,
-            bundles: value.bundles,
-            attributes: value.attributes,
-            dynamic_currents: value.dynamic_currents,
-            ff: value.ff,
-            latch: value.latch,
-            leakage_powers: value.leakage_powers,
-            pg_pins: value.pg_pins,
-            units: value.units,
+            area: data.area,
+            attributes: data.attributes.clone(),
+            data,
             edits: None,
         }
     }
 }
-impl From<PinData> for Pin {
-    fn from(value: PinData) -> Self {
+
+impl Deref for Cell {
+    type Target = CellData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+impl From<Shared<PinData>> for Pin {
+    fn from(data: Shared<PinData>) -> Self {
         Self {
-            name: value.name,
-            direction: value.direction,
-            function: value.function,
-            three_state: value.three_state,
-            power_down_function: value.power_down_function,
-            timing_arcs: value.timing_arcs,
-            internal_powers: value.internal_powers,
-            attributes: value.attributes,
-            units: value.units,
+            direction: data.direction.clone(),
+            function: data.function.clone(),
+            three_state: data.three_state.clone(),
+            power_down_function: data.power_down_function.clone(),
+            attributes: data.attributes.clone(),
+            data,
             edits: None,
             cell_name: None,
             container: None,
         }
     }
 }
-impl From<InternalPowerData> for InternalPower {
-    fn from(value: InternalPowerData) -> Self {
-        Self {
-            related_pin: value.related_pin,
-            related_pg_pin: value.related_pg_pin,
-            when: value.when,
-            tables: value.tables,
-        }
+
+impl Deref for Pin {
+    type Target = PinData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
     }
 }
-impl From<BusData> for Bus {
-    fn from(value: BusData) -> Self {
+impl From<Shared<InternalPowerData>> for InternalPower {
+    fn from(data: Shared<InternalPowerData>) -> Self {
+        Self { data }
+    }
+}
+
+impl Deref for InternalPower {
+    type Target = InternalPowerData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+impl From<Shared<BusData>> for Bus {
+    fn from(data: Shared<BusData>) -> Self {
         Self {
-            name: value.name,
-            direction: value.direction,
-            function: value.function,
-            bus_type: value.bus_type,
-            pins: value.pins,
-            timing_arcs: value.timing_arcs,
+            data,
             edits: None,
             cell_name: None,
         }
     }
 }
-impl From<BundleData> for Bundle {
-    fn from(value: BundleData) -> Self {
+
+impl Deref for Bus {
+    type Target = BusData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+impl From<Shared<BundleData>> for Bundle {
+    fn from(data: Shared<BundleData>) -> Self {
         Self {
-            name: value.name,
-            direction: value.direction,
-            function: value.function,
-            members: value.members,
-            pins: value.pins,
-            timing_arcs: value.timing_arcs,
+            data,
             edits: None,
             cell_name: None,
         }
+    }
+}
+
+impl Deref for Bundle {
+    type Target = BundleData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
     }
 }
 impl From<BusTypeData> for BusType {
@@ -464,50 +405,43 @@ impl From<BusTypeData> for BusType {
         }
     }
 }
-impl From<TimingArcData> for TimingArc {
-    fn from(value: TimingArcData) -> Self {
-        Self {
-            related_pin: value.related_pin,
-            timing_type: value.timing_type,
-            when: value.when,
-            sdf_cond: value.sdf_cond,
-            timing_sense: value.timing_sense,
-            tables: value.tables,
-            ccsn_stages: value.ccsn_stages,
-        }
+impl From<Shared<TimingArcData>> for TimingArc {
+    fn from(data: Shared<TimingArcData>) -> Self {
+        Self { data }
     }
 }
-impl From<CcsnStageData> for CcsnStage {
-    fn from(value: CcsnStageData) -> Self {
-        Self {
-            name: value.name,
-            is_inverting: value.is_inverting,
-            is_needed: value.is_needed,
-            is_pass_gate: value.is_pass_gate,
-            stage_type: value.stage_type,
-            miller_cap_rise: value.miller_cap_rise,
-            miller_cap_fall: value.miller_cap_fall,
-            when: value.when,
-            mode: value.mode,
-            dc_current: value.dc_current,
-            output_voltage_rise: value.output_voltage_rise,
-            output_voltage_fall: value.output_voltage_fall,
-        }
+
+impl Deref for TimingArc {
+    type Target = TimingArcData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
     }
 }
-impl From<TimingTableData> for TimingTable {
-    fn from(value: TimingTableData) -> Self {
-        Self {
-            name: value.name,
-            index_1: value.index_1,
-            index_2: value.index_2,
-            index_3: value.index_3,
-            values: value.values,
-            template: value.template,
-            axis_vars: value.axis_vars,
-            reference_time: value.reference_time,
-            vectors: value.vectors,
-        }
+impl From<Shared<CcsnStageData>> for CcsnStage {
+    fn from(data: Shared<CcsnStageData>) -> Self {
+        Self { data }
+    }
+}
+
+impl Deref for CcsnStage {
+    type Target = CcsnStageData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+impl From<Shared<TimingTableData>> for TimingTable {
+    fn from(data: Shared<TimingTableData>) -> Self {
+        Self { data }
+    }
+}
+
+impl Deref for TimingTable {
+    type Target = TimingTableData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
     }
 }
 #[pymethods]
@@ -533,10 +467,9 @@ impl Document {
     }
 
     fn cell(&self, name: &str) -> PyResult<Cell> {
-        self.cells
-            .iter()
-            .find(|cell| cell.name == name)
-            .cloned()
+        self.first_cell
+            .get(name)
+            .map(|&index| self.cells[index].clone())
             .map(|data| {
                 let mut cell = Cell::from(data);
                 cell.edits = Some(self.edits.clone());
@@ -557,102 +490,43 @@ impl Document {
         when: Option<&str>,
         table: Option<&str>,
     ) -> PyResult<Bound<'py, PyList>> {
-        let when_filter = WhenFilter::new(when).map_err(PyValueError::new_err)?;
+        let filters = TableFilters {
+            cell,
+            pin,
+            related_pin,
+            category: timing_type,
+            when,
+            table,
+        };
         let rows = PyList::empty(py);
-        for cell_data in &self.cells {
-            if !matches_opt(cell, &cell_data.name) {
-                continue;
-            }
-            for pin_data in &cell_data.pins {
-                if !matches_opt(pin, &pin_data.name) {
-                    continue;
-                }
-                for arc in &pin_data.timing_arcs {
-                    if !matches_opt_opt(related_pin, arc.related_pin.as_deref())
-                        || !matches_opt_opt(timing_type, arc.timing_type.as_deref())
-                        || !when_filter.matches(arc.when.as_deref())
-                    {
-                        continue;
-                    }
-                    for timing_table in &arc.tables {
-                        if !matches_opt(table, &timing_table.name) {
-                            continue;
-                        }
-                        append_table_rows(
-                            py,
-                            &rows,
-                            &cell_data.name,
-                            &pin_data.name,
-                            arc,
-                            timing_table,
-                        )?;
-                    }
-                }
-            }
-            for bus_data in &cell_data.buses {
-                if matches_opt(pin, &bus_data.name) {
-                    append_matching_arc_tables(
-                        py,
-                        &rows,
-                        &cell_data.name,
-                        &bus_data.name,
-                        &bus_data.timing_arcs,
-                        related_pin,
-                        timing_type,
-                        &when_filter,
-                        table,
-                    )?;
-                }
-                for pin_data in &bus_data.pins {
-                    if !matches_opt(pin, &pin_data.name) {
-                        continue;
-                    }
-                    append_matching_arc_tables(
-                        py,
-                        &rows,
-                        &cell_data.name,
-                        &pin_data.name,
-                        &pin_data.timing_arcs,
-                        related_pin,
-                        timing_type,
-                        &when_filter,
-                        table,
-                    )?;
-                }
-            }
-            for bundle_data in &cell_data.bundles {
-                if matches_opt(pin, &bundle_data.name) {
-                    append_matching_arc_tables(
-                        py,
-                        &rows,
-                        &cell_data.name,
-                        &bundle_data.name,
-                        &bundle_data.timing_arcs,
-                        related_pin,
-                        timing_type,
-                        &when_filter,
-                        table,
-                    )?;
-                }
-                for pin_data in &bundle_data.pins {
-                    if !matches_opt(pin, &pin_data.name) {
-                        continue;
-                    }
-                    append_matching_arc_tables(
-                        py,
-                        &rows,
-                        &cell_data.name,
-                        &pin_data.name,
-                        &pin_data.timing_arcs,
-                        related_pin,
-                        timing_type,
-                        &when_filter,
-                        table,
-                    )?;
-                }
-            }
-        }
+        self.visit_tables(false, filters, |table| {
+            table.append_dicts(py, &rows, "timing_type")
+        })?;
         Ok(rows)
+    }
+
+    #[pyo3(signature = (cell=None, pin=None, related_pin=None, timing_type=None, when=None, table=None))]
+    fn _timing_ipc<'py>(
+        &self,
+        py: Python<'py>,
+        cell: Option<&str>,
+        pin: Option<&str>,
+        related_pin: Option<&str>,
+        timing_type: Option<&str>,
+        when: Option<&str>,
+        table: Option<&str>,
+    ) -> PyResult<Option<(Bound<'py, PyBytes>, u16)>> {
+        let filters = TableFilters {
+            cell,
+            pin,
+            related_pin,
+            category: timing_type,
+            when,
+            table,
+        };
+        table_ipc(py, "timing_type", |emit| {
+            self.visit_tables(false, filters, emit)
+        })
     }
 
     /// SI scale (joules) for `internal_power` energy values: voltage * current *
@@ -792,6 +666,7 @@ impl Document {
         self.driver_waveforms
             .iter()
             .cloned()
+            .map(Shared::new)
             .map(TimingTable::from)
             .collect()
     }
@@ -807,42 +682,53 @@ impl Document {
         when: Option<&str>,
         table: Option<&str>,
     ) -> PyResult<Bound<'py, PyList>> {
-        let when_filter = WhenFilter::new(when).map_err(PyValueError::new_err)?;
+        let filters = TableFilters {
+            cell,
+            pin,
+            related_pin,
+            category: related_pg_pin,
+            when,
+            table,
+        };
         let rows = PyList::empty(py);
-        for cell_data in &self.cells {
-            if !matches_opt(cell, &cell_data.name) {
-                continue;
-            }
-            let mut pin_groups: Vec<&PinData> = cell_data.pins.iter().collect();
-            for bus_data in &cell_data.buses {
-                pin_groups.extend(bus_data.pins.iter());
-            }
-            for bundle_data in &cell_data.bundles {
-                pin_groups.extend(bundle_data.pins.iter());
-            }
-            for pin_data in pin_groups {
-                if !matches_opt(pin, &pin_data.name) {
-                    continue;
-                }
-                append_matching_power_tables(
-                    py,
-                    &rows,
-                    &cell_data.name,
-                    &pin_data.name,
-                    &pin_data.internal_powers,
-                    related_pin,
-                    related_pg_pin,
-                    &when_filter,
-                    table,
-                )?;
-            }
-        }
+        self.visit_tables(true, filters, |table| {
+            table.append_dicts(py, &rows, "related_pg_pin")
+        })?;
         Ok(rows)
+    }
+
+    #[pyo3(signature = (cell=None, pin=None, related_pin=None, related_pg_pin=None, when=None, table=None))]
+    fn _power_ipc<'py>(
+        &self,
+        py: Python<'py>,
+        cell: Option<&str>,
+        pin: Option<&str>,
+        related_pin: Option<&str>,
+        related_pg_pin: Option<&str>,
+        when: Option<&str>,
+        table: Option<&str>,
+    ) -> PyResult<Option<(Bound<'py, PyBytes>, u16)>> {
+        let filters = TableFilters {
+            cell,
+            pin,
+            related_pin,
+            category: related_pg_pin,
+            when,
+            table,
+        };
+        table_ipc(py, "related_pg_pin", |emit| {
+            self.visit_tables(true, filters, emit)
+        })
     }
 }
 
 #[pymethods]
 impl Cell {
+    #[getter]
+    fn name(&self) -> String {
+        self.data.name.clone()
+    }
+
     fn pins(&self) -> Vec<String> {
         self.pins.iter().map(|pin| pin.name.clone()).collect()
     }
@@ -850,8 +736,8 @@ impl Cell {
     fn pin(&self, name: &str) -> PyResult<Pin> {
         self.pins
             .iter()
-            .find(|pin| pin.name == name)
-            .cloned()
+            .position(|pin| pin.name == name)
+            .map(|index| self.data.child(|data| &data.pins, index))
             .map(|data| {
                 let mut pin = Pin::from(data);
                 pin.edits = self.edits.clone();
@@ -869,8 +755,8 @@ impl Cell {
     fn bus(&self, name: &str) -> PyResult<Bus> {
         self.buses
             .iter()
-            .find(|bus| bus.name == name)
-            .cloned()
+            .position(|bus| bus.name == name)
+            .map(|index| self.data.child(|data| &data.buses, index))
             .map(|data| {
                 let mut bus = Bus::from(data);
                 bus.edits = self.edits.clone();
@@ -890,8 +776,8 @@ impl Cell {
     fn bundle(&self, name: &str) -> PyResult<Bundle> {
         self.bundles
             .iter()
-            .find(|bundle| bundle.name == name)
-            .cloned()
+            .position(|bundle| bundle.name == name)
+            .map(|index| self.data.child(|data| &data.bundles, index))
             .map(|data| {
                 let mut bundle = Bundle::from(data);
                 bundle.edits = self.edits.clone();
@@ -960,9 +846,8 @@ impl Cell {
 
     /// CCS power (`dynamic_current`) groups.
     fn dynamic_currents(&self) -> Vec<DynamicCurrent> {
-        self.dynamic_currents
-            .iter()
-            .cloned()
+        self.data
+            .children(|data| &data.dynamic_currents)
             .map(DynamicCurrent::from)
             .collect()
     }
@@ -994,30 +879,41 @@ impl Cell {
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 struct DynamicCurrent {
-    #[pyo3(get)]
-    related_inputs: Option<String>,
-    #[pyo3(get)]
-    related_outputs: Option<String>,
-    #[pyo3(get)]
-    when: Option<String>,
-    switching_groups: Vec<SwitchingGroupData>,
+    data: Shared<DynamicCurrentData>,
 }
-impl From<DynamicCurrentData> for DynamicCurrent {
-    fn from(value: DynamicCurrentData) -> Self {
-        Self {
-            related_inputs: value.related_inputs,
-            related_outputs: value.related_outputs,
-            when: value.when,
-            switching_groups: value.switching_groups,
-        }
+impl From<Shared<DynamicCurrentData>> for DynamicCurrent {
+    fn from(data: Shared<DynamicCurrentData>) -> Self {
+        Self { data }
+    }
+}
+
+impl Deref for DynamicCurrent {
+    type Target = DynamicCurrentData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
     }
 }
 #[pymethods]
 impl DynamicCurrent {
+    #[getter]
+    fn related_inputs(&self) -> Option<String> {
+        self.data.related_inputs.clone()
+    }
+
+    #[getter]
+    fn related_outputs(&self) -> Option<String> {
+        self.data.related_outputs.clone()
+    }
+
+    #[getter]
+    fn when(&self) -> Option<String> {
+        self.data.when.clone()
+    }
+
     fn switching_groups(&self) -> Vec<SwitchingGroup> {
-        self.switching_groups
-            .iter()
-            .cloned()
+        self.data
+            .children(|data| &data.switching_groups)
             .map(SwitchingGroup::from)
             .collect()
     }
@@ -1030,27 +926,36 @@ impl DynamicCurrent {
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 struct SwitchingGroup {
-    #[pyo3(get)]
-    input_switching_condition: Option<String>,
-    #[pyo3(get)]
-    output_switching_condition: Option<String>,
-    pg_currents: Vec<PgCurrentData>,
+    data: Shared<SwitchingGroupData>,
 }
-impl From<SwitchingGroupData> for SwitchingGroup {
-    fn from(value: SwitchingGroupData) -> Self {
-        Self {
-            input_switching_condition: value.input_switching_condition,
-            output_switching_condition: value.output_switching_condition,
-            pg_currents: value.pg_currents,
-        }
+impl From<Shared<SwitchingGroupData>> for SwitchingGroup {
+    fn from(data: Shared<SwitchingGroupData>) -> Self {
+        Self { data }
+    }
+}
+
+impl Deref for SwitchingGroup {
+    type Target = SwitchingGroupData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
     }
 }
 #[pymethods]
 impl SwitchingGroup {
+    #[getter]
+    fn input_switching_condition(&self) -> Option<String> {
+        self.data.input_switching_condition.clone()
+    }
+
+    #[getter]
+    fn output_switching_condition(&self) -> Option<String> {
+        self.data.output_switching_condition.clone()
+    }
+
     fn pg_currents(&self) -> Vec<PgCurrent> {
-        self.pg_currents
-            .iter()
-            .cloned()
+        self.data
+            .children(|data| &data.pg_currents)
             .map(PgCurrent::from)
             .collect()
     }
@@ -1068,31 +973,43 @@ impl SwitchingGroup {
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 struct PgCurrent {
-    #[pyo3(get)]
-    pg_pin: Option<String>,
-    vectors: Vec<TimingTableData>,
+    data: Shared<PgCurrentData>,
 }
-impl From<PgCurrentData> for PgCurrent {
-    fn from(value: PgCurrentData) -> Self {
-        Self {
-            pg_pin: value.pg_pin,
-            vectors: value.vectors,
-        }
+impl From<Shared<PgCurrentData>> for PgCurrent {
+    fn from(data: Shared<PgCurrentData>) -> Self {
+        Self { data }
+    }
+}
+
+impl Deref for PgCurrent {
+    type Target = PgCurrentData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
     }
 }
 #[pymethods]
 impl PgCurrent {
+    #[getter]
+    fn pg_pin(&self) -> Option<String> {
+        self.data.pg_pin.clone()
+    }
+
     /// One `TimingTable` per (slew, cap) — a current-vs-time wave.
     fn vectors(&self) -> Vec<TimingTable> {
-        self.vectors
-            .iter()
-            .cloned()
+        self.data
+            .children(|data| &data.vectors)
             .map(TimingTable::from)
             .collect()
     }
 }
 #[pymethods]
 impl Pin {
+    #[getter]
+    fn name(&self) -> String {
+        self.data.name.clone()
+    }
+
     #[pyo3(signature = (related_pin=None, timing_type=None, when=None))]
     fn timing_arcs(
         &self,
@@ -1100,7 +1017,13 @@ impl Pin {
         timing_type: Option<&str>,
         when: Option<&str>,
     ) -> PyResult<Vec<TimingArc>> {
-        filter_timing_arcs(&self.timing_arcs, related_pin, timing_type, when)
+        filter_timing_arcs(
+            &self.data,
+            |data| &data.timing_arcs,
+            related_pin,
+            timing_type,
+            when,
+        )
     }
 
     #[pyo3(signature = (related_pin=None, related_pg_pin=None, when=None))]
@@ -1114,12 +1037,13 @@ impl Pin {
         Ok(self
             .internal_powers
             .iter()
-            .filter(|group| {
+            .enumerate()
+            .filter(|(_, group)| {
                 matches_opt_opt(related_pin, group.related_pin.as_deref())
                     && matches_opt_opt(related_pg_pin, group.related_pg_pin.as_deref())
                     && when_filter.matches(group.when.as_deref())
             })
-            .cloned()
+            .map(|(index, _)| self.data.child(|data| &data.internal_powers, index))
             .map(InternalPower::from)
             .collect())
     }
@@ -1252,15 +1176,43 @@ impl Pin {
 }
 #[pymethods]
 impl InternalPower {
+    #[getter]
+    fn related_pin(&self) -> Option<String> {
+        self.data.related_pin.clone()
+    }
+
+    #[getter]
+    fn related_pg_pin(&self) -> Option<String> {
+        self.data.related_pg_pin.clone()
+    }
+
+    #[getter]
+    fn when(&self) -> Option<String> {
+        self.data.when.clone()
+    }
+
     fn tables(&self) -> Vec<String> {
         self.tables.iter().map(|table| table.name.clone()).collect()
+    }
+
+    fn _table_shapes(&self) -> Vec<(&str, usize, bool)> {
+        self.tables
+            .iter()
+            .map(|table| {
+                let ndim = [&table.index_1, &table.index_2, &table.index_3]
+                    .iter()
+                    .rposition(|axis| !axis.is_empty())
+                    .map_or(0, |idx| idx + 1);
+                (table.name.as_str(), ndim, !table.vectors.is_empty())
+            })
+            .collect()
     }
 
     fn table(&self, name: &str) -> PyResult<TimingTable> {
         self.tables
             .iter()
-            .find(|table| table.name == name)
-            .cloned()
+            .position(|table| table.name == name)
+            .map(|index| self.data.child(|data| &data.tables, index))
             .map(TimingTable::from)
             .ok_or_else(|| PyKeyError::new_err(format!("unknown power table {name:?}")))
     }
@@ -1272,6 +1224,26 @@ impl InternalPower {
 }
 #[pymethods]
 impl Bus {
+    #[getter]
+    fn name(&self) -> String {
+        self.data.name.clone()
+    }
+
+    #[getter]
+    fn direction(&self) -> Option<String> {
+        self.data.direction.clone()
+    }
+
+    #[getter]
+    fn function(&self) -> Option<String> {
+        self.data.function.clone()
+    }
+
+    #[getter]
+    fn bus_type(&self) -> Option<String> {
+        self.data.bus_type.clone()
+    }
+
     fn pins(&self) -> Vec<String> {
         self.pins.iter().map(|pin| pin.name.clone()).collect()
     }
@@ -1279,8 +1251,8 @@ impl Bus {
     fn pin(&self, name: &str) -> PyResult<Pin> {
         self.pins
             .iter()
-            .find(|pin| pin.name == name)
-            .cloned()
+            .position(|pin| pin.name == name)
+            .map(|index| self.data.child(|data| &data.pins, index))
             .map(|data| {
                 let mut pin = Pin::from(data);
                 pin.edits = self.edits.clone();
@@ -1299,7 +1271,13 @@ impl Bus {
         timing_type: Option<&str>,
         when: Option<&str>,
     ) -> PyResult<Vec<TimingArc>> {
-        filter_timing_arcs(&self.timing_arcs, related_pin, timing_type, when)
+        filter_timing_arcs(
+            &self.data,
+            |data| &data.timing_arcs,
+            related_pin,
+            timing_type,
+            when,
+        )
     }
 
     /// The bus `function` as a parsed `BooleanExpression` (None if absent).
@@ -1309,6 +1287,26 @@ impl Bus {
 }
 #[pymethods]
 impl Bundle {
+    #[getter]
+    fn name(&self) -> String {
+        self.data.name.clone()
+    }
+
+    #[getter]
+    fn direction(&self) -> Option<String> {
+        self.data.direction.clone()
+    }
+
+    #[getter]
+    fn function(&self) -> Option<String> {
+        self.data.function.clone()
+    }
+
+    #[getter]
+    fn members(&self) -> Vec<String> {
+        self.data.members.clone()
+    }
+
     fn pins(&self) -> Vec<String> {
         self.pins.iter().map(|pin| pin.name.clone()).collect()
     }
@@ -1316,8 +1314,8 @@ impl Bundle {
     fn pin(&self, name: &str) -> PyResult<Pin> {
         self.pins
             .iter()
-            .find(|pin| pin.name == name)
-            .cloned()
+            .position(|pin| pin.name == name)
+            .map(|index| self.data.child(|data| &data.pins, index))
             .map(|data| {
                 let mut pin = Pin::from(data);
                 pin.edits = self.edits.clone();
@@ -1336,7 +1334,13 @@ impl Bundle {
         timing_type: Option<&str>,
         when: Option<&str>,
     ) -> PyResult<Vec<TimingArc>> {
-        filter_timing_arcs(&self.timing_arcs, related_pin, timing_type, when)
+        filter_timing_arcs(
+            &self.data,
+            |data| &data.timing_arcs,
+            related_pin,
+            timing_type,
+            when,
+        )
     }
 
     /// The bundle `function` as a parsed `BooleanExpression` (None if absent).
@@ -1363,6 +1367,31 @@ impl BusType {
 }
 #[pymethods]
 impl TimingArc {
+    #[getter]
+    fn related_pin(&self) -> Option<String> {
+        self.data.related_pin.clone()
+    }
+
+    #[getter]
+    fn timing_type(&self) -> Option<String> {
+        self.data.timing_type.clone()
+    }
+
+    #[getter]
+    fn when(&self) -> Option<String> {
+        self.data.when.clone()
+    }
+
+    #[getter]
+    fn sdf_cond(&self) -> Option<String> {
+        self.data.sdf_cond.clone()
+    }
+
+    #[getter]
+    fn timing_sense(&self) -> Option<String> {
+        self.data.timing_sense.clone()
+    }
+
     fn tables(&self) -> Vec<String> {
         self.tables.iter().map(|table| table.name.clone()).collect()
     }
@@ -1370,16 +1399,15 @@ impl TimingArc {
     fn table(&self, name: &str) -> PyResult<TimingTable> {
         self.tables
             .iter()
-            .find(|table| table.name == name)
-            .cloned()
+            .position(|table| table.name == name)
+            .map(|index| self.data.child(|data| &data.tables, index))
             .map(TimingTable::from)
             .ok_or_else(|| PyKeyError::new_err(format!("unknown timing table {name:?}")))
     }
 
     fn ccsn_stages(&self) -> Vec<CcsnStage> {
-        self.ccsn_stages
-            .iter()
-            .cloned()
+        self.data
+            .children(|data| &data.ccsn_stages)
             .map(CcsnStage::from)
             .collect()
     }
@@ -1396,33 +1424,114 @@ impl TimingArc {
 }
 #[pymethods]
 impl CcsnStage {
+    #[getter]
+    fn name(&self) -> String {
+        self.data.name.clone()
+    }
+
+    #[getter]
+    fn is_inverting(&self) -> Option<String> {
+        self.data.is_inverting.clone()
+    }
+
+    #[getter]
+    fn is_needed(&self) -> Option<String> {
+        self.data.is_needed.clone()
+    }
+
+    #[getter]
+    fn is_pass_gate(&self) -> Option<String> {
+        self.data.is_pass_gate.clone()
+    }
+
+    #[getter]
+    fn stage_type(&self) -> Option<String> {
+        self.data.stage_type.clone()
+    }
+
+    #[getter]
+    fn miller_cap_rise(&self) -> Option<f64> {
+        self.data.miller_cap_rise
+    }
+
+    #[getter]
+    fn miller_cap_fall(&self) -> Option<f64> {
+        self.data.miller_cap_fall
+    }
+
+    #[getter]
+    fn when(&self) -> Option<String> {
+        self.data.when.clone()
+    }
+
+    #[getter]
+    fn mode(&self) -> Option<String> {
+        self.data.mode.clone()
+    }
+
     fn dc_current(&self) -> Option<TimingTable> {
-        self.dc_current.clone().map(TimingTable::from)
+        self.dc_current.as_ref()?;
+        Some(TimingTable::from(
+            self.data
+                .project(|stage| stage.dc_current.as_ref().unwrap()),
+        ))
     }
 
     fn output_voltage_rise(&self) -> Vec<TimingTable> {
-        self.output_voltage_rise
-            .iter()
-            .cloned()
+        self.data
+            .children(|data| &data.output_voltage_rise)
             .map(TimingTable::from)
             .collect()
     }
 
     fn output_voltage_fall(&self) -> Vec<TimingTable> {
-        self.output_voltage_fall
-            .iter()
-            .cloned()
+        self.data
+            .children(|data| &data.output_voltage_fall)
             .map(TimingTable::from)
             .collect()
     }
 }
 #[pymethods]
 impl TimingTable {
+    #[getter]
+    fn name(&self) -> String {
+        self.data.name.clone()
+    }
+
+    #[getter]
+    fn index_1(&self) -> Vec<f64> {
+        self.data.index_1.clone()
+    }
+
+    #[getter]
+    fn index_2(&self) -> Vec<f64> {
+        self.data.index_2.clone()
+    }
+
+    #[getter]
+    fn index_3(&self) -> Vec<f64> {
+        self.data.index_3.clone()
+    }
+
+    #[getter]
+    fn values(&self) -> Vec<f64> {
+        self.data.values.clone()
+    }
+
+    #[getter]
+    fn template(&self) -> Option<String> {
+        self.data.template.clone()
+    }
+
+    #[getter]
+    fn reference_time(&self) -> Option<f64> {
+        self.data.reference_time
+    }
+
     /// CCS `vector` sub-tables (current-vs-time waves). Empty for NLDM tables.
     fn vectors(&self) -> Vec<TimingTable> {
-        self.vectors
-            .iter()
-            .cloned()
+        self.data
+            .children(|data| &data.vectors)
             .map(TimingTable::from)
             .collect()
     }
@@ -1640,33 +1749,14 @@ impl TimingTable {
 
     fn rows<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let rows = PyList::empty(py);
-        append_table_rows(
-            py,
-            &rows,
-            "",
-            "",
-            &TimingArcData {
-                related_pin: None,
-                timing_type: None,
-                when: None,
-                sdf_cond: None,
-                timing_sense: None,
-                tables: Vec::new(),
-                ccsn_stages: Vec::new(),
-            },
-            &TimingTableData {
-                name: self.name.clone(),
-                index_1: self.index_1.clone(),
-                index_2: self.index_2.clone(),
-                index_3: self.index_3.clone(),
-                values: self.values.clone(),
-                template: self.template.clone(),
-                axis_vars: self.axis_vars.clone(),
-                reference_time: self.reference_time,
-                vectors: Vec::new(),
-            },
-        )?;
+        TableRows::standalone(&self.data).append_dicts(py, &rows, "timing_type")?;
         Ok(rows)
+    }
+
+    fn _rows_ipc<'py>(&self, py: Python<'py>) -> PyResult<Option<(Bound<'py, PyBytes>, u16)>> {
+        table_ipc(py, "timing_type", |emit| {
+            emit(TableRows::standalone(&self.data))
+        })
     }
 }
 #[pyfunction]
@@ -1679,10 +1769,15 @@ fn parse_file(
 ) -> PyResult<Document> {
     let path = path.to_string();
     let filter = cells.map(|items| items.into_iter().collect::<HashSet<_>>());
-    py.detach(move || liberty::parse_file_document(&path, filter, skip_tables))
-        .map(Document::from)
+    py.detach(move || liberty::parse_file_document(&path, filter, skip_tables).map(Document::from))
         .map_err(parse_load_error_to_py)
 }
+#[pyfunction]
+fn _sequential_flags(py: Python<'_>, path: &str) -> PyResult<Vec<(String, bool)>> {
+    py.detach(|| liberty::sequential_flags(path))
+        .map_err(parse_load_error_to_py)
+}
+
 #[pyfunction]
 fn axis_role_matches(role: &str, keyword: &str) -> bool {
     role_matches_role(role, keyword)
@@ -1694,8 +1789,29 @@ fn tokenize(path: &str) -> PyResult<Vec<String>> {
 }
 #[pyfunction]
 fn tokenize_str(text: &str) -> PyResult<Vec<String>> {
-    let reader: Box<dyn Read> = Box::new(io::Cursor::new(text.as_bytes().to_vec()));
-    lex_all(reader).map_err(parse_error_to_py)
+    lex_all(Box::new(text.as_bytes())).map_err(parse_error_to_py)
+}
+#[pyfunction]
+fn _compare_token_strings(
+    py: Python<'_>,
+    before: &str,
+    after: &str,
+) -> PyResult<(bool, usize, usize)> {
+    py.detach(|| compare_token_streams(Box::new(before.as_bytes()), Box::new(after.as_bytes())))
+        .map_err(parse_error_to_py)
+}
+#[pyfunction]
+fn _compare_token_files(
+    py: Python<'_>,
+    before: std::path::PathBuf,
+    after: std::path::PathBuf,
+) -> PyResult<(bool, usize, usize)> {
+    py.detach(|| {
+        let before = std::fs::File::open(before)?;
+        let after = std::fs::File::open(after)?;
+        compare_token_streams(Box::new(before), Box::new(after))
+    })
+    .map_err(parse_error_to_py)
 }
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1719,8 +1835,11 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<LeakagePower>()?;
     m.add_class::<PgPin>()?;
     m.add_function(wrap_pyfunction!(parse_file, m)?)?;
+    m.add_function(wrap_pyfunction!(_sequential_flags, m)?)?;
     m.add_function(wrap_pyfunction!(tokenize, m)?)?;
     m.add_function(wrap_pyfunction!(tokenize_str, m)?)?;
+    m.add_function(wrap_pyfunction!(_compare_token_strings, m)?)?;
+    m.add_function(wrap_pyfunction!(_compare_token_files, m)?)?;
     m.add_function(wrap_pyfunction!(axis_role_matches, m)?)?;
     lef::register(m)?;
     def::register(m)?;
@@ -1730,118 +1849,122 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     sdc::register(m)?;
     Ok(())
 }
-fn append_table_rows<'py>(
-    py: Python<'py>,
-    rows: &Bound<'py, PyList>,
-    cell: &str,
-    pin: &str,
-    arc: &TimingArcData,
-    table: &TimingTableData,
-) -> PyResult<()> {
-    for (idx, value) in table.values.iter().enumerate() {
-        let row = PyDict::new(py);
-        row.set_item("cell", cell)?;
-        row.set_item("pin", pin)?;
-        row.set_item("related_pin", arc.related_pin.as_deref())?;
-        row.set_item("timing_type", arc.timing_type.as_deref())?;
-        row.set_item("when", arc.when.as_deref())?;
-        row.set_item("table", &table.name)?;
-        let (i, j, k) = table_position(table, idx);
-        row.set_item("index_1", table.index_1.get(i).copied())?;
-        row.set_item("index_2", table.index_2.get(j).copied())?;
-        row.set_item("index_3", table.index_3.get(k).copied())?;
-        row.set_item("row", i)?;
-        row.set_item("col", j)?;
-        row.set_item("depth", k)?;
-        row.set_item("value", value)?;
-        rows.append(row)?;
-    }
-    Ok(())
+struct TableFilters<'a> {
+    cell: Option<&'a str>,
+    pin: Option<&'a str>,
+    related_pin: Option<&'a str>,
+    category: Option<&'a str>,
+    when: Option<&'a str>,
+    table: Option<&'a str>,
 }
-fn append_matching_arc_tables<'py>(
+
+fn table_ipc<'py>(
     py: Python<'py>,
-    rows: &Bound<'py, PyList>,
-    cell: &str,
-    pin: &str,
-    arcs: &[TimingArcData],
-    related_pin: Option<&str>,
-    timing_type: Option<&str>,
-    when_filter: &WhenFilter,
-    table: Option<&str>,
-) -> PyResult<()> {
-    for arc in arcs {
-        if !matches_opt_opt(related_pin, arc.related_pin.as_deref())
-            || !matches_opt_opt(timing_type, arc.timing_type.as_deref())
-            || !when_filter.matches(arc.when.as_deref())
-        {
-            continue;
-        }
-        for timing_table in &arc.tables {
-            if matches_opt(table, &timing_table.name) {
-                append_table_rows(py, rows, cell, pin, arc, timing_table)?;
-            }
-        }
-    }
-    Ok(())
+    category: &str,
+    visit: impl FnOnce(&mut dyn FnMut(TableRows<'_>) -> PyResult<()>) -> PyResult<()> + Send,
+) -> PyResult<Option<(Bound<'py, PyBytes>, u16)>> {
+    let result = py.detach(|| {
+        let arrow_error = |err: arrow::error::ArrowError| PyRuntimeError::new_err(err.to_string());
+        let mut ipc = TableIpc::new(category).map_err(arrow_error)?;
+        visit(&mut |rows| ipc.append(rows).map_err(arrow_error))?;
+        ipc.finish().map_err(arrow_error)
+    })?;
+    Ok(result.map(|(data, seen)| (PyBytes::new(py, &data), seen)))
 }
-#[allow(clippy::too_many_arguments)]
-fn append_matching_power_tables<'py>(
-    py: Python<'py>,
-    rows: &Bound<'py, PyList>,
-    cell: &str,
-    pin: &str,
-    groups: &[InternalPowerData],
-    related_pin: Option<&str>,
-    related_pg_pin: Option<&str>,
-    when_filter: &WhenFilter,
-    table: Option<&str>,
-) -> PyResult<()> {
-    for group in groups {
-        if !matches_opt_opt(related_pin, group.related_pin.as_deref())
-            || !matches_opt_opt(related_pg_pin, group.related_pg_pin.as_deref())
-            || !when_filter.matches(group.when.as_deref())
-        {
-            continue;
-        }
-        for power_table in &group.tables {
-            if !matches_opt(table, &power_table.name) {
+
+impl Document {
+    fn visit_tables(
+        &self,
+        power: bool,
+        filters: TableFilters<'_>,
+        mut visit: impl FnMut(TableRows<'_>) -> PyResult<()>,
+    ) -> PyResult<()> {
+        let when_filter = WhenFilter::new(filters.when).map_err(PyValueError::new_err)?;
+        for cell in &self.cells {
+            if !matches_opt(filters.cell, &cell.name) {
                 continue;
             }
-            for (idx, value) in power_table.values.iter().enumerate() {
-                let row = PyDict::new(py);
-                row.set_item("cell", cell)?;
-                row.set_item("pin", pin)?;
-                row.set_item("related_pin", group.related_pin.as_deref())?;
-                row.set_item("related_pg_pin", group.related_pg_pin.as_deref())?;
-                row.set_item("when", group.when.as_deref())?;
-                row.set_item("table", &power_table.name)?;
-                let (i, j, k) = table_position(power_table, idx);
-                row.set_item("index_1", power_table.index_1.get(i).copied())?;
-                row.set_item("index_2", power_table.index_2.get(j).copied())?;
-                row.set_item("index_3", power_table.index_3.get(k).copied())?;
-                row.set_item("row", i)?;
-                row.set_item("col", j)?;
-                row.set_item("depth", k)?;
-                row.set_item("value", value)?;
-                rows.append(row)?;
+            fn pin_groups(pin: &PinData) -> (&str, &[TimingArcData], &[InternalPowerData]) {
+                (&pin.name, &pin.timing_arcs, &pin.internal_powers)
+            }
+            let owners = cell
+                .pins
+                .iter()
+                .map(pin_groups)
+                .chain(cell.buses.iter().flat_map(|bus| {
+                    std::iter::once((bus.name.as_str(), bus.timing_arcs.as_slice(), &[][..]))
+                        .chain(bus.pins.iter().map(pin_groups))
+                }))
+                .chain(cell.bundles.iter().flat_map(|bundle| {
+                    std::iter::once((bundle.name.as_str(), bundle.timing_arcs.as_slice(), &[][..]))
+                        .chain(bundle.pins.iter().map(pin_groups))
+                }));
+            for (pin, arcs, powers) in owners {
+                if !matches_opt(filters.pin, pin) {
+                    continue;
+                }
+                let mut visit_group =
+                    |related_pin: Option<&str>,
+                     category: Option<&str>,
+                     when: Option<&str>,
+                     tables: &[TimingTableData]| {
+                        if !matches_opt_opt(filters.related_pin, related_pin)
+                            || !matches_opt_opt(filters.category, category)
+                            || !when_filter.matches(when)
+                        {
+                            return Ok(());
+                        }
+                        for table in tables {
+                            if matches_opt(filters.table, &table.name) {
+                                visit(TableRows {
+                                    cell: &cell.name,
+                                    pin,
+                                    related_pin,
+                                    category,
+                                    when,
+                                    table,
+                                })?;
+                            }
+                        }
+                        Ok::<_, PyErr>(())
+                    };
+                if power {
+                    for group in powers {
+                        visit_group(
+                            group.related_pin.as_deref(),
+                            group.related_pg_pin.as_deref(),
+                            group.when.as_deref(),
+                            &group.tables,
+                        )?;
+                    }
+                } else {
+                    for arc in arcs {
+                        visit_group(
+                            arc.related_pin.as_deref(),
+                            arc.timing_type.as_deref(),
+                            arc.when.as_deref(),
+                            &arc.tables,
+                        )?;
+                    }
+                }
             }
         }
+        Ok(())
     }
-    Ok(())
 }
+
 #[pyclass(from_py_object)]
 #[derive(Clone)]
 struct BooleanExpression {
     source: String,
     expr: BoolExpr,
-    support: Vec<String>,
-    minterm_parts: Vec<String>,
-    canonical: String,
-    minimized: String,
+    mentioned: Vec<String>,
+    canonical: OnceLock<(Vec<String>, Vec<String>, String)>,
+    minimized: OnceLock<String>,
 }
 impl BooleanExpression {
-    /// Parse `source` and precompute the canonical + minimized forms. Shared by
-    /// the Python constructor and every `*_expr` accessor.
+    /// Parse and validate the expression. Derive display and equality forms
+    /// only when requested.
     fn build(source: &str) -> PyResult<Self> {
         let expr = parse_bool_expr(source).map_err(|e| {
             PyValueError::new_err(format!("invalid boolean expression {source:?}: {e}"))
@@ -1857,16 +1980,18 @@ impl BooleanExpression {
                 mentioned.len()
             )));
         }
-        let (support, minterm_parts, canonical) = canonical_minterm_parts(&expr, &mentioned);
-        let minimized = minimized_sop(&expr, &mentioned, &canonical);
         Ok(Self {
             source: source.to_string(),
             expr,
-            support,
-            minterm_parts,
-            canonical,
-            minimized,
+            mentioned,
+            canonical: OnceLock::new(),
+            minimized: OnceLock::new(),
         })
+    }
+
+    fn canonical_parts(&self) -> &(Vec<String>, Vec<String>, String) {
+        self.canonical
+            .get_or_init(|| canonical_minterm_parts(&self.expr, &self.mentioned))
     }
 }
 #[pymethods]
@@ -1877,7 +2002,7 @@ impl BooleanExpression {
     }
 
     fn __str__(&self) -> String {
-        self.minimized.clone()
+        self.minimized()
     }
 
     fn __repr__(&self) -> String {
@@ -1888,14 +2013,14 @@ impl BooleanExpression {
     }
 
     fn __eq__(&self, other: &BooleanExpression) -> bool {
-        self.canonical == other.canonical
+        self.canonical_parts().2 == other.canonical_parts().2
     }
 
     fn __hash__(&self) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
-        self.canonical.hash(&mut hasher);
+        self.canonical_parts().2.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -1914,22 +2039,24 @@ impl BooleanExpression {
     /// Support variables (those the function actually depends on), sorted.
     #[getter]
     fn variables(&self) -> Vec<String> {
-        self.support.clone()
+        self.canonical_parts().0.clone()
     }
 
     /// Canonical product terms (sum-of-minterms over the support).
     fn minterms(&self) -> Vec<String> {
-        self.minterm_parts.clone()
+        self.canonical_parts().1.clone()
     }
 
     /// The canonical sum-of-minterms string that backs equality/hashing.
     fn canonical(&self) -> String {
-        self.canonical.clone()
+        self.canonical_parts().2.clone()
     }
 
     /// The minimized sum-of-products string (same as `str(self)`).
     fn minimized(&self) -> String {
-        self.minimized.clone()
+        self.minimized
+            .get_or_init(|| minimized_sop(&self.expr, &self.mentioned, &self.canonical_parts().2))
+            .clone()
     }
 
     /// Evaluate under a `{var: bool}` mapping and/or keyword args. Variables not
@@ -1989,6 +2116,7 @@ impl LibraryIndex {
     fn cell(&self, py: Python<'_>, name: &str) -> PyResult<Cell> {
         let name = name.to_string();
         py.detach(move || self.inner.cell(&name))
+            .map(Shared::new)
             .map(Cell::from)
             .map_err(cell_lookup_error_to_py)
     }
@@ -2039,6 +2167,7 @@ impl LibraryIndex {
         self.inner
             .driver_waveforms()
             .into_iter()
+            .map(Shared::new)
             .map(TimingTable::from)
             .collect()
     }
@@ -2046,6 +2175,10 @@ impl LibraryIndex {
 
 impl From<liberty::Document> for Document {
     fn from(value: liberty::Document) -> Self {
+        let mut first_cell = HashMap::with_capacity(value.cells.len());
+        for (index, cell) in value.cells.iter().enumerate() {
+            first_cell.entry(cell.name.clone()).or_insert(index);
+        }
         Self {
             library_name: value.library_name,
             voltage_unit: value.voltage_unit,
@@ -2058,13 +2191,14 @@ impl From<liberty::Document> for Document {
             capacitive_load_multiplier: value.capacitive_load_multiplier,
             leakage_power_unit: value.leakage_power_unit,
             driver_waveforms: value.driver_waveforms,
-            cells: value.cells,
+            cells: value.cells.into_iter().map(Shared::new).collect(),
+            first_cell,
             bus_types: value.bus_types,
             source_path: value.source_path,
             source_len: value.source_len,
             source_hash: value.source_hash,
             cell_spans: value.cell_spans,
-            edits: value.edits,
+            edits: Arc::new(Mutex::new(PendingEdits::default())),
         }
     }
 }
@@ -2098,7 +2232,7 @@ impl Document {
             self.source_hash,
         )?;
         let edits = self.edits.lock().map_err(|_| WriteError::Poisoned)?;
-        apply_edits_to_source(source, &self.cell_spans, &edits)
+        apply_edits_to_source(source, &self.cell_spans, &edits.ordered)
     }
 
     /// Write the rendered document to `path` (gzip-compressed when the path
@@ -2133,12 +2267,10 @@ impl Cell {
         let Ok(edits) = edits.lock() else {
             return;
         };
-        for edit in edits.iter() {
-            if edit.cell == self.name && edit.pin.is_none() {
-                set_attribute_in(&mut self.attributes, &edit.key, &edit.value);
-                if edit.key == "area" {
-                    self.area = parse_first_number(&edit.value);
-                }
+        for edit in edits.for_target(&self.name, &None) {
+            set_attribute_in(&mut self.attributes, &edit.key, &edit.value);
+            if edit.key == "area" {
+                self.area = parse_first_number(&edit.value);
             }
         }
     }
@@ -2199,14 +2331,13 @@ impl Pin {
         let Ok(edits) = edits.lock() else {
             return;
         };
-        for edit in edits.iter() {
-            if self.cell_name.as_deref() == Some(edit.cell.as_str())
-                && edit.pin.as_deref() == Some(self.name.as_str())
-                && edit.container == self.container
-            {
-                set_attribute_in(&mut self.attributes, &edit.key, &edit.value);
-                self.mirror_typed_field(&edit.key, &edit.value);
-            }
+        let Some(cell) = &self.cell_name else {
+            return;
+        };
+        let target = Some((self.name.clone(), self.container.clone()));
+        for edit in edits.for_target(cell, &target) {
+            set_attribute_in(&mut self.attributes, &edit.key, &edit.value);
+            self.mirror_typed_field(&edit.key, &edit.value);
         }
     }
 
@@ -2268,21 +2399,23 @@ fn expr_of(field: &Option<String>) -> PyResult<Option<BooleanExpression>> {
     field.as_deref().map(BooleanExpression::build).transpose()
 }
 
-fn filter_timing_arcs(
-    arcs: &[TimingArcData],
+fn filter_timing_arcs<T: 'static>(
+    owner: &Shared<T>,
+    arcs: fn(&T) -> &Vec<TimingArcData>,
     related_pin: Option<&str>,
     timing_type: Option<&str>,
     when: Option<&str>,
 ) -> PyResult<Vec<TimingArc>> {
     let when_filter = WhenFilter::new(when).map_err(PyValueError::new_err)?;
-    Ok(arcs
+    Ok(arcs(owner)
         .iter()
-        .filter(|arc| {
+        .enumerate()
+        .filter(|(_, arc)| {
             matches_opt_opt(related_pin, arc.related_pin.as_deref())
                 && matches_opt_opt(timing_type, arc.timing_type.as_deref())
                 && when_filter.matches(arc.when.as_deref())
         })
-        .cloned()
+        .map(|(index, _)| owner.child(arcs, index))
         .map(TimingArc::from)
         .collect())
 }

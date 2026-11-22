@@ -1,6 +1,7 @@
 """Python frontend for the Rust DEF parser."""
 
 from liberty_tools._native import (
+    DefHierarchy,
     InstanceBBox,
     NetShape,
     get_threads,
@@ -10,6 +11,7 @@ from liberty_tools._native import (
     write_clock_instances_csv,
     write_clock_instances_csv_from_cache,
     write_def_cache,
+    read_def_hierarchy,
     write_instance_bbox_csv,
     write_instance_parquet,
     write_instance_table,
@@ -22,6 +24,7 @@ from .version import get_version
 __version__ = get_version()
 
 __all__ = [
+    "DefHierarchy",
     "InstanceBBox",
     "NetShape",
     "TargetBenchmark",
@@ -36,6 +39,7 @@ __all__ = [
     "write_clock_instances_csv",
     "write_clock_instances_csv_from_cache",
     "write_def_cache",
+    "read_def_hierarchy",
     "write_instance_bbox_csv",
     "write_instance_parquet",
     "write_instance_table",

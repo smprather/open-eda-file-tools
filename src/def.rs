@@ -17,8 +17,9 @@ use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
 use open_eda_file_tools_core::def::{
-    self as core_def, ColumnKind, ColumnSpec, DefScanner, InstanceBBox as CoreInstanceBBox,
-    MacroPinRole, NetShape as CoreNetShape, SkippedRoutes, parse_columns, parse_lef_files,
+    self as core_def, ColumnKind, ColumnSpec, Component, DefScanner,
+    InstanceBBox as CoreInstanceBBox, MacroPinRole, NetShape as CoreNetShape, SkippedRoutes,
+    parse_columns, parse_lef_files,
 };
 
 #[pyclass(frozen, skip_from_py_object)]
@@ -199,6 +200,127 @@ impl NetShape {
 #[pyclass(unsendable)]
 struct InstanceBBoxIter {
     inner: core_def::InstanceBBoxIter,
+}
+
+#[pyclass(frozen, skip_from_py_object)]
+struct DefHierarchy {
+    inner: core_def::DefHierarchy,
+}
+
+#[pyclass(unsendable)]
+struct HierarchicalInstanceIter {
+    inner: core_def::HierarchicalInstanceIter,
+}
+
+#[pymethods]
+impl DefHierarchy {
+    #[getter]
+    fn dbu_per_micron(&self) -> i64 {
+        self.inner.dbu_per_micron()
+    }
+
+    fn instances(&self) -> HierarchicalInstanceIter {
+        HierarchicalInstanceIter {
+            inner: self.inner.instances(),
+        }
+    }
+
+    #[pyo3(signature = (format, output, batch_size, columns=None, sequential=None, clock=None))]
+    fn _write_instances(
+        &self,
+        py: Python<'_>,
+        format: &str,
+        output: Option<PathBuf>,
+        batch_size: usize,
+        columns: Option<Vec<(String, String)>>,
+        sequential: Option<Vec<String>>,
+        clock: Option<Vec<String>>,
+    ) -> PyResult<(usize, Option<usize>)> {
+        let sequential = sequential.map(|values| values.into_iter().collect::<HashSet<_>>());
+        let clock = clock.map(|values| values.into_iter().collect::<HashSet<_>>());
+        let columns =
+            parse_columns(columns, sequential.is_some(), clock.is_some()).map_err(to_py_err)?;
+        py.detach(|| {
+            let duplicates = self.inner.duplicate_macro_names();
+            if !duplicates.is_empty() {
+                eprintln!(
+                    "warning: duplicate LEF macros, last definition used: {}",
+                    duplicates.join(", ")
+                );
+            }
+            match format {
+                "parquet" => {
+                    let output = output.as_deref().ok_or("Parquet requires an output path")?;
+                    let (count, groups) = write_instance_parquet_rows(
+                        output,
+                        batch_size,
+                        self.inner.dbu_per_micron() as f64,
+                        &columns,
+                        sequential.as_ref(),
+                        clock.as_ref(),
+                        |consume| {
+                            let mut rows = self.inner.instances();
+                            loop {
+                                let batch = rows
+                                    .by_ref()
+                                    .take(batch_size.max(1))
+                                    .collect::<Result<Vec<_>, _>>()
+                                    .map_err(|err| err.to_string())?;
+                                if batch.is_empty() {
+                                    return Ok(());
+                                }
+                                let components = batch
+                                    .iter()
+                                    .map(CoreInstanceBBox::as_component)
+                                    .collect::<Vec<_>>();
+                                consume(&components)?;
+                            }
+                        },
+                    )?;
+                    Ok((count, Some(groups)))
+                }
+                "csv" | "table" => {
+                    let count = self.inner.write_instances_text(
+                        format == "table",
+                        output.as_deref(),
+                        &columns,
+                        sequential.as_ref(),
+                        clock.as_ref(),
+                    )?;
+                    Ok((count, None))
+                }
+                _ => Err(format!("unsupported instance format {format:?}")),
+            }
+        })
+        .map_err(to_py_err)
+    }
+}
+
+#[pymethods]
+impl HierarchicalInstanceIter {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self) -> PyResult<Option<InstanceBBox>> {
+        self.inner
+            .next()
+            .transpose()
+            .map_err(to_py_err)
+            .map(|row| row.map(|inner| InstanceBBox { inner }))
+    }
+}
+
+#[pyfunction]
+fn read_def_hierarchy(
+    py: Python<'_>,
+    lefs: Vec<PathBuf>,
+    def_path: PathBuf,
+    block_defs: Vec<(String, PathBuf)>,
+) -> PyResult<DefHierarchy> {
+    py.detach(|| core_def::read_def_hierarchy(&def_path, &lefs, &block_defs))
+        .map_err(to_py_err)
+        .map(|inner| DefHierarchy { inner })
 }
 
 #[pyclass(unsendable)]
@@ -510,7 +632,40 @@ fn write_instance_parquet_impl(
             duplicates.join(", ")
         );
     }
-    let dbu = scanner.dbu_per_micron as f64;
+    let chunk = batch_size.max(1);
+    write_instance_parquet_rows(
+        output,
+        chunk,
+        scanner.dbu_per_micron as f64,
+        columns,
+        sequential,
+        clock,
+        |consume| {
+            core_def::for_each_batch(
+                || scanner.next_batch(chunk),
+                |batch, overlapped| {
+                    let bboxes =
+                        open_eda_file_tools_core::threads::install_for(overlapped, || {
+                            core_def::parse_components(&batch, &macros)
+                        })?;
+                    consume(&bboxes)
+                },
+            )
+        },
+    )
+}
+
+type ConsumeBatch<'a> = dyn FnMut(&[Component<'_>]) -> Result<(), String> + 'a;
+
+fn write_instance_parquet_rows(
+    output: &Path,
+    batch_size: usize,
+    dbu: f64,
+    columns: &[ColumnSpec],
+    sequential: Option<&HashSet<String>>,
+    clock: Option<&HashSet<String>>,
+    produce: impl FnOnce(&mut ConsumeBatch<'_>) -> Result<(), String>,
+) -> Result<(usize, usize), String> {
     let fields: Vec<Field> = columns
         .iter()
         .map(|column| {
@@ -536,85 +691,79 @@ fn write_instance_parquet_impl(
         .map_err(|e| e.to_string())?;
 
     let mut count = 0usize;
-    open_eda_file_tools_core::def::for_each_batch(
-        || scanner.next_batch(chunk),
-        |batch, overlapped| {
-            let bboxes = open_eda_file_tools_core::threads::install_for(overlapped, || {
-                open_eda_file_tools_core::def::parse_components(&batch, &macros)
-            })?;
-            if bboxes.is_empty() {
-                return Ok(());
+    produce(&mut |bboxes| {
+        if bboxes.is_empty() {
+            return Ok(());
+        }
+        let mut cache: HashMap<ColumnKind, ArrayRef> = HashMap::new();
+        let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
+        for column in columns {
+            if let Some(array) = cache.get(&column.kind) {
+                arrays.push(Arc::clone(array));
+                continue;
             }
-            let mut cache: HashMap<ColumnKind, ArrayRef> = HashMap::new();
-            let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
-            for column in columns {
-                if let Some(array) = cache.get(&column.kind) {
-                    arrays.push(Arc::clone(array));
-                    continue;
-                }
-                let array: ArrayRef = match column.kind {
-                    ColumnKind::Instance => Arc::new(StringArray::from(
-                        bboxes.iter().map(|item| item.instance).collect::<Vec<_>>(),
-                    )),
-                    ColumnKind::BaseCell => Arc::new(StringArray::from(
-                        bboxes
-                            .iter()
-                            .map(|item| item.macro_name)
-                            .collect::<Vec<_>>(),
-                    )),
-                    ColumnKind::Status => Arc::new(StringArray::from(
-                        bboxes.iter().map(|item| item.status).collect::<Vec<_>>(),
-                    )),
-                    ColumnKind::Orient => Arc::new(StringArray::from(
-                        bboxes.iter().map(|item| item.orient).collect::<Vec<_>>(),
-                    )),
-                    ColumnKind::IsSeq => Arc::new(BooleanArray::from(
-                        bboxes
-                            .iter()
-                            .map(|item| sequential.is_some_and(|set| set.contains(item.macro_name)))
-                            .collect::<Vec<_>>(),
-                    )),
-                    ColumnKind::IsClock => Arc::new(BooleanArray::from(
-                        bboxes
-                            .iter()
-                            .map(|item| clock.is_some_and(|set| set.contains(item.instance)))
-                            .collect::<Vec<_>>(),
-                    )),
-                    ColumnKind::Llx => Arc::new(Float64Array::from(
-                        bboxes
-                            .iter()
-                            .map(|item| item.llx as f64 / dbu)
-                            .collect::<Vec<_>>(),
-                    )),
-                    ColumnKind::Lly => Arc::new(Float64Array::from(
-                        bboxes
-                            .iter()
-                            .map(|item| item.lly as f64 / dbu)
-                            .collect::<Vec<_>>(),
-                    )),
-                    ColumnKind::Urx => Arc::new(Float64Array::from(
-                        bboxes
-                            .iter()
-                            .map(|item| item.urx as f64 / dbu)
-                            .collect::<Vec<_>>(),
-                    )),
-                    ColumnKind::Ury => Arc::new(Float64Array::from(
-                        bboxes
-                            .iter()
-                            .map(|item| item.ury as f64 / dbu)
-                            .collect::<Vec<_>>(),
-                    )),
-                };
-                cache.insert(column.kind, Arc::clone(&array));
-                arrays.push(array);
-            }
-            let record =
-                RecordBatch::try_new(Arc::clone(&schema), arrays).map_err(|e| e.to_string())?;
-            writer.write(&record).map_err(|e| e.to_string())?;
-            count += bboxes.len();
-            Ok(())
-        },
-    )?;
+            let array: ArrayRef = match column.kind {
+                ColumnKind::Instance => Arc::new(StringArray::from(
+                    bboxes.iter().map(|item| item.instance).collect::<Vec<_>>(),
+                )),
+                ColumnKind::BaseCell => Arc::new(StringArray::from(
+                    bboxes
+                        .iter()
+                        .map(|item| item.macro_name)
+                        .collect::<Vec<_>>(),
+                )),
+                ColumnKind::Status => Arc::new(StringArray::from(
+                    bboxes.iter().map(|item| item.status).collect::<Vec<_>>(),
+                )),
+                ColumnKind::Orient => Arc::new(StringArray::from(
+                    bboxes.iter().map(|item| item.orient).collect::<Vec<_>>(),
+                )),
+                ColumnKind::IsSeq => Arc::new(BooleanArray::from(
+                    bboxes
+                        .iter()
+                        .map(|item| sequential.is_some_and(|set| set.contains(item.macro_name)))
+                        .collect::<Vec<_>>(),
+                )),
+                ColumnKind::IsClock => Arc::new(BooleanArray::from(
+                    bboxes
+                        .iter()
+                        .map(|item| clock.is_some_and(|set| set.contains(item.instance)))
+                        .collect::<Vec<_>>(),
+                )),
+                ColumnKind::Llx => Arc::new(Float64Array::from(
+                    bboxes
+                        .iter()
+                        .map(|item| item.llx as f64 / dbu)
+                        .collect::<Vec<_>>(),
+                )),
+                ColumnKind::Lly => Arc::new(Float64Array::from(
+                    bboxes
+                        .iter()
+                        .map(|item| item.lly as f64 / dbu)
+                        .collect::<Vec<_>>(),
+                )),
+                ColumnKind::Urx => Arc::new(Float64Array::from(
+                    bboxes
+                        .iter()
+                        .map(|item| item.urx as f64 / dbu)
+                        .collect::<Vec<_>>(),
+                )),
+                ColumnKind::Ury => Arc::new(Float64Array::from(
+                    bboxes
+                        .iter()
+                        .map(|item| item.ury as f64 / dbu)
+                        .collect::<Vec<_>>(),
+                )),
+            };
+            cache.insert(column.kind, Arc::clone(&array));
+            arrays.push(array);
+        }
+        let record =
+            RecordBatch::try_new(Arc::clone(&schema), arrays).map_err(|e| e.to_string())?;
+        writer.write(&record).map_err(|e| e.to_string())?;
+        count += bboxes.len();
+        Ok(())
+    })?;
     let metadata = writer.close().map_err(|e| e.to_string())?;
     Ok((count, metadata.num_row_groups()))
 }
@@ -634,9 +783,12 @@ fn to_py_err<E: ToString>(err: E) -> PyErr {
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<InstanceBBox>()?;
     m.add_class::<InstanceBBoxIter>()?;
+    m.add_class::<DefHierarchy>()?;
+    m.add_class::<HierarchicalInstanceIter>()?;
     m.add_class::<NetShape>()?;
     m.add_class::<NetShapeIter>()?;
     m.add_function(wrap_pyfunction!(instance_bboxes, m)?)?;
+    m.add_function(wrap_pyfunction!(read_def_hierarchy, m)?)?;
     m.add_function(wrap_pyfunction!(net_shapes, m)?)?;
     m.add_function(wrap_pyfunction!(write_instance_table, m)?)?;
     m.add_function(wrap_pyfunction!(write_instance_bbox_csv, m)?)?;

@@ -651,3 +651,37 @@ fn test_missing_files_report_not_found() {
         }
     }
 }
+
+#[test]
+fn indexed_attributes_preserve_projection_and_child_errors() {
+    let tmp = temp_dir("attributes_projection");
+    let lib = write(
+        &tmp,
+        "projection.lib",
+        "library (t) {
+            cell (bank) {
+                area : 2;
+                custom (one, two);
+                ff_bank (IQ, IQN, 2) { next_state : D; }
+                unknown () { arbitrary syntax { nested } }
+                pin (Y) { timing () { related_pin : A; } }
+            }
+            cell (invalid) { bus (a) { pin (p) { bad; } } }
+            cell (latch) { latch_bank (IQ, IQN, 2) { enable : G; } }
+        }",
+    );
+    let mut cells = cell_attributes(&lib).unwrap();
+    let bank = cells.next().unwrap().unwrap();
+    assert!(bank.is_sequential);
+    assert_eq!(
+        bank.attributes,
+        vec![
+            ("area".to_string(), "2".to_string()),
+            ("custom".to_string(), "one, two".to_string())
+        ]
+    );
+    let err = cells.next().unwrap().unwrap_err();
+    assert!(err.to_string().contains("after pin item name"));
+    assert!(cells.next().unwrap().unwrap().is_sequential);
+    assert!(cells.next().is_none());
+}

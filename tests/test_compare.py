@@ -1271,3 +1271,141 @@ def test_the_grid_accepts_the_lookup_shorthands(tmp_path: Path):
     assert entry.value_b == 12.0
     assert entry.delta == -2.0
 
+
+
+def test_aligned_3d_grids_compare_in_first_library_order(tmp_path, monkeypatch):
+    import liberty_tools.comparison as comparison
+
+    def document(name, roles, axes, values):
+        template = " ".join(f"variable_{i} : {role};" for i, role in enumerate(roles, 1))
+        index = " ".join(f'index_{i} ("{axis}");' for i, axis in enumerate(axes, 1))
+        text = f"""library (test) {{
+          lu_table_template (t) {{ {template} }}
+          cell (u) {{ pin (z) {{ timing () {{
+            cell_rise (t) {{ {index} values ("{values}"); }}
+          }} }} }}
+        }}"""
+        return lt.parse_file(_write(tmp_path, name, text))
+
+    a = document(
+        "a.lib", ["input_net_transition", "total_output_net_capacitance", "voltage"],
+        ["1, 2", "3, 4", "5, 6"], "1, 2, 3, nan, 5, 6, 7, 8",
+    )
+    b = document(
+        "b.lib", ["total_output_net_capacitance", "voltage", "input_net_transition"],
+        ["3, 4", "5, 6", "1, 2"], "1, 5, 2, 6, 3, 7, 4, inf",
+    )
+    search = comparison._match_value
+    searches = []
+
+    def count_search(*args):
+        searches.append(args)
+        return search(*args)
+
+    monkeypatch.setattr(comparison, "_match_value", count_search)
+    result = lt.compare(a, b)
+    assert [(e.index_1, e.index_2, e.index_3, e.value_a, e.value_b) for e in result] == [
+        (1, 3, 5, 1, 1), (1, 3, 6, 2, 2), (1, 4, 5, 3, 3), (1, 4, 6, None, 4),
+        (2, 3, 5, 5, 5), (2, 3, 6, 6, 6), (2, 4, 5, 7, 7), (2, 4, 6, 8, None),
+    ]
+    assert searches == []
+
+
+@pytest.mark.parametrize(
+    ("axis", "tolerance", "expected"),
+    [
+        ("1, 2", 0.5, [(1, 1), (2, 1)]),
+        ("2, 1", 0.5, [(1, 1), (2, 1)]),
+        ("1, 1", 0.0, [(1, 1), (2, 1)]),
+        ("inf, 2", 1e-9, [(1, 2), (2, 1)]),
+        ("nan, 2", 1e-9, [(1, None), (2, 2), (None, 1)]),
+        ("1, 2", -1, [(1, None), (2, None), (None, 1), (None, 2)]),
+    ],
+)
+def test_equal_grids_preserve_first_coordinate_match(tmp_path, axis, tolerance, expected):
+    text = f"""library (test) {{
+      cell (u) {{ pin (z) {{ timing () {{
+        cell_rise (t) {{ index_1 ("{axis}"); values ("1, 2"); }}
+      }} }} }}
+    }}"""
+    doc = lt.parse_file(_write(tmp_path, "grid.lib", text))
+    assert [(e.value_a, e.value_b) for e in lt.compare(doc, doc, tolerance=tolerance)] == expected
+
+
+def test_condition_matching_builds_each_distinct_key_once(tmp_path, monkeypatch):
+    from collections import Counter
+
+    import liberty_tools.comparison as comparison
+
+    def document(name, arcs):
+        body = []
+        for when, value in arcs:
+            condition = "" if when is None else f'when : "{when}";'
+            body.append(f"""timing () {{ related_pin : D; {condition}
+              cell_rise (t) {{ index_1 ("1"); values ("{value}"); }}
+            }}""")
+        text = f'library (test) {{ cell (u) {{ pin (z) {{ {" ".join(body)} }} }} }}'
+        return lt.parse_file(_write(tmp_path, name, text))
+
+    a = document("a.lib", [(None, 1), ("A |", 2), ("A & B", 3), ("B A", 4), ("C", 5)])
+    b = document("b.lib", [("A & B", 30), ("D", 60), ("B & A", 40), ("A |", 20), (None, 10)])
+    parse = comparison._condition_expr
+    calls = Counter()
+
+    def counted(when):
+        calls[when] += 1
+        return parse(when)
+
+    monkeypatch.setattr(comparison, "_condition_expr", counted)
+    result = lt.compare(a, b)
+    assert [(e.when, e.value_a, e.value_b) for e in result] == [
+        ("A & B", 3, 30), ("B A", 4, 40), (None, 1, 10), ("A |", 2, 20),
+    ]
+    assert [key.when for key in result.only_in_a] == ["C"]
+    assert [key.when for key in result.only_in_b] == ["D"]
+    assert calls == Counter([None, "A |", "A & B", "B A", "C", "D", "B & A"])
+
+
+def test_summary_reads_entries_once_and_reflects_later_mutations(docs):
+    class CountedEntries(list):
+        passes = 0
+
+        def __iter__(self):
+            self.passes += 1
+            return super().__iter__()
+
+    result = lt.compare(*docs)
+    result.entries = entries = CountedEntries(result.entries)
+    summary = result.summary()
+    assert summary["matched"] == 4
+    assert summary["mismatched"] == 1
+    assert summary["unmatched"] == 0
+    assert summary["has_differences"] is True
+    assert summary["max_abs_delta"] == 5
+    assert entries.passes == 1
+
+    entries[0].value_a = None
+    entries[2].value_a = None
+    entries[2].value_b = None
+    updated = result.summary()
+    assert updated["matched"] == 2
+    assert updated["mismatched"] == 0
+    assert updated["unmatched"] == 1
+    assert updated["has_differences"] is True
+    assert updated["max_abs_delta"] == 0
+    assert entries.passes == 2
+
+    entries.clear()
+    result.duplicate_cells.append("duplicate")
+    diagnostics_only = result.summary()
+    assert diagnostics_only["duplicate_cells"] == 1
+    assert diagnostics_only["has_differences"] is True
+    assert diagnostics_only["max_abs_delta"] is None
+
+
+def test_targeted_comparison_reports_duplicate_unselected_cells(tmp_path):
+    doc = lt.parse_file(_write(tmp_path, "duplicate.lib", DUPLICATE_CELL_LIBRARY))
+    result = lt.compare(doc, doc, cell="unselected")
+    assert result.entries == []
+    assert result.duplicate_cells == ["u1"]
+    assert result.summary()["has_differences"] is True

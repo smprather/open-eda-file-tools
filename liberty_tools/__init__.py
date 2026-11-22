@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,19 @@ from .comparison import (
     UnitMismatch,
     compare,
 )
+
+
+def _frame_from_ipc(payload: tuple[bytes, int] | None):
+    import polars as pl
+
+    if payload is None:
+        return pl.DataFrame()
+    data, seen = payload
+    frame = pl.read_ipc_stream(BytesIO(data))
+    for index, name in enumerate(frame.columns):
+        if not (seen & (1 << index)):
+            frame.replace_column(index, frame[name].cast(pl.Null))
+    return frame
 
 
 @dataclass(frozen=True)
@@ -210,22 +224,25 @@ class LibertyDocument:
     def to_polars(self, kind: str = "timing", **filters: Any):
         """Timing or internal-power table rows as a Polars ``DataFrame``.
 
-        ``kind="timing"`` (the default) calls :meth:`timing_tables`;
-        ``kind="power"`` calls :meth:`internal_power_tables`. Both accept the
-        keyword filters described there.
+        ``kind="timing"`` (the default) accepts the filters for
+        :meth:`timing_tables`. ``kind="power"`` accepts the filters for
+        :meth:`internal_power_tables`.
         """
         if kind == "timing":
-            rows = self.timing_tables(**filters)
+            export, row_method = self._native._timing_ipc, "timing_tables"
         elif kind == "power":
-            rows = self.internal_power_tables(**filters)
+            export, row_method = self._native._power_ipc, "internal_power_tables"
         else:
             raise ValueError("kind must be 'timing' or 'power'")
-        import polars as pl
-
-        # Scan all rows for schema: optional columns (when, related_pin, …) are
-        # null in the first rows but become strings later, which trips Polars'
-        # default 100-row inference.
-        return pl.DataFrame(rows, infer_schema_length=None)
+        try:
+            payload = export(**filters)
+        except TypeError as err:
+            prefix = f"Document.{export.__name__}()"
+            message = str(err)
+            if message.startswith(prefix):
+                raise TypeError(f"Document.{row_method}(){message[len(prefix):]}") from None
+            raise
+        return _frame_from_ipc(payload)
 
 
 class BooleanExpression:
@@ -904,6 +921,9 @@ class InternalPower:
     def tables(self) -> list[str]:
         return self._native.tables()
 
+    def _table_shapes(self) -> list[tuple[str, int, bool]]:
+        return self._native._table_shapes()
+
     def table(self, name: str) -> TimingTable:
         return TimingTable(self._native.table(name))
 
@@ -1258,9 +1278,7 @@ class TimingTable:
 
     def to_polars(self):
         """The table as a Polars ``DataFrame`` (one row per table point)."""
-        import polars as pl
-
-        return pl.DataFrame(self._native.rows())
+        return _frame_from_ipc(self._native._rows_ipc())
 
 
 class LibraryIndex:

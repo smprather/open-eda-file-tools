@@ -121,6 +121,13 @@ df = doc.to_polars(cell="and2d102srdh", table="cell_rise")
 print(df)
 ```
 
+The document and single-table frame APIs build Arrow IPC record batches in
+Rust and decode them with Polars’ native stream reader. Each frame preserves the
+row API’s column order and null dtypes, including the empty `(0, 0)` result
+when a filter matches no rows. The in-memory IPC buffer lives alongside the
+decoded frame during conversion. For Python dictionaries, use
+`timing_tables()` or `internal_power_tables()`.
+
 The timing dataframe uses long-form rows with columns such as:
 
 - `cell`
@@ -367,10 +374,15 @@ doc = lt.parse_file(
     cells=["and2d102srdh", "and2d12sr"],
 )
 
-# Skip all timing/power/CCSN table bodies (36% faster) when only pins,
+# Skip timing, power, and CCSN table bodies when only pins,
 # directions, attributes, or ff/latch groups are needed:
 structural = lt.parse_file("generic80_ss_125c_1p116v_0p84v.lib", skip_tables=True)
 ```
+
+Structural parsing preserves CCS `dynamic_current`, `switching_group`, and
+`pg_current` metadata, with empty power-vector lists. Selected-cell parsing
+scans the whole input so templates declared after cells still resolve, and
+so the writer can verify the original source bytes.
 
 ## Current API
 

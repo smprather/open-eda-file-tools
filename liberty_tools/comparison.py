@@ -13,8 +13,10 @@ extraction API exposes, so a mismatch is reported rather than guessed at.
 from __future__ import annotations
 
 import math
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Iterable, Sequence
+from itertools import pairwise, product
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Sequence
 
 if TYPE_CHECKING:
     from . import BooleanExpression, LibertyDocument, TimingArc, TimingTable
@@ -334,6 +336,20 @@ class Comparison:
             if (entry.value_a is None) != (entry.value_b is None)
         ]
 
+    def _diagnostics(self) -> dict[str, list]:
+        return {
+            "only_in_a_arcs": self.only_in_a,
+            "only_in_b_arcs": self.only_in_b,
+            "only_in_a_tables": self.only_in_a_tables,
+            "only_in_b_tables": self.only_in_b_tables,
+            "shape_mismatches": self.shape_mismatches,
+            "unit_mismatches": self.unit_mismatches,
+            "axis_role_mismatches": self.axis_role_mismatches,
+            "malformed_tables": self.malformed_tables,
+            "duplicate_arcs": self.duplicate_arcs,
+            "duplicate_cells": self.duplicate_cells,
+        }
+
     @property
     def has_differences(self) -> bool:
         """Do the two documents differ in any way?
@@ -349,25 +365,19 @@ class Comparison:
         A point that has no value in either document is not a difference:
         both documents agree that there is no data there.
         """
-        return bool(
-            self.mismatched
-            or self.unmatched
-            or self.only_in_a
-            or self.only_in_b
-            or self.only_in_a_tables
-            or self.only_in_b_tables
-            or self.shape_mismatches
-            or self.unit_mismatches
-            or self.axis_role_mismatches
-            or self.malformed_tables
-            or self.duplicate_arcs
-            or self.duplicate_cells
+        return any(self._diagnostics().values()) or any(
+            (entry.value_a is None) != (entry.value_b is None)
+            or (entry.matched and entry.delta != 0.0)
+            for entry in self.entries
         )
 
     def max_abs_delta(self) -> float | None:
         """The largest absolute delta over the matched entries."""
-        deltas = [abs(entry.delta) for entry in self.matched if entry.delta is not None]
-        return max(deltas) if deltas else None
+        return max(
+            (abs(delta) for entry in self.entries if entry.matched
+             and (delta := entry.delta) is not None),
+            default=None,
+        )
 
     def summary(self) -> dict[str, Any]:
         """Counts and the worst delta, for a quick report.
@@ -376,23 +386,27 @@ class Comparison:
         ``summary()["has_differences"]`` cannot read a missing table or an
         incomparable table as "the libraries are the same".
         """
+        matched = mismatched = unmatched = 0
+        worst = None
+        for entry in self.entries:
+            if entry.matched:
+                matched += 1
+                delta = entry.delta
+                mismatched += delta != 0.0
+                if delta is not None:
+                    magnitude = abs(delta)
+                    if worst is None or magnitude > worst:
+                        worst = magnitude
+            unmatched += (entry.value_a is None) != (entry.value_b is None)
+        diagnostics = {name: len(items) for name, items in self._diagnostics().items()}
         return {
             "entries": len(self.entries),
-            "matched": len(self.matched),
-            "mismatched": len(self.mismatched),
-            "unmatched": len(self.unmatched),
-            "only_in_a_arcs": len(self.only_in_a),
-            "only_in_b_arcs": len(self.only_in_b),
-            "only_in_a_tables": len(self.only_in_a_tables),
-            "only_in_b_tables": len(self.only_in_b_tables),
-            "shape_mismatches": len(self.shape_mismatches),
-            "unit_mismatches": len(self.unit_mismatches),
-            "axis_role_mismatches": len(self.axis_role_mismatches),
-            "malformed_tables": len(self.malformed_tables),
-            "duplicate_arcs": len(self.duplicate_arcs),
-            "duplicate_cells": len(self.duplicate_cells),
-            "max_abs_delta": self.max_abs_delta(),
-            "has_differences": self.has_differences,
+            "matched": matched,
+            "mismatched": mismatched,
+            "unmatched": unmatched,
+            **diagnostics,
+            "max_abs_delta": worst,
+            "has_differences": bool(mismatched or unmatched or any(diagnostics.values())),
         }
 
     def to_polars(self):
@@ -423,29 +437,8 @@ class Comparison:
             "delta": pl.Float64,
             "relative_delta": pl.Float64,
         }
-        rows = [
-            {
-                "cell": entry.cell,
-                "pin": entry.pin,
-                "related_pin": entry.related_pin,
-                "timing_type": entry.timing_type,
-                "timing_sense": entry.timing_sense,
-                "when": entry.when,
-                "table": entry.table,
-                "axis_1": entry.axis_1,
-                "axis_2": entry.axis_2,
-                "axis_3": entry.axis_3,
-                "index_1": entry.index_1,
-                "index_2": entry.index_2,
-                "index_3": entry.index_3,
-                "value_a": entry.value_a,
-                "value_b": entry.value_b,
-                "delta": entry.delta,
-                "relative_delta": entry.relative_delta,
-            }
-            for entry in self.entries
-        ]
-        return pl.DataFrame(rows, schema=schema)
+        columns = {name: [getattr(entry, name) for entry in self.entries] for name in schema}
+        return pl.DataFrame(columns, schema=schema)
 
 
 def compare(
@@ -897,41 +890,27 @@ def _match_when_conditions(
     would report a delta between two things that do not correspond — so those
     arcs are reported as existing in only one of the documents instead.
     """
-    pairs: list[tuple[ArcKey, ArcKey]] = []
-    used_b: set[ArcKey] = set()
+    condition_keys: dict[str | None, tuple[bool, str | None]] = {}
 
-    # 1. Logically equivalent conditions.
-    for key_a in keys_a:
-        expr_a = _condition_expr(key_a.when)
-        if expr_a is None:
-            continue
-        for key_b in keys_b:
-            if key_b in used_b:
-                continue
-            expr_b = _condition_expr(key_b.when)
-            if expr_b is None:
-                continue
-            if expr_a == expr_b:
-                pairs.append((key_a, key_b))
-                used_b.add(key_b)
-                break
+    def condition_key(when: str | None) -> tuple[bool, str | None]:
+        if when not in condition_keys:
+            expr = _condition_expr(when)
+            condition_keys[when] = (False, when) if expr is None else (True, expr.canonical())
+        return condition_keys[when]
 
-    # 2. Conditions that could not be parsed match on their exact text.
+    candidates: dict[tuple[bool, str | None], deque[ArcKey]] = defaultdict(deque)
+    for key_b in keys_b:
+        candidates[condition_key(key_b.when)].append(key_b)
+
+    logical_pairs: list[tuple[ArcKey, ArcKey]] = []
+    raw_pairs: list[tuple[ArcKey, ArcKey]] = []
     for key_a in keys_a:
-        if any(pair[0] == key_a for pair in pairs):
-            continue
-        if _condition_expr(key_a.when) is not None:
-            continue
-        for key_b in keys_b:
-            if key_b in used_b:
-                continue
-            if _condition_expr(key_b.when) is not None:
-                continue
-            if key_a.when == key_b.when:
-                pairs.append((key_a, key_b))
-                used_b.add(key_b)
-                break
-    return pairs
+        key = condition_key(key_a.when)
+        remaining = candidates.get(key)
+        if remaining:
+            pairs = logical_pairs if key[0] else raw_pairs
+            pairs.append((key_a, remaining.popleft()))
+    return logical_pairs + raw_pairs
 
 
 def _condition_expr(when: str | None) -> BooleanExpression | None:
@@ -1041,7 +1020,7 @@ def _compare_table(
             )
         return []
     axes_b_ordered = [axes_b[index] for index in order_b]
-    values_b = _permute_values(axes_b, order_b, values_b)
+    values_b_ordered = _permute_values(axes_b, order_b, values_b)
 
     entries: list[CompareEntry] = []
     if interpolate:
@@ -1063,10 +1042,24 @@ def _compare_table(
                     axis_2=roles_a[1] if len(roles_a) > 1 else None,
                     axis_3=roles_a[2] if len(roles_a) > 2 else None,
                     value_a=_interpolate(axes_a, values_a, point),
-                    value_b=_interpolate(axes_b_ordered, values_b, point),
+                    value_b=_interpolate(axes_b_ordered, values_b_ordered, point),
                 )
             )
         return entries
+
+    if (
+        axes_a
+        and malformed_a is None
+        and malformed_b is None
+        and _unique_equal_axes(axes_a, axes_b_ordered, tolerance)
+    ):
+        return [
+            _entry(
+                key, table_name, roles_a, point,
+                a if math.isfinite(a) else None, b if math.isfinite(b) else None,
+            )
+            for point, a, b in zip(product(*axes_a), values_a, values_b_ordered, strict=True)
+        ]
 
     # Points both grids have, and points only one of them has.
     for indices_a, indices_b in _grid_points(axes_a, axes_b_ordered, tolerance):
@@ -1075,7 +1068,7 @@ def _compare_table(
         value_b = (
             None
             if indices_b is None
-            else _flat_value(axes_b_ordered, values_b, indices_b)
+            else _flat_value(axes_b_ordered, values_b_ordered, indices_b)
         )
         entries.append(_entry(key, table_name, roles_a, point, value_a, value_b))
     for indices_b in _points_only_in(axes_b_ordered, axes_a, tolerance):
@@ -1087,7 +1080,7 @@ def _compare_table(
                 roles_a,
                 point,
                 None,
-                _flat_value(axes_b_ordered, values_b, indices_b),
+                _flat_value(axes_b_ordered, values_b_ordered, indices_b),
             )
         )
     return entries
@@ -1219,87 +1212,66 @@ def _match_value(values: Sequence[float], target: float, tolerance: float) -> in
     return None
 
 
+def _unique_equal_axes(
+    axes_a: Sequence[Sequence[float]],
+    axes_b: Sequence[Sequence[float]],
+    tolerance: float,
+) -> bool:
+    """Whether each coordinate matches only itself in the other grid."""
+    if not 0 <= tolerance < 1 or axes_a != axes_b:
+        return False
+    for axis in axes_a:
+        if not all(map(math.isfinite, axis)):
+            return False
+        # For tolerance < 1, if a coordinate matches another distinct one on a
+        # strictly increasing axis, it also matches its neighbor in that direction.
+        if any(right - left <= tolerance * max(abs(left), abs(right), 1.0)
+               for left, right in pairwise(axis)):
+            return False
+    return True
+
+
 def _grid_points(
     axes_a: Sequence[Sequence[float]],
     axes_b: Sequence[Sequence[float]],
     tolerance: float,
-) -> list[tuple[tuple[int, ...], tuple[int, ...] | None]]:
+) -> Iterator[tuple[tuple[int, ...], tuple[int, ...] | None]]:
     """Every point of a's grid, with b's position when b has that point."""
     if len(axes_a) != len(axes_b):
-        return []
-    per_axis: list[list[tuple[int, int | None]]] = []
-    for axis_a, axis_b in zip(axes_a, axes_b):
-        per_axis.append(
-            [
-                (index_a, _match_value(axis_b, value_a, tolerance))
-                for index_a, value_a in enumerate(axis_a)
-            ]
+        return
+    matches = [
+        [_match_value(axis_b, value_a, tolerance) for value_a in axis_a]
+        for axis_a, axis_b in zip(axes_a, axes_b)
+    ]
+    for indices in product(*(range(len(axis)) for axis in axes_a)):
+        other = tuple(
+            match for axis, index in zip(matches, indices)
+            if (match := axis[index]) is not None
         )
-    out: list[tuple[tuple[int, ...], tuple[int, ...] | None]] = []
-    _cartesian_indices(per_axis, 0, [], [], out)
-    return out
+        yield indices, other if len(other) == len(indices) else None
 
 
 def _points_only_in(
     axes: Sequence[Sequence[float]],
     other: Sequence[Sequence[float]],
     tolerance: float,
-) -> list[tuple[int, ...]]:
+) -> Iterator[tuple[int, ...]]:
     """The positions of the grid points only ``axes`` has."""
-    if len(axes) != len(other):
-        return []
-    per_axis: list[list[tuple[int, int | None]]] = []
-    for axis, other_axis in zip(axes, other):
-        per_axis.append(
-            [
-                (index, _match_value(other_axis, value, tolerance))
-                for index, value in enumerate(axis)
-            ]
-        )
-    out: list[tuple[tuple[int, ...], tuple[int, ...] | None]] = []
-    _cartesian_indices(per_axis, 0, [], [], out)
-    return [indices for indices, other_indices in out if other_indices is None]
-
-
-def _cartesian_indices(
-    per_axis: Sequence[Sequence[tuple[int, int | None]]],
-    depth: int,
-    current: list[int],
-    other: list[int],
-    out: list[tuple[tuple[int, ...], tuple[int, ...] | None]],
-    matched: bool = True,
-) -> None:
-    """Every combination of the per-axis positions.
-
-    ``other`` collects the matching positions in the other grid. As soon as an
-    axis has no match the whole point is marked as absent from the other grid.
-    """
-    if depth == len(per_axis):
-        out.append((tuple(current), tuple(other) if matched else None))
-        return
-    for index, other_index in per_axis[depth]:
-        current.append(index)
-        if other_index is None:
-            _cartesian_indices(per_axis, depth + 1, current, other, out, False)
-        else:
-            other.append(other_index)
-            _cartesian_indices(per_axis, depth + 1, current, other, out, matched)
-            other.pop()
-        current.pop()
+    return (indices for indices, match in _grid_points(axes, other, tolerance) if match is None)
 
 
 def _permute_values(
     axes: Sequence[Sequence[float]],
     order: Sequence[int],
     values: Sequence[float],
-) -> list[float]:
+) -> Sequence[float]:
     """Reorder a table's flat values to a new axis order.
 
     The flat list is row-major over the table's own axis order, so permuting
     the axes permutes the values with them.
     """
     if list(order) == list(range(len(axes))):
-        return list(values)
+        return values
     out: list[float] = []
     original_indices = [0] * len(axes)
     for new_indices in _all_index_combinations(
