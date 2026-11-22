@@ -33,7 +33,7 @@ src/lib.rs                  Liberty pyclasses/pyfunctions + pymodule registratio
 src/def.rs                  DEF pyclasses/pyfunctions + the Arrow/Parquet writer
 src/lef/                    LEF pyclasses/pyfunctions (python.rs)
 src/pex.rs                  SPEF/DSPF pyclasses and pyfunctions
-src/otw.rs                  OTW reader and Python bindings
+src/otd.rs                  OTD reader and Python bindings
 src/threads.rs              `set_threads`/`get_threads` pyfunctions over core
 liberty_tools/              Liberty Python wrapper and comparison module
 viewer/, liberty_format/, logic2svg/
@@ -44,7 +44,7 @@ sdc_tools/                  SDC clock extraction, `sdc-tools` CLI (Tcl stub eval
 pex_tools/                  SPEF/DSPF parser, `pex-tools` CLI
 tests/                      Unified pytest suite (Liberty, LEF, DEF, SDC, PEX, and `tests/gen/design_gen.py`)
 core/tests/                 Rust integration tests for the plain-Rust public API
-otw-design/                 Design workspace for the next OTW version (non-normative; `docs/otw.md` is the spec)
+otd-design/                 Design workspace for the next OTD version (non-normative; `docs/otd.md` is the spec)
 docs/                       AI-agent and per-tool Markdown documentation (`docs/ai-api.md`, `docs/cli.md`, `docs/*.md`)
 ```
 
@@ -60,7 +60,7 @@ corresponding documentation in the same change:
   and multi-tool recipes).
 - `docs/cli.md` — command-line reference for all six `[project.scripts]` entry
   points.
-- `docs/{liberty,lef,def,sdc,pex,otw,tools,installation}.md` — per-tool and setup guides.
+- `docs/{liberty,lef,def,sdc,pex,otd,tools,installation}.md` — per-tool and setup guides.
 - `README.md` and `CLAUDE.md` — repository overview and architectural invariants.
 - `.pyi` type stubs (`liberty_tools/__init__.pyi`, `liberty_tools/_native.pyi`)
   and package docstrings.
@@ -251,7 +251,7 @@ def_tools/instances.py    instance bbox dumper (`def-tools instances`, CSV/Parqu
 def_tools/sdc.py          clock roots for `clock-instances` (adapter over `sdc_tools.clocks`)
 def_tools/clock_roles.py  Liberty cell clock roles (through pins, endpoints, clock gates)
 def_tools/clock_data.py   clock/data classification backends and net/pin -> instance resolution
-def_tools/otw.py          OTW (Open Timing Windows) reader/writer; parser in `src/otw.rs`
+def_tools/otd.py          OTD (Open Timing Data) reader/writer; parser in `src/otd.rs`
 def_tools/io_config.py    storage benchmark / IO policy config
 tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
 ```
@@ -288,29 +288,29 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
 - **`is_clock` sources are backends that answer, not formats.**
   `def_tools/clock_data.py` defines the seam: a backend maps one file to a
   role (`c`/`d`/`u`/`z`) per net, pin or instance (`ClockData`), and this repo
-  resolves clock objects to instances. Built-ins are `otw` and `names`; any
+  resolves clock objects to instances. Built-ins are `otd` and `names`; any
   other name (`twf` included) is a plug-in via the
   `open_eda_file_tools.clock_data` entry-point group, the
   `OPEN_EDA_CLOCK_DATA_BACKENDS` env var, or `register_backend`. Built-in
   names cannot be replaced.
 - **No vendor TWF reader lives in this repo.** There is no open TWF format;
   vendor readers are plugged in from outside. `--twf PATH` is only shorthand
-  for `--clock-data twf:PATH`. The open format here is OTW (`docs/otw.md`,
-  `src/otw.rs`), designed from scratch — do not shape it after a vendor file.
-- **OTW groups are independent, and the reader depends on it.** The body is
+  for `--clock-data twf:PATH`. The open format here is OTD (`docs/otd.md`,
+  `src/otd.rs`), designed from scratch — do not shape it after a vendor file.
+- **OTD groups are independent, and the reader depends on it.** The body is
   `n` groups and `i` groups (`i <instance>` then its `p` lines); `w` lines
-  belong to the object above them. `parse_otw` (`src/otw.rs`) cuts the input
+  belong to the object above them. `parse_otd` (`src/otd.rs`) cuts the input
   at lines starting with `n`/`i`/`e` and parses the blocks with rayon, one
   `Sink` per block, merged in file order. Never add a record that refers to
   another group or that makes group order significant — that needs a new
-  format version. `docs/otw.md` is the normative spec; change it with the
+  format version. `docs/otd.md` is the normative spec; change it with the
   reader.
-- **OTW body numbers are fixed-point decimals** (no exponent); `real` with an
+- **OTD body numbers are fixed-point decimals** (no exponent); `real` with an
   exponent is allowed only in the header and `freq`. The reader validates
   decimals by byte scan and never converts window values.
-- **The OTW `end <nets> <pins> <windows>` trailer is mandatory** and checked:
+- **The OTD `end <nets> <pins> <windows>` trailer is mandatory** and checked:
   no `end` means truncated, wrong counts or trailing records are errors.
-- **An OTW file is one analysis corner.** Header values (`corner`, `process`,
+- **An OTD file is one analysis corner.** Header values (`corner`, `process`,
   `voltage`, `temperature`) are single-valued; multi-corner data is one file
   per corner, never best/typ/worst triples in one file.
 - **Backend missing and source malformed are distinct, and neither yields a
@@ -318,7 +318,7 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   `is_clock` is never written as all-false for an unreadable source. Clock
   objects absent from the DEF and instances whose macro has no Liberty cell
   are reported (`ClockInstances.unmatched_*`, `.unclassified`), never guessed.
-- **One role per object; clock dominates.** An OTW object is declared once.
+- **One role per object; clock dominates.** An OTD object is declared once.
   A backend whose source has several records per object must report `c` when
   any record is a clock record (real per-edge files tag every clock net as
   data too).

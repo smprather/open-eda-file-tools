@@ -1,21 +1,23 @@
-# OTW — Open Timing Windows, version 1 (draft specification)
+# OTD — Open Timing Data, version 1 (draft specification)
 
 | | |
 | --- | --- |
 | Format version | `1` |
 | Status | **Draft.** Implemented by `open-eda-file-tools`; may change before it is frozen. |
-| File extensions | `.otw`, `.otw.gz` |
-| Reference implementation | reader `src/otw.rs`, reader/writer `def_tools/otw.py` |
+| File extensions | `.otd`, `.otd.gz` |
+| Reference implementation | reader `src/otd.rs`, reader/writer `def_tools/otd.py` |
 
 ## 1. Introduction
 
-OTW is an open text format for **timing windows and clock/data roles**, per net
+OTD is an open text format for **timing windows and clock/data roles**, per net
 or per pin of a design. It carries what static timing analysis hands to
 power-integrity, noise and physical tools: for each net or pin, whether it is
-clock or data, which clocks reach it, and when and how fast it switches.
+clock or data, which clocks reach it, when and how fast it switches, and how
+much slack it has (arrival, slew, resistance and slack ranges on every
+window).
 
 There is no open format for this data; every tool has a private "timing window
-file". OTW is designed from scratch. It is **not** a dialect of, nor
+file". OTD is designed from scratch. It is **not** a dialect of, nor
 syntax-compatible with, any vendor format. It carries the same *information*
 (section 11), so a converter loses nothing.
 
@@ -40,12 +42,12 @@ syntax-compatible with, any vendor format. It carries the same *information*
 ### 1.2 Conformance language
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be read as in
-RFC 2119. A *writer* is anything that produces an OTW file; a *reader* is
+RFC 2119. A *writer* is anything that produces an OTD file; a *reader* is
 anything that consumes one.
 
 ## 2. Data model
 
-An OTW file describes **one design at one analysis corner**. It holds:
+An OTD file describes **one design at one analysis corner**. It holds:
 
 - a **header**: design name, units, measurement conventions, free attributes;
 - an ordered list of **clocks**, each a waveform with a name. Clocks are
@@ -58,7 +60,7 @@ An OTW file describes **one design at one analysis corner**. It holds:
   rising and falling transitions can arrive, and how fast they are.
 
 Where a source of data holds best/typical/worst values, each corner is a
-separate OTW file.
+separate OTD file.
 
 ## 3. File structure
 
@@ -100,10 +102,10 @@ MUST NOT depend on it and a writer MAY emit groups in any order.
 ABNF (RFC 5234). `SEP` is the token separator, `EOL` the line ending.
 
 ```abnf
-otw-file     = *ignorable version *(ignorable / header-line)
+otd-file     = *ignorable version *(ignorable / header-line)
                *(ignorable / group) end-line *ignorable
 
-version      = %s"otw" SEP %s"1" EOL
+version      = %s"otd" SEP %s"1" EOL
 
 header-line  = ( design / unit / thresholds / clock / free ) EOL
 design       = %s"design" SEP name
@@ -151,7 +153,7 @@ the `i` line is an error.
 
 ### 3.5 Numbers
 
-OTW has two number forms, on purpose:
+OTD has two number forms, on purpose:
 
 - **`decimal`** — fixed point, no exponent, no `inf`/`nan`. Used for every
   number in the body that occurs in bulk: the eight window values and every
@@ -166,7 +168,7 @@ OTW has two number forms, on purpose:
 
 | Line | Meaning |
 | --- | --- |
-| `otw 1` | Format version. MUST be the first non-ignorable line. A reader MUST reject a version it does not implement. |
+| `otd 1` | Format version. MUST be the first non-ignorable line. A reader MUST reject a version it does not implement. |
 | `design <name>` | Design name. |
 | `time_unit <real>` | Seconds per unit of every time, slew and slack in the file (`1e-9` = ns). MUST be positive. |
 | `cap_unit <real>` | Farads per unit of capacitance (`load`). MUST be positive. |
@@ -319,7 +321,7 @@ else may follow the positional fields.
 
 ### 9.1 Compression
 
-A `.otw.gz` file is the OTW text compressed with gzip (RFC 1952). It MAY
+A `.otd.gz` file is the OTD text compressed with gzip (RFC 1952). It MAY
 consist of **several gzip members concatenated**; a reader MUST read all of
 them as one stream. A writer can therefore compress runs of groups
 independently, on separate threads, and append the members in any order (the
@@ -342,7 +344,7 @@ These are properties of the format, not of one implementation:
 
 ### 9.3 Measured
 
-Reference reader (`src/otw.rs`), AMD Ryzen 9 5900X (12 cores / 24 threads),
+Reference reader (`src/otd.rs`), AMD Ryzen 9 5900X (12 cores / 24 threads),
 on a synthetic 227 MB file: 1,000,000 nets, 1,000,000 pins in 250,000
 instance groups, 2,000,000 windows.
 
@@ -353,9 +355,9 @@ instance groups, 2,000,000 windows.
 | Every window to CSV | 0.22 s | 0.92 s |
 
 These time the native reader. Building Python dictionaries for the two million
-objects (`def_tools.otw.read_otw`) takes a further 1.6 s. An earlier,
+objects (`def_tools.otd.read_otd`) takes a further 1.6 s. An earlier,
 sequential reader of the pre-grouping grammar took 1.33 s on the equivalent
-file. Writers have not been benchmarked; `def_tools.otw.write_otw` is a
+file. Writers have not been benchmarked; `def_tools.otd.write_otd` is a
 convenience writer, not a fast one.
 
 ## 10. Errors
@@ -363,7 +365,7 @@ convenience writer, not a fast one.
 A reader MUST reject a file, naming the file and, where one applies, the line,
 when:
 
-1. the first non-ignorable line is not `otw <version>`, or the version is not
+1. the first non-ignorable line is not `otd <version>`, or the version is not
    implemented;
 2. a line contains a non-ASCII byte;
 3. a unit is not positive, or `slew_thresholds` is not `0 <= low < high <= 100`;
@@ -388,9 +390,9 @@ A reader MUST NOT repair or guess: a file that fails any check yields no data.
 
 ## 11. Coverage
 
-What timing-window files in the field carry, and where it lives in OTW:
+What timing-window files in the field carry, and where it lives in OTD:
 
-| Information | OTW |
+| Information | OTD |
 | --- | --- |
 | Design name, producing program, date | `design`, `program`, `date` |
 | Time / capacitance / resistance scale | `time_unit`, `cap_unit`, `res_unit` |
@@ -421,7 +423,7 @@ What timing-window files in the field carry, and where it lives in OTW:
 
 ```text
 # net-based and pin-based objects in one file
-otw 1
+otd 1
 design top
 time_unit 1e-9
 cap_unit 1e-12
@@ -448,7 +450,7 @@ p scan_out d load=0.0
 end 3 5 4
 ```
 
-## Appendix B — A binary form (informative; not part of OTW 1)
+## Appendix B — A binary form (informative; not part of OTD 1)
 
 A binary encoding was considered and is **not** specified in version 1.
 
@@ -466,7 +468,7 @@ A binary encoding was considered and is **not** specified in version 1.
   `load_max`, `value`, `clock`, `edge`, `window_role`, the eight window values,
   and the four ranges as `_min` / `_max` pairs. Dictionary encoding makes the
   repeated object columns nearly free, row groups give parallel and partial
-  reads, and every analysis environment reads it without an OTW library.
+  reads, and every analysis environment reads it without an OTD library.
   `def-tools clock-data --report windows` already emits this table as CSV.
 
 Text remains the interchange form; a columnar profile would be a derived,
@@ -474,7 +476,7 @@ lossless cache of it.
 
 ## Appendix C — Use in `open-eda-file-tools` (informative)
 
-`def-tools instances --clock-data design.otw.gz --lib cells.lib` fills
+`def-tools instances --clock-data design.otd.gz --lib cells.lib` fills
 `is_clock` from the `c` objects:
 
 - A clock **net** marks the instances that *drive* it, including a divider
@@ -491,33 +493,33 @@ domains and the other attributes are read and exposed but do not affect
 backend seam.
 
 ```python
-from def_tools.otw import OtwClock, OtwWindow, read_otw, write_otw
+from def_tools.otd import OtdClock, OtdWindow, read_otd, write_otd
 
-write_otw(
-    "design.otw.gz",
+write_otd(
+    "design.otd.gz",
     design="top", time_unit=1e-9, cap_unit=1e-12, res_unit=1e3,
     slew_thresholds=(10, 90),
     attributes=[("corner", "ss_0p72v_125c")],
-    clocks=[OtwClock("clk", 5.0, 0.0, 2.5, (("source", "clk"),))],
+    clocks=[OtdClock("clk", 5.0, 0.0, 2.5, (("source", "clk"),))],
     nets={"clk_leaf_3": "c", "data_bus[3]": "d"},
     pins={("u_core/u_icg", "CK"): "c", ("-", "clk"): "c"},
     domains={"clk_leaf_3": [0]},
     object_attributes={"clk_leaf_3": {"freq": "2e8"}},
     windows={
         "data_bus[3]": [
-            OtwWindow(0, "r", "d", (1.20, 3.75, 1.18, 3.80, 0.05, 0.11, 0.05, 0.12),
+            OtdWindow(0, "r", "d", (1.20, 3.75, 1.18, 3.80, 0.05, 0.11, 0.05, 0.12),
                       rise_slack=(0.31, 0.37), fall_slack=(0.29, 0.36)),
-            OtwWindow(None, "-", "u", (0.40, 0.90, None, None, 0.05, 0.08, None, None)),
+            OtdWindow(None, "-", "u", (0.40, 0.90, None, None, 0.05, 0.08, None, None)),
         ],
     },
 )
-otw = read_otw("design.otw.gz")   # header + per-object data; windows are counted, not loaded
-otw.nets                          # {"clk_leaf_3": "c", "data_bus[3]": "d"}
-otw.pins                          # {("u_core/u_icg", "CK"): "c", ("-", "clk"): "c"}
-otw.domains                       # {"clk_leaf_3": (0,), "data_bus[3]": (0,)}  (second derived from its window)
-otw.domain_names("clk_leaf_3")    # ("clk",)
-otw.object_attributes             # {"clk_leaf_3": {"freq": "2e8"}}
+otd = read_otd("design.otd.gz")   # header + per-object data; windows are counted, not loaded
+otd.nets                          # {"clk_leaf_3": "c", "data_bus[3]": "d"}
+otd.pins                          # {("u_core/u_icg", "CK"): "c", ("-", "clk"): "c"}
+otd.domains                       # {"clk_leaf_3": (0,), "data_bus[3]": (0,)}  (second derived from its window)
+otd.domain_names("clk_leaf_3")    # ("clk",)
+otd.object_attributes             # {"clk_leaf_3": {"freq": "2e8"}}
 ```
 
-`def-tools clock-data --source design.otw.gz --report windows` streams every
+`def-tools clock-data --source design.otd.gz --report windows` streams every
 window as CSV, including the resistance and slack ranges.

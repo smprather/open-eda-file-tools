@@ -122,13 +122,13 @@ Three alternative inputs; supply one.
 
 ```bash
 uv run def-tools instances --lef "pdk/*.lef" --def design.def.gz \
-  --lib stdcell.lib --clock-data design.otw.gz --output instances.csv
+  --lib stdcell.lib --clock-data design.otd.gz --output instances.csv
 ```
 
 **Backends.** A backend reads one file and gives every net, pin or instance it
 describes a role: `c` clock, `d` data, `u` unconstrained, `z` constant. Built
-in: `otw` ([OTW](otw.md), this project's open timing-window format; chosen
-automatically for `.otw` / `.otw.gz`) and `names` (the `--clock-cells` list).
+in: `otd` ([OTD](otd.md), this project's open timing-data format; chosen
+automatically for `.otd` / `.otd.gz`) and `names` (the `--clock-cells` list).
 There is no open TWF format, so **no vendor TWF reader ships here**; a `.twf`
 file maps to the backend name `twf`, which must be plugged in.
 
@@ -153,7 +153,7 @@ Make it available by any of:
   (comma-separated, for builds without package metadata);
 - `def_tools.clock_data.register_backend("twf", read)` from Python.
 
-The built-in names `otw` and `names` cannot be replaced. Raise `ValueError`
+The built-in names `otd` and `names` cannot be replaced. Raise `ValueError`
 from a reader for a malformed file.
 
 **Semantics every backend shares.**

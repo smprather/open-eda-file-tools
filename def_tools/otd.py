@@ -1,8 +1,8 @@
-"""OTW (Open Timing Windows): this project's open timing-window format.
+"""OTD (Open Timing Data): this project's open timing-data format.
 
-OTW is a line-oriented text format (``.otw`` / ``.otw.gz``) carrying, per net
+OTD is a line-oriented text format (``.otd`` / ``.otd.gz``) carrying, per net
 or per pin, a clock/data role and optional timing windows. It is specified in
-``docs/otw.md`` and is not a dialect of any vendor's TWF.
+``docs/otd.md`` and is not a dialect of any vendor's TWF.
 """
 
 from __future__ import annotations
@@ -13,10 +13,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from liberty_tools._native import read_otw as _read_otw
-from liberty_tools._native import write_otw_windows_csv
+from liberty_tools._native import read_otd as _read_otd
+from liberty_tools._native import write_otd_windows_csv
 
-OTW_VERSION = "1"
+OTD_VERSION = "1"
 ROLES = ("c", "d", "u", "z")
 WINDOW_FIELDS = (
     "rise_early",
@@ -33,8 +33,8 @@ ObjectKey = str | PinKey
 
 
 @dataclass(frozen=True)
-class OtwClock:
-    """A clock; windows and ``clocks=`` name it by position in ``OtwFile.clocks``.
+class OtdClock:
+    """A clock; windows and ``clocks=`` name it by position in ``OtdFile.clocks``.
 
     ``attributes`` are free ``key=value`` pairs (``source``, ``master``, ...).
     """
@@ -47,7 +47,7 @@ class OtwClock:
 
 
 @dataclass(frozen=True)
-class OtwWindow:
+class OtdWindow:
     """One timing window of an object, caused by one edge of one clock.
 
     ``clock`` is ``None`` (with ``edge`` ``"-"``) for an arrival no clock
@@ -71,8 +71,8 @@ class OtwWindow:
 
 
 @dataclass(frozen=True)
-class OtwFile:
-    """Per-object content of an OTW file (windows are counted, not loaded).
+class OtdFile:
+    """Per-object content of an OTD file (windows are counted, not loaded).
 
     ``domains`` maps a net name or pin key to the indices of the clocks that
     reach it: its ``clocks=`` attribute, else the clocks of its windows.
@@ -83,7 +83,7 @@ class OtwFile:
 
     design: str
     time_unit: float | None
-    clocks: tuple[OtwClock, ...]
+    clocks: tuple[OtdClock, ...]
     attributes: tuple[tuple[str, str], ...]
     nets: dict[str, str]
     pins: dict[PinKey, str]
@@ -99,13 +99,13 @@ class OtwFile:
         return tuple(self.clocks[index].name for index in self.domains.get(key, ()))
 
 
-def read_otw(path: Path | str) -> OtwFile:
-    """Read an OTW file into its header and per-object roles.
+def read_otd(path: Path | str) -> OtdFile:
+    """Read an OTD file into its header and per-object roles.
 
     Raises ``ValueError`` (naming file and line) for a malformed file and an
     ``OSError`` subclass for an unreadable one.
     """
-    summary = _read_otw(str(path))
+    summary = _read_otd(str(path))
     domains: dict[ObjectKey, tuple[int, ...]] = {}
     object_attributes: dict[ObjectKey, dict[str, str]] = {}
     nets: dict[str, str] = {}
@@ -123,11 +123,11 @@ def read_otw(path: Path | str) -> OtwFile:
     for instance, pin, role, clocks, attrs in summary.pins:
         pins[(instance, pin)] = role
         note((instance, pin), clocks, attrs)
-    return OtwFile(
+    return OtdFile(
         design=summary.design,
         time_unit=summary.time_unit,
         clocks=tuple(
-            OtwClock(name, period, rise, fall, tuple(attrs))
+            OtdClock(name, period, rise, fall, tuple(attrs))
             for name, period, rise, fall, attrs in summary.clocks
         ),
         attributes=tuple(summary.attributes),
@@ -144,7 +144,7 @@ def read_otw(path: Path | str) -> OtwFile:
 
 def _token(value: str, what: str) -> str:
     if not value or any(ch.isspace() for ch in value) or value.startswith("#"):
-        raise ValueError(f"{what} {value!r} is not a valid OTW token")
+        raise ValueError(f"{what} {value!r} is not a valid OTD token")
     return value
 
 
@@ -155,7 +155,7 @@ def _role(value: str, what: str) -> str:
 
 
 def _decimal(value: float, precision: int) -> str:
-    """``value`` as an OTW decimal: fixed point, no exponent, no padding."""
+    """``value`` as an OTD decimal: fixed point, no exponent, no padding."""
     if not math.isfinite(value):
         raise ValueError(f"value {value!r} is not finite")
     text = f"{value:.{precision}f}"
@@ -173,7 +173,7 @@ def _attributes(pairs, reserved: tuple[str, ...], what: str) -> str:
     return text
 
 
-def write_otw(
+def write_otd(
     path: Path | str,
     *,
     design: str = "",
@@ -181,16 +181,16 @@ def write_otw(
     cap_unit: float | None = None,
     res_unit: float | None = None,
     slew_thresholds: tuple[float, float] | None = None,
-    clocks: Sequence[OtwClock] = (),
+    clocks: Sequence[OtdClock] = (),
     attributes: Sequence[tuple[str, str]] = (),
     nets: Mapping[str, str] | None = None,
     pins: Mapping[PinKey, str] | None = None,
-    windows: Mapping[ObjectKey, Sequence[OtwWindow]] | None = None,
+    windows: Mapping[ObjectKey, Sequence[OtdWindow]] | None = None,
     domains: Mapping[ObjectKey, Sequence[int]] | None = None,
     object_attributes: Mapping[ObjectKey, Mapping[str, str]] | None = None,
     precision: int = 6,
 ) -> None:
-    """Write an OTW file; a ``.gz`` suffix gzips it.
+    """Write an OTD file; a ``.gz`` suffix gzips it.
 
     ``nets`` maps net name to role, ``pins`` maps ``(instance, pin)`` to role
     (instance ``"-"`` is a top-level port). ``windows`` optionally maps a net
@@ -201,7 +201,7 @@ def write_otw(
     ``ValueError`` here.
 
     Window values and ranges are written as fixed-point decimals with at most
-    ``precision`` fractional digits (OTW body numbers carry no exponent), so
+    ``precision`` fractional digits (OTD body numbers carry no exponent), so
     pick ``time_unit`` to suit: with ``1e-9`` the default keeps femtoseconds.
 
     This writer is a convenience for tests and converters of modest size; it
@@ -222,7 +222,7 @@ def write_otw(
     if unknown:
         raise ValueError(f"windows or attributes given for undeclared object {unknown[0]!r}")
 
-    lines = [f"otw {OTW_VERSION}"]
+    lines = [f"otd {OTD_VERSION}"]
     if design:
         lines.append(f"design {_token(design, 'design')}")
     for key, unit in (("time_unit", time_unit), ("cap_unit", cap_unit), ("res_unit", res_unit)):
@@ -236,7 +236,7 @@ def write_otw(
             raise ValueError("slew_thresholds must satisfy 0 <= low < high <= 100")
         lines.append(f"slew_thresholds {low:g} {high:g}")
     reserved = {
-        "otw", "design", "time_unit", "cap_unit", "res_unit", "slew_thresholds",
+        "otd", "design", "time_unit", "cap_unit", "res_unit", "slew_thresholds",
         "clock", "n", "i", "p", "w", "end",
     }
     for key, value in attributes:
@@ -327,13 +327,13 @@ def write_otw(
 
 
 __all__ = [
-    "OTW_VERSION",
+    "OTD_VERSION",
     "ROLES",
     "WINDOW_FIELDS",
-    "OtwClock",
-    "OtwFile",
-    "OtwWindow",
-    "read_otw",
-    "write_otw",
-    "write_otw_windows_csv",
+    "OtdClock",
+    "OtdFile",
+    "OtdWindow",
+    "read_otd",
+    "write_otd",
+    "write_otd_windows_csv",
 ]

@@ -14,7 +14,7 @@ tool for each. One package, one version, one install.
 | Cell LEF `.lef` | `lef_tools` | `lef-tools` | [docs/lef.md](docs/lef.md) |
 | DEF `.def` | `def_tools` | `def-tools` | [docs/def.md](docs/def.md) |
 | SDC `.sdc` | `sdc_tools` | `sdc-tools` | [docs/sdc.md](docs/sdc.md) |
-| OTW `.otw` (open timing windows) | `def_tools.otw` | `def-tools` | [docs/otw.md](docs/otw.md) |
+| OTD `.otd` (open timing data) | `def_tools.otd` | `def-tools` | [docs/otd.md](docs/otd.md) |
 | SPEF / DSPF `.spef`, `.dspf` | `pex_tools` | `pex-tools` | [docs/pex.md](docs/pex.md) |
 
 Liberty, LEF, DEF and SPEF/DSPF inputs are read plain or gzipped.
@@ -165,8 +165,8 @@ def-tools instances --lef "pdk/*.lef" --def design.def.gz \
 
 Clock membership comes from connectivity, never from cell-name patterns. When
 an STA run has already classified nets or pins as clock or data, skip the trace
-and pass that instead: `--clock-data design.otw.gz` reads
-[OTW](docs/otw.md), an open timing-window format defined by this project.
+and pass that instead: `--clock-data design.otd.gz` reads
+[OTD](docs/otd.md), an open timing-data format defined by this project.
 Vendor timing-window files are not read here; a reader for one plugs in as a
 named backend (`--twf design.twf.gz` uses the backend called `twf`).
 
@@ -217,7 +217,7 @@ More numbers in [docs/def.md](docs/def.md#performance-and-cpu-use).
 | [docs/ai-api.md](docs/ai-api.md) | Single-page reference for agents: decision table, typed signatures, invariants, recipes |
 | [docs/cli.md](docs/cli.md) | Every command and option |
 | [docs/liberty.md](docs/liberty.md) | Liberty tables, units, writer, comparison, `when` filtering, viewer |
-| [docs/lef.md](docs/lef.md), [docs/def.md](docs/def.md), [docs/sdc.md](docs/sdc.md), [docs/pex.md](docs/pex.md), [docs/otw.md](docs/otw.md) | Per-tool guides and the OTW format spec |
+| [docs/lef.md](docs/lef.md), [docs/def.md](docs/def.md), [docs/sdc.md](docs/sdc.md), [docs/pex.md](docs/pex.md), [docs/otd.md](docs/otd.md) | Per-tool guides and the OTD format spec |
 | [docs/installation.md](docs/installation.md) | Prerequisites and install options |
 | [docs/tools.md](docs/tools.md) | How the project is organized and how to add a tool |
 | [BUILD.md](BUILD.md), [VERSIONING_PLAN.md](VERSIONING_PLAN.md) | Building wheels and the release scheme |

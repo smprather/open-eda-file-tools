@@ -102,7 +102,7 @@ def-tools instances \
 - Coordinates (`llx, lly, urx, ury`) are in **microns** (`DBU / UNITS DISTANCE MICRONS`).
 - Default columns are `instance,base_cell,llx,lly,urx,ury`, plus `is_seq` when `--lib` is given and `is_clock` when `--clock-cells`, `--clock-data` or `--twf` is given.
 - `--columns` selects and renames columns (`instance=inst_name,base_cell=cell,status,orient,is_seq,is_clock,llx=llx_um`). Requesting `is_seq` without `--lib` or `is_clock` without a clock input is an error.
-- `--clock-cells`, `--clock-data` and `--twf` are alternatives. `--clock-data [BACKEND:]PATH` reads a clock/data source through a backend: `otw` (built in, [otw.md](otw.md); inferred from `.otw`/`.otw.gz`), `names` (an instance list), or a plug-in. Net/pin sources need `--lib`. `--twf PATH` is shorthand for `--clock-data twf:PATH`; vendor TWF is **not** read by this project and needs a plug-in `twf` backend.
+- `--clock-cells`, `--clock-data` and `--twf` are alternatives. `--clock-data [BACKEND:]PATH` reads a clock/data source through a backend: `otd` (built in, [otd.md](otd.md); inferred from `.otd`/`.otd.gz`), `names` (an instance list), or a plug-in. Net/pin sources need `--lib`. `--twf PATH` is shorthand for `--clock-data twf:PATH`; vendor TWF is **not** read by this project and needs a plug-in `twf` backend.
 - `--threads N` caps CPU use at N; the default is all logical CPUs. It covers every step of the command, Liberty parsing and clock-data resolution included. The same option exists on every `def-tools`, `sdc-tools clock-cells` and `pex-tools` command that runs in parallel; output never depends on it.
 - Exit codes: `3` the requested backend is not installed, `4` the source is malformed, `1` any other error. An `is_clock` column is never written when its source could not be read. Unmatched or unclassifiable clock objects are warned about on stderr.
 
@@ -114,7 +114,7 @@ def-tools clock-data --source [BACKEND:]PATH [--report objects|windows|instances
 ```
 
 - `objects` (default): CSV `kind,instance,name,role` for every net, pin and instance the source describes.
-- `windows`: every OTW timing window as CSV (`kind,instance,name,role,object_attrs,clock,edge,window_role,rise_early,rise_late,fall_early,fall_late,rise_slew_min,rise_slew_max,fall_slew_min,fall_slew_max,rise_res,rise_slack,fall_res,fall_slack,window_attrs`).
+- `windows`: every OTD timing window as CSV (`kind,instance,name,role,object_attrs,clock,edge,window_role,rise_early,rise_late,fall_early,fall_late,rise_slew_min,rise_slew_max,fall_slew_min,fall_slew_max,rise_res,rise_slack,fall_res,fall_slack,window_attrs`).
 - `instances`: the resolved clock-tree instance names, one per line (needs `--def`; net/pin sources need `--lib`). Same format as `sdc-tools clock-cells`, so the two can be diffed.
 
 ### `def-tools net-shapes`, `cache create`, `clock-instances`, `configure-io`

@@ -148,8 +148,8 @@ def main() -> None:
     "--clock-data",
     metavar="[BACKEND:]PATH",
     help=(
-        "Clock/data classification source for is_clock, e.g. design.otw.gz or "
-        "otw:design.otw.gz. Backends: otw (open timing windows), names, and any "
+        "Clock/data classification source for is_clock, e.g. design.otd.gz or "
+        "otd:design.otd.gz. Backends: otd (open timing data), names, and any "
         "installed plug-in. Net/pin sources need --lib. Exit code 3 means the "
         "backend is not installed, 4 that the source is malformed."
     ),
@@ -275,7 +275,7 @@ def _clock_data_failure(exc: ClockDataError) -> click.ClickException:
     "--source",
     required=True,
     metavar="[BACKEND:]PATH",
-    help="Clock/data source, e.g. design.otw.gz, otw:PATH, names:PATH or a plug-in backend.",
+    help="Clock/data source, e.g. design.otd.gz, otd:PATH, names:PATH or a plug-in backend.",
 )
 @click.option(
     "--report",
@@ -284,7 +284,7 @@ def _clock_data_failure(exc: ClockDataError) -> click.ClickException:
     show_default=True,
     help=(
         "objects: kind,instance,name,role per net/pin/instance. windows: every "
-        "OTW timing window as CSV. instances: clock-tree instance names, one per "
+        "OTD timing window as CSV. instances: clock-tree instance names, one per "
         "line (needs --def; net/pin sources also need --lib)."
     ),
 )
@@ -324,14 +324,14 @@ def clock_data_command(
     import csv
     import io
 
-    from .otw import write_otw_windows_csv
+    from .otd import write_otd_windows_csv
 
     try:
         data = read_clock_data(source)
         if report == "windows":
-            if data.backend != "otw":
-                raise click.UsageError("--report windows needs an OTW source")
-            write_otw_windows_csv(
+            if data.backend != "otd":
+                raise click.UsageError("--report windows needs an OTD source")
+            write_otd_windows_csv(
                 str(data.source), None if output is None else str(output)
             )
             rendered = None

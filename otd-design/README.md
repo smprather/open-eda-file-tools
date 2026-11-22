@@ -1,20 +1,20 @@
-# OTW design workspace
+# OTD design workspace
 
-Working area for the next version of OTW (Open Timing Windows). Nothing here
+Working area for the next version of OTD (Open Timing Data). Nothing here
 is normative and nothing here is shipped.
 
 | What | Where |
 | --- | --- |
-| Normative v1 spec | `docs/otw.md` |
-| v1 reader (Rust) | `src/otw.rs` |
-| v1 reader/writer (Python) | `def_tools/otw.py` |
-| Candidate additions for the next version | `otw-design/ideas.md` |
+| Normative v1 spec | `docs/otd.md` |
+| v1 reader (Rust) | `src/otd.rs` |
+| v1 reader/writer (Python) | `def_tools/otd.py` |
+| Candidate additions for the next version | `otd-design/ideas.md` |
 
 ## Goal
 
-1. Decide which additional STA results OTW should carry (`ideas.md`).
+1. Decide which additional STA results OTD should carry (`ideas.md`).
 2. Design them into the format and update the spec, reader and writer.
-3. Write an OTW writer inside an open-source STA tool and submit it upstream
+3. Write an OTD writer inside an open-source STA tool and submit it upstream
    as a pull request.
 
 ## Status (2026-11-14)
@@ -36,7 +36,7 @@ is normative and nothing here is shipped.
 - **Group references.** Anything that names a set of objects must be declared
   in the header and referenced by index, or the record groups stop being
   independent and the parallel reader breaks.
-- **Binary profile.** `docs/otw.md` Appendix B recommends a Parquet columnar
+- **Binary profile.** `docs/otd.md` Appendix B recommends a Parquet columnar
   profile and does not specify it.
 - **Target STA tool.** Not chosen. OpenSTA (used by OpenROAD) is the obvious
   candidate; its licence and contribution terms have not been checked.

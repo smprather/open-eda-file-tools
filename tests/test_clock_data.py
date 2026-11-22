@@ -1,4 +1,4 @@
-"""Clock-tree identification: the SDC trace, OTW, and clock-data backends.
+"""Clock-tree identification: the SDC trace, OTD, and clock-data backends.
 
 One hand-built design exercises every case; the expected answer is written
 out below, not derived from the code under test.
@@ -33,7 +33,7 @@ from def_tools.clock_data import (
     register_backend,
 )
 from def_tools.clock_roles import cell_clock_roles
-from def_tools.otw import OtwClock, OtwWindow, read_otw, write_otw
+from def_tools.otd import OtdClock, OtdWindow, read_otd, write_otd
 
 CLOCK_TREE = ["u_b\\[1\\]", "u_buf", "u_div", "u_gbuf", "u_icg"]
 
@@ -112,8 +112,8 @@ SDC = (
     "[get_pins u_div/Q]\n"
 )
 
-NET_OTW = """\
-otw 1
+NET_OTD = """\
+otd 1
 design clk_design
 time_unit 1e-9
 clock clk 10 0 5
@@ -131,8 +131,8 @@ n din u
 end 9 0 2
 """
 
-PIN_OTW = """\
-otw 1
+PIN_OTD = """\
+otd 1
 clock clk 10 0 5
 i -
 p clk c
@@ -169,8 +169,8 @@ def design(tmp_path: Path) -> dict[str, Path]:
         "def": tmp_path / "design.def",
         "lib": tmp_path / "cells.lib",
         "sdc": tmp_path / "design.sdc",
-        "net_otw": tmp_path / "nets.otw",
-        "pin_otw": tmp_path / "pins.otw",
+        "net_otd": tmp_path / "nets.otd",
+        "pin_otd": tmp_path / "pins.otd",
     }
     files["lef"].write_text(LEF, encoding="utf-8")
     files["def"].write_text(
@@ -184,8 +184,8 @@ def design(tmp_path: Path) -> dict[str, Path]:
     )
     files["lib"].write_text(LIB, encoding="utf-8")
     files["sdc"].write_text(SDC, encoding="utf-8")
-    files["net_otw"].write_text(NET_OTW, encoding="utf-8")
-    files["pin_otw"].write_text(PIN_OTW, encoding="utf-8")
+    files["net_otd"].write_text(NET_OTD, encoding="utf-8")
+    files["pin_otd"].write_text(PIN_OTD, encoding="utf-8")
     return files
 
 
@@ -271,13 +271,13 @@ def test_sdc_clock_cells_cli_no_prune(design) -> None:
     assert unpruned.output.splitlines() == ["u_and", *CLOCK_TREE]
 
 
-# --- OTW --------------------------------------------------------------------
+# --- OTD --------------------------------------------------------------------
 
 
-def test_net_based_otw_marks_the_drivers_of_clock_nets(design) -> None:
+def test_net_based_otd_marks_the_drivers_of_clock_nets(design) -> None:
     roles = cell_clock_roles([design["lib"]])
 
-    result = clock_instances(design["net_otw"], design["def"], roles)
+    result = clock_instances(design["net_otd"], design["def"], roles)
 
     assert list(result.cells) == CLOCK_TREE
     assert result.unmatched_nets == ()
@@ -285,18 +285,18 @@ def test_net_based_otw_marks_the_drivers_of_clock_nets(design) -> None:
     assert result.unclassified == ("u_box",)
 
 
-def test_pin_based_otw_gives_the_same_answer(design) -> None:
+def test_pin_based_otd_gives_the_same_answer(design) -> None:
     roles = cell_clock_roles([design["lib"]])
 
-    result = clock_instances(design["pin_otw"], design["def"], roles)
+    result = clock_instances(design["pin_otd"], design["def"], roles)
 
     assert list(result.cells) == CLOCK_TREE
     assert result.unmatched_pins == ()
 
 
 def test_unmatched_objects_are_reported(design, tmp_path: Path) -> None:
-    source = tmp_path / "extra.otw"
-    source.write_text("otw 1\nn n_buf c\nn gone c\ni ghost\np A c\ni -\np nope c\nend 2 2 0\n", encoding="utf-8")
+    source = tmp_path / "extra.otd"
+    source.write_text("otd 1\nn n_buf c\nn gone c\ni ghost\np A c\ni -\np nope c\nend 2 2 0\n", encoding="utf-8")
 
     result = clock_instances(source, design["def"], cell_clock_roles([design["lib"]]))
 
@@ -307,33 +307,33 @@ def test_unmatched_objects_are_reported(design, tmp_path: Path) -> None:
 
 
 def test_source_for_another_design_is_an_error(design, tmp_path: Path) -> None:
-    source = tmp_path / "other.otw"
-    source.write_text("otw 1\nn some_other_clk c\nend 1 0 0\n", encoding="utf-8")
+    source = tmp_path / "other.otd"
+    source.write_text("otd 1\nn some_other_clk c\nend 1 0 0\n", encoding="utf-8")
 
     with pytest.raises(ClockDataError, match="does not describe this design"):
         clock_instances(source, design["def"], cell_clock_roles([design["lib"]]))
 
 
-def test_write_otw_round_trips_through_gzip(tmp_path: Path) -> None:
-    path = tmp_path / "round.otw.gz"
-    window = OtwWindow(0, "r", "c", (0.1, 0.14, None, None, 0.02, 0.03, None, None))
+def test_write_otd_round_trips_through_gzip(tmp_path: Path) -> None:
+    path = tmp_path / "round.otd.gz"
+    window = OtdWindow(0, "r", "c", (0.1, 0.14, None, None, 0.02, 0.03, None, None))
 
-    write_otw(
+    write_otd(
         path,
         design="top",
         time_unit=1e-9,
-        clocks=[OtwClock("clk", 10.0, 0.0, 5.0)],
+        clocks=[OtdClock("clk", 10.0, 0.0, 5.0)],
         attributes=[("source", "unit test")],
         nets={"clk": "c", "d0": "d"},
         pins={("u1", "CK"): "c", ("-", "clk"): "c"},
         windows={"clk": [window]},
     )
-    parsed = read_otw(path)
+    parsed = read_otd(path)
 
-    assert gzip.open(path, "rt").readline() == "otw 1\n"
+    assert gzip.open(path, "rt").readline() == "otd 1\n"
     assert parsed.design == "top"
     assert parsed.time_unit == 1e-9
-    assert parsed.clocks == (OtwClock("clk", 10.0, 0.0, 5.0),)
+    assert parsed.clocks == (OtdClock("clk", 10.0, 0.0, 5.0),)
     assert parsed.attributes == (("source", "unit test"),)
     assert parsed.nets == {"clk": "c", "d0": "d"}
     assert parsed.pins == {("u1", "CK"): "c", ("-", "clk"): "c"}
@@ -341,15 +341,15 @@ def test_write_otw_round_trips_through_gzip(tmp_path: Path) -> None:
     assert parsed.domains == {"clk": (0,)}  # derived from its window
 
 
-def test_otw_carries_domains_frequency_slack_and_free_attributes(tmp_path: Path) -> None:
-    path = tmp_path / "rich.otw"
+def test_otd_carries_domains_frequency_slack_and_free_attributes(tmp_path: Path) -> None:
+    path = tmp_path / "rich.otd"
     clocks = [
-        OtwClock("clk", 10.0, 0.0, 5.0, (("source", "clk"),)),
-        OtwClock("div2", 20.0, 0.0, 10.0, (("master", "0"),)),
+        OtdClock("clk", 10.0, 0.0, 5.0, (("source", "clk"),)),
+        OtdClock("div2", 20.0, 0.0, 10.0, (("master", "0"),)),
     ]
     values = (0.1, 0.2, 0.1, 0.2, 0.01, 0.02, 0.01, 0.02)
 
-    write_otw(
+    write_otd(
         path,
         time_unit=1e-9,
         cap_unit=1e-12,
@@ -363,16 +363,16 @@ def test_otw_carries_domains_frequency_slack_and_free_attributes(tmp_path: Path)
         object_attributes={"gated": {"freq": "5e7", "load": "0.0032"}},
         windows={
             "gated": [
-                OtwWindow(
+                OtdWindow(
                     0, "r", "c", values,
                     rise_res=(0.59, 0.61), rise_slack=(0.31, 0.37), attributes=(("k", "2"),),
                 )
             ],
-            "async_in": [OtwWindow(None, "-", "u", values)],
+            "async_in": [OtdWindow(None, "-", "u", values)],
         },
     )
     text = path.read_text(encoding="utf-8").splitlines()
-    parsed = read_otw(path)
+    parsed = read_otd(path)
     data = read_clock_data(path)
 
     assert "n gated c clocks=0,1 freq=5e7 load=0.0032" in text
@@ -391,52 +391,52 @@ def test_otw_carries_domains_frequency_slack_and_free_attributes(tmp_path: Path)
     assert data.domains == {"gated": ("clk", "div2"), ("u_icg", "CK"): ("clk",)}
 
 
-def test_write_otw_numbers_are_fixed_point_without_exponent(tmp_path: Path) -> None:
-    path = tmp_path / "small.otw"
+def test_write_otd_numbers_are_fixed_point_without_exponent(tmp_path: Path) -> None:
+    path = tmp_path / "small.otd"
     values = (1e-5, 2.5, None, None, 1e-9, 0.0, None, None)
 
-    write_otw(
+    write_otd(
         path,
-        clocks=[OtwClock("clk", 10.0, 0.0, 5.0)],
+        clocks=[OtdClock("clk", 10.0, 0.0, 5.0)],
         nets={"n": "d"},
-        windows={"n": [OtwWindow(0, "r", "d", values, rise_slack=(-0.25, 1e-7))]},
+        windows={"n": [OtdWindow(0, "r", "d", values, rise_slack=(-0.25, 1e-7))]},
         precision=7,
     )
 
     assert "w 0 r d 0.00001 2.5 - - 0 0 - - rise_slack=-0.25:0.0000001" in path.read_text()
-    assert read_otw(path).windows == 1
+    assert read_otd(path).windows == 1
 
 
 def test_gzip_members_may_be_concatenated(tmp_path: Path) -> None:
     # A writer may compress groups independently and append the members.
-    path = tmp_path / "members.otw.gz"
-    parts = [b"otw 1\nn a c\n", b"i u\np Z c\n", b"n b d\nend 2 1 0\n"]
+    path = tmp_path / "members.otd.gz"
+    parts = [b"otd 1\nn a c\n", b"i u\np Z c\n", b"n b d\nend 2 1 0\n"]
     path.write_bytes(b"".join(gzip.compress(part) for part in parts))
 
-    parsed = read_otw(path)
+    parsed = read_otd(path)
 
     assert parsed.nets == {"a": "c", "b": "d"}
     assert parsed.pins == {("u", "Z"): "c"}
 
 
-def test_write_otw_refuses_what_the_reader_would_reject(tmp_path: Path) -> None:
-    window = OtwWindow(0, "r", "c", (None,) * 8)
-    clocks = [OtwClock("clk", 10.0, 0.0, 5.0)]
+def test_write_otd_refuses_what_the_reader_would_reject(tmp_path: Path) -> None:
+    window = OtdWindow(0, "r", "c", (None,) * 8)
+    clocks = [OtdClock("clk", 10.0, 0.0, 5.0)]
 
     with pytest.raises(ValueError, match="clock window"):
-        write_otw(tmp_path / "a.otw", clocks=clocks, nets={"n": "d"}, windows={"n": [window]})
+        write_otd(tmp_path / "a.otd", clocks=clocks, nets={"n": "d"}, windows={"n": [window]})
     with pytest.raises(ValueError, match="role"):
-        write_otw(tmp_path / "b.otw", nets={"n": "C"})
+        write_otd(tmp_path / "b.otd", nets={"n": "C"})
     with pytest.raises(ValueError, match="token"):
-        write_otw(tmp_path / "c.otw", nets={"a b": "c"})
+        write_otd(tmp_path / "c.otd", nets={"a b": "c"})
 
 
 # --- backend seam -----------------------------------------------------------
 
 
 def test_backend_is_chosen_by_prefix_or_suffix(tmp_path: Path) -> None:
-    assert parse_source("otw:/x/y.txt") == ("otw", Path("/x/y.txt"))
-    assert parse_source("/x/design.otw.gz") == ("otw", Path("/x/design.otw.gz"))
+    assert parse_source("otd:/x/y.txt") == ("otd", Path("/x/y.txt"))
+    assert parse_source("/x/design.otd.gz") == ("otd", Path("/x/design.otd.gz"))
     assert parse_source("/x/design.twf.gz") == ("twf", Path("/x/design.twf.gz"))
     with pytest.raises(ClockDataBackendError, match="BACKEND:PATH"):
         parse_source("/x/design.txt")
@@ -445,14 +445,14 @@ def test_backend_is_chosen_by_prefix_or_suffix(tmp_path: Path) -> None:
 def test_missing_backend_and_malformed_source_are_distinct_errors(tmp_path: Path) -> None:
     twf = tmp_path / "design.twf"
     twf.write_text("(TIMING_WINDOWS)\n", encoding="utf-8")
-    bad = tmp_path / "bad.otw"
-    bad.write_text("otw 1\nn clk q\nend 1 0 0\n", encoding="utf-8")
-    empty = tmp_path / "empty.otw"
-    empty.write_text("otw 1\nend 0 0 0\n", encoding="utf-8")
+    bad = tmp_path / "bad.otd"
+    bad.write_text("otd 1\nn clk q\nend 1 0 0\n", encoding="utf-8")
+    empty = tmp_path / "empty.otd"
+    empty.write_text("otd 1\nend 0 0 0\n", encoding="utf-8")
 
     with pytest.raises(ClockDataBackendError, match="no `twf` clock-data backend"):
         read_clock_data(twf)
-    with pytest.raises(ClockDataFormatError, match="bad.otw:2"):
+    with pytest.raises(ClockDataFormatError, match="bad.otd:2"):
         read_clock_data(bad)
     with pytest.raises(ClockDataFormatError, match="describes no net"):
         read_clock_data(empty)
@@ -469,7 +469,7 @@ def test_registered_backend_supplies_the_answer(design) -> None:
 
     assert result.cells == ("u_icg", "u_post")
     with pytest.raises(ValueError, match="built in"):
-        register_backend("otw", reader)
+        register_backend("otd", reader)
 
 
 def test_backend_with_an_unknown_role_is_rejected(tmp_path: Path) -> None:
@@ -482,8 +482,8 @@ def test_backend_with_an_unknown_role_is_rejected(tmp_path: Path) -> None:
 # --- def-tools CLI ----------------------------------------------------------
 
 
-@pytest.mark.parametrize("source", ["net_otw", "pin_otw"])
-def test_instances_cli_fills_is_clock_from_otw(design, source: str) -> None:
+@pytest.mark.parametrize("source", ["net_otd", "pin_otd"])
+def test_instances_cli_fills_is_clock_from_otd(design, source: str) -> None:
     result, rows = instances_cli(design, "--clock-data", str(design[source]))
 
     assert result.exit_code == 0, result.output
@@ -496,7 +496,7 @@ def test_instances_cli_default_columns_gain_is_clock(design, tmp_path: Path) -> 
     result = CliRunner().invoke(
         cli.main,
         ["instances", "--lef", str(design["lef"]), "--def", str(design["def"])]
-        + ["--lib", str(design["lib"]), "--clock-data", f"otw:{design['net_otw']}"]
+        + ["--lib", str(design["lib"]), "--clock-data", f"otd:{design['net_otd']}"]
         + ["--output", str(output)],
     )
 
@@ -540,8 +540,8 @@ def test_instances_cli_twf_uses_a_plugged_in_backend(
 
 
 def test_instances_cli_malformed_source_exits_4(design, tmp_path: Path) -> None:
-    bad = tmp_path / "bad.otw"
-    bad.write_text("otw 1\nn clk c\nn clk d\nend 2 0 0\n", encoding="utf-8")
+    bad = tmp_path / "bad.otd"
+    bad.write_text("otd 1\nn clk c\nn clk d\nend 2 0 0\n", encoding="utf-8")
 
     result, _rows = instances_cli(design, "--clock-data", str(bad))
 
@@ -550,7 +550,7 @@ def test_instances_cli_malformed_source_exits_4(design, tmp_path: Path) -> None:
 
 
 def test_instances_cli_net_source_needs_liberty(design) -> None:
-    result, _rows = instances_cli(design, "--clock-data", str(design["net_otw"]), lib=False)
+    result, _rows = instances_cli(design, "--clock-data", str(design["net_otd"]), lib=False)
 
     assert result.exit_code == 1
     assert "--lib" in result.stderr
@@ -561,7 +561,7 @@ def test_instances_cli_clock_inputs_are_alternatives(design, tmp_path: Path) -> 
     names.write_text("u_buf\n", encoding="utf-8")
 
     result, _rows = instances_cli(
-        design, "--clock-data", str(design["net_otw"]), "--clock-cells", str(names)
+        design, "--clock-data", str(design["net_otd"]), "--clock-cells", str(names)
     )
 
     assert result.exit_code == 1
@@ -576,22 +576,22 @@ def test_offline_entry_point_reports_the_same_exit_codes(design, tmp_path: Path,
     twf.write_text("", encoding="utf-8")
 
     assert main([*base, "--twf", str(twf)]) == 3
-    assert main([*base, "--clock-data", str(design["pin_otw"])]) == 0
+    assert main([*base, "--clock-data", str(design["pin_otd"])]) == 0
     assert "u_icg,ICG,0.0,0.0,1.0,1.0,true,true" in capfd.readouterr().out
 
 
 def test_clock_data_command_reports(design, tmp_path: Path) -> None:
     runner = CliRunner()
-    objects = runner.invoke(cli.main, ["clock-data", "--source", str(design["pin_otw"])])
+    objects = runner.invoke(cli.main, ["clock-data", "--source", str(design["pin_otd"])])
     instances = runner.invoke(
         cli.main,
-        ["clock-data", "--source", str(design["net_otw"]), "--report", "instances"]
+        ["clock-data", "--source", str(design["net_otd"]), "--report", "instances"]
         + ["--def", str(design["def"]), "--lib", str(design["lib"])],
     )
     windows_csv = tmp_path / "windows.csv"
     windows = runner.invoke(
         cli.main,
-        ["clock-data", "--source", str(design["net_otw"]), "--report", "windows"]
+        ["clock-data", "--source", str(design["net_otd"]), "--report", "windows"]
         + ["--output", str(windows_csv)],
     )
 

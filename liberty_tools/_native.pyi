@@ -255,7 +255,7 @@ def clock_object_instances(
     macros: Sequence[_MacroRole],
 ) -> tuple[list[str], list[str], list[tuple[str, str]], list[str]]: ...
 @final
-class OtwSummary:
+class OtdSummary:
     design: str
     time_unit: float | None
     cap_unit: float | None
@@ -266,8 +266,8 @@ class OtwSummary:
     nets: list[tuple[str, str, list[int], list[tuple[str, str]]]]
     pins: list[tuple[str, str, str, list[int], list[tuple[str, str]]]]
     windows: int
-def read_otw(path: _StrPath) -> OtwSummary: ...
-def write_otw_windows_csv(path: _StrPath, output: _StrPath | None = None) -> int: ...
+def read_otd(path: _StrPath) -> OtdSummary: ...
+def write_otd_windows_csv(path: _StrPath, output: _StrPath | None = None) -> int: ...
 @final
 class PexHeader:
     standard: str

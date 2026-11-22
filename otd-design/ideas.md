@@ -1,4 +1,4 @@
-# Candidate STA results for OTW
+# Candidate STA results for OTD
 
 Brainstormed 2026-11-14. The motivating consumer is dynamic IR analysis, which
 has to decide where in time to place each switching event. Arrival bounds are

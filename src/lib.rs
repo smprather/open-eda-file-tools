@@ -2,7 +2,7 @@ pub mod def;
 pub mod lef;
 mod liberty_data;
 mod liberty_rows;
-pub mod otw;
+pub mod otd;
 pub mod pex;
 mod sdc;
 pub mod threads;
@@ -1845,7 +1845,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     def::register(m)?;
     threads::register(m)?;
     pex::register(m)?;
-    otw::register(m)?;
+    otd::register(m)?;
     sdc::register(m)?;
     Ok(())
 }

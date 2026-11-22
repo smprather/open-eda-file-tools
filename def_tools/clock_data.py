@@ -8,7 +8,7 @@ plugged in without this project knowing its format.
 
 Built-in backends:
 
-``otw``    OTW, this project's open timing-window format (``docs/otw.md``).
+``otd``    OTD, this project's open timing-data format (``docs/otd.md``).
 ``names``  A plain list of clock-tree instance names (``--clock-cells``).
 
 Other backends (a vendor ``twf`` reader, for example) live outside this
@@ -155,19 +155,19 @@ def _names_backend(path: Path) -> ClockData:
     return ClockData("names", path, instances=dict.fromkeys(sorted(names), CLOCK_ROLE))
 
 
-def _otw_backend(path: Path) -> ClockData:
-    from .otw import read_otw
+def _otd_backend(path: Path) -> ClockData:
+    from .otd import read_otd
 
-    parsed = read_otw(path)
+    parsed = read_otd(path)
     domains = {key: parsed.domain_names(key) for key in parsed.domains}
-    return ClockData("otw", path, nets=parsed.nets, pins=parsed.pins, domains=domains)
+    return ClockData("otd", path, nets=parsed.nets, pins=parsed.pins, domains=domains)
 
 
-_BUILTIN: dict[str, Backend] = {"names": _names_backend, "otw": _otw_backend}
+_BUILTIN: dict[str, Backend] = {"names": _names_backend, "otd": _otd_backend}
 _REGISTERED: dict[str, Backend] = {}
 _SUFFIX_BACKENDS = (
-    (".otw", "otw"),
-    (".otw.gz", "otw"),
+    (".otd", "otd"),
+    (".otd.gz", "otd"),
     (".twf", "twf"),
     (".twf.gz", "twf"),
 )
@@ -261,7 +261,7 @@ def read_clock_data(spec: str | Path) -> ClockData:
     if reader is None:
         hint = (
             " Vendor TWF dialects are proprietary and are not read by this project: "
-            "convert the file to OTW (docs/otw.md) or install a package that provides "
+            "convert the file to OTD (docs/otd.md) or install a package that provides "
             f"a `twf` backend (`{ENTRY_POINT_GROUP}` entry point or {BACKENDS_ENV})."
             if name == "twf"
             else ""

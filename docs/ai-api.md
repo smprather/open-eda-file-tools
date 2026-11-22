@@ -25,8 +25,8 @@ entry points (`liberty-tools`, `liberty-format`, `liberty-view`, `lef-tools`,
 | Query routed net shapes for one net + layer | `def-tools net-shapes --def ... --net VDD --layer met1` | `--cache-dir` for repeated queries | CSV in **DEF DBU** |
 | Extract SDC clocks (`create_clock` / `create_generated_clock`) | `sdc_tools.clocks(sdc_path)` or `sdc-tools clocks` | Evaluates in safe `tclsh` >= 8.6 with stubs | `list[Clock]` / TSV / JSON |
 | Positively identify clock-tree cells from SDC + DEF + Liberty | `sdc_tools.clock_cells(def_path, libs, sdc_path)` or `sdc-tools clock-cells` | Forward trace from clock roots; through ICGs, stops at `ff`/`latch`/memory, pruned to cells that reach a clock pin | `ClockCells` / instance list |
-| Identify clock-tree cells from STA clock/data roles (OTW or plug-in backend) + DEF + Liberty | `def_tools.clock_data.clock_instances(spec, def_path, roles)` or `def-tools instances --clock-data [BACKEND:]PATH` | Net- and pin-based; exit 3 = backend missing, 4 = malformed | `ClockInstances` / `is_clock` column |
-| Read / write OTW (open timing windows) | `def_tools.otw.read_otw(path)` / `write_otw(path, ...)` | Spec: `docs/otw.md`; no vendor TWF reader ships | `OtwFile` |
+| Identify clock-tree cells from STA clock/data roles (OTD or plug-in backend) + DEF + Liberty | `def_tools.clock_data.clock_instances(spec, def_path, roles)` or `def-tools instances --clock-data [BACKEND:]PATH` | Net- and pin-based; exit 3 = backend missing, 4 = malformed | `ClockInstances` / `is_clock` column |
+| Read / write OTD (open timing data) | `def_tools.otd.read_otd(path)` / `write_otd(path, ...)` | Spec: `docs/otd.md`; no vendor TWF reader ships | `OtdFile` |
 | Summarize SPEF/DSPF parasitics or build capacitance histogram | `pex_tools.summaries(path)` / `pex_tools.histogram(path)` / `pex-tools` | `mode="auto"` (parallel Rayon) or `mode="stream"` (low-memory) | `list[PexSummary]` / `PexHistogram` |
 | Limit CPU use of the native readers | `def_tools.set_threads(n)` / `pex_tools.set_threads(n)` / `--threads N` on every parallel command | Default: all logical CPUs; `None` removes the limit; works after the first parallel call | `get_threads() -> int` |
 | Parse full SPEF/DSPF conns, caps, resistors, and `$` extensions | `pex_tools.parse(path)` | Preserves `$layer=`, `$x=`, `$y=`, and DSPF `*C x y` | `PexFile` |
@@ -90,9 +90,9 @@ rows, row_groups = def_tools.write_instance_parquet(
 ### `is_clock` from STA clock/data roles instead of an SDC trace
 
 ```bash
-# design.otw.gz: OTW (docs/otw.md), net-based or pin-based. --lib is required for net/pin sources.
+# design.otd.gz: OTD (docs/otd.md), net-based or pin-based. --lib is required for net/pin sources.
 uv run def-tools instances --lef "pdk/*.lef" --def design.def.gz \
-  --lib stdcell.lib --clock-data design.otw.gz --output instances.csv
+  --lib stdcell.lib --clock-data design.otd.gz --output instances.csv
 # Vendor TWF: only through a plug-in backend named `twf` (none ships here):
 OPEN_EDA_CLOCK_DATA_BACKENDS="twf=my_pkg.twf_reader:read" \
   uv run def-tools instances ... --lib stdcell.lib --twf design.twf.gz
@@ -380,7 +380,7 @@ from def_tools.instances import instance_flag_inputs
 sequential, clock, warnings = instance_flag_inputs(
     def_path, libs,                 # libs parsed once (skip_tables=True) for both columns
     clock_cells=None,               # Path: instance-name list            } alternatives;
-    clock_data=None,                # "[BACKEND:]PATH", e.g. "x.otw.gz"   } more than one
+    clock_data=None,                # "[BACKEND:]PATH", e.g. "x.otd.gz"   } more than one
     twf=None,                       # Path: shorthand for "twf:PATH"      } -> ValueError
 ) -> tuple[list[str] | None, list[str] | None, list[str]]   # None = input not supplied
 
@@ -400,7 +400,7 @@ from def_tools.clock_data import (
     register_backend, backends, parse_source,
     ClockDataError, ClockDataBackendError, ClockDataFormatError,
 )
-data = read_clock_data("design.otw.gz" | "otw:PATH" | "names:PATH" | "<plugin>:PATH") -> ClockData
+data = read_clock_data("design.otd.gz" | "otd:PATH" | "names:PATH" | "<plugin>:PATH") -> ClockData
 data.backend -> str; data.source -> Path
 data.nets -> Mapping[str, str]                    # net -> role ("c" | "d" | "u" | "z")
 data.pins -> Mapping[tuple[str, str], str]        # (instance, pin) -> role; instance "-" = port
@@ -418,40 +418,40 @@ result.warnings() -> list[str]
 #         ClockDataError (.exit_code 1: no --lib for nets/pins, or no clock object exists in the DEF).
 # Plug-in: reader(path: Path) -> ClockData, registered via register_backend(name, reader),
 #   entry-point group "open_eda_file_tools.clock_data", or env OPEN_EDA_CLOCK_DATA_BACKENDS
-#   ("name=pkg.module:reader,..."). Built-ins "otw" and "names" cannot be replaced.
+#   ("name=pkg.module:reader,..."). Built-ins "otd" and "names" cannot be replaced.
 # Backend contract: one role per object; any clock record makes the object "c".
 
-# OTW (def_tools.otw), formal spec in docs/otw.md:
-from def_tools.otw import read_otw, write_otw, write_otw_windows_csv, OtwClock, OtwWindow
-otw = read_otw(path) -> OtwFile     # ValueError "file:line: ..." when malformed
-otw.design -> str; otw.clocks -> tuple[OtwClock, ...]   # OtwClock(name, period, rise_edge, fall_edge, attributes=())
-otw.time_unit / otw.cap_unit / otw.res_unit -> float | None   # seconds / farads / ohms per unit
-otw.slew_thresholds -> tuple[float, float] | None             # percent of swing
-otw.attributes -> tuple[tuple[str, str], ...]                 # other header lines (corner, program, ...)
-otw.windows -> int                                            # count of w lines
-otw.nets -> dict[str, str]; otw.pins -> dict[tuple[str, str], str]   # object -> role
-otw.domains -> dict[str | tuple[str, str], tuple[int, ...]]   # clock indices: clocks= attr, else window clocks
-otw.domain_names(key) -> tuple[str, ...]
-otw.object_attributes -> dict[key, dict[str, str]]            # freq (Hz), load (cap_unit range), value (0|1 for z),
+# OTD (def_tools.otd), formal spec in docs/otd.md:
+from def_tools.otd import read_otd, write_otd, write_otd_windows_csv, OtdClock, OtdWindow
+otd = read_otd(path) -> OtdFile     # ValueError "file:line: ..." when malformed
+otd.design -> str; otd.clocks -> tuple[OtdClock, ...]   # OtdClock(name, period, rise_edge, fall_edge, attributes=())
+otd.time_unit / otd.cap_unit / otd.res_unit -> float | None   # seconds / farads / ohms per unit
+otd.slew_thresholds -> tuple[float, float] | None             # percent of swing
+otd.attributes -> tuple[tuple[str, str], ...]                 # other header lines (corner, program, ...)
+otd.windows -> int                                            # count of w lines
+otd.nets -> dict[str, str]; otd.pins -> dict[tuple[str, str], str]   # object -> role
+otd.domains -> dict[str | tuple[str, str], tuple[int, ...]]   # clock indices: clocks= attr, else window clocks
+otd.domain_names(key) -> tuple[str, ...]
+otd.object_attributes -> dict[key, dict[str, str]]            # freq (Hz), load (cap_unit range), value (0|1 for z),
                                                               # drive_rise / drive_fall (res_unit range), free keys
-# OtwWindow(clock: int | None, edge: "r" | "f" | "-", role, values: 8-tuple of float | None,
+# OtdWindow(clock: int | None, edge: "r" | "f" | "-", role, values: 8-tuple of float | None,
 #           rise_res=None, rise_slack=None, fall_res=None, fall_slack=None,   # (min, max) ranges
 #           attributes=())    # values = rise_early, rise_late, fall_early, fall_late, then 4 slews
-write_otw(path, *, design="", time_unit=None, cap_unit=None, res_unit=None, slew_thresholds=None,
+write_otd(path, *, design="", time_unit=None, cap_unit=None, res_unit=None, slew_thresholds=None,
           clocks=(), attributes=(), nets=None, pins=None, windows=None,
           domains=None, object_attributes=None, precision=6) -> None   # ".gz" suffix gzips
-# Text grammar (docs/otw.md): `n <net> <role>`; `i <instance>` then `p <pin> <role>` (instance `-` = ports);
+# Text grammar (docs/otd.md): `n <net> <role>`; `i <instance>` then `p <pin> <role>` (instance `-` = ports);
 #   `w <clock|-> <r|f|-> <role> <8 decimals or ->`; trailing key=value attrs; mandatory `end <nets> <pins> <windows>`.
 #   Body numbers are fixed-point decimals (no exponent); precision = max fractional digits written.
 # Native reader parses group-aligned blocks in parallel (rayon) within the set_threads limit.
-write_otw_windows_csv(path, output: str | None) -> int     # one CSV row per window
+write_otd_windows_csv(path, output: str | None) -> int     # one CSV row per window
 
 # Binary DEF cache for repeated net/clock queries:
 def_tools.write_def_cache(def_path: str | Path, cache_dir: str | Path) -> None
 def_tools.write_net_shapes_csv(def_path, net, layer, output) -> dict[str, int]   # {"after_via", "polygon", "subnet"}
 def_tools.write_net_shapes_csv_from_cache(cache_dir, net, layer, output) -> dict[str, int]
 
-# CPU limit for every native reader (DEF, OTW, SPEF/DSPF) and for Liberty
+# CPU limit for every native reader (DEF, OTD, SPEF/DSPF) and for Liberty
 # parsing in cell_clock_roles; process-wide, also exported by pex_tools:
 def_tools.set_threads(threads: int | None = None) -> None   # None or 0 = all logical CPUs (default)
 def_tools.get_threads() -> int                              # the limit, else the CPU count

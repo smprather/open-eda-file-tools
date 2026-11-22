@@ -1,11 +1,11 @@
-//! OTW (Open Timing Windows) reader.
+//! OTD (Open Timing Data) reader.
 //!
-//! OTW is this project's own open, line-oriented timing-window format; it is
+//! OTD is this project's own open, line-oriented timing-data format; it is
 //! not a dialect of any vendor's TWF. The normative specification is
-//! `docs/otw.md`.
+//! `docs/otd.md`.
 //!
 //! ```text
-//! otw 1
+//! otd 1
 //! design top
 //! time_unit 1e-9
 //! clock clk 10 0 5
@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 
 use crate::lef::open_input;
 
-pub const OTW_VERSION: &str = "1";
+pub const OTD_VERSION: &str = "1";
 /// Target size of one parallel parse block.
 const BLOCK_BYTES: usize = 4 << 20;
 const ROLES: &[u8] = b"cduz";
@@ -55,16 +55,16 @@ const WINDOW_COLUMNS: [&str; WINDOW_VALUES] = [
 const RANGE_ATTRS: [&str; 4] = ["rise_res", "rise_slack", "fall_res", "fall_slack"];
 
 #[derive(Debug)]
-pub enum OtwError {
+pub enum OtdError {
     Io(String),
     Malformed(String),
 }
 
-impl OtwError {
+impl OtdError {
     fn into_py(self) -> PyErr {
         match self {
-            OtwError::Io(message) => PyOSError::new_err(message),
-            OtwError::Malformed(message) => PyValueError::new_err(message),
+            OtdError::Io(message) => PyOSError::new_err(message),
+            OtdError::Malformed(message) => PyValueError::new_err(message),
         }
     }
 }
@@ -273,19 +273,19 @@ fn parse_header(data: &[u8], at_eof: bool) -> Result<Option<ParsedHeader>, LineE
         let mut tokens = line.split_ascii_whitespace();
         let keyword = tokens.next().unwrap_or_default();
         if !versioned {
-            if keyword != "otw" {
+            if keyword != "otd" {
                 return Err(fail(
-                    "not an OTW file: the first line must be `otw <version>`".to_string(),
+                    "not an OTD file: the first line must be `otd <version>`".to_string(),
                 ));
             }
             match tokens.next() {
-                Some(OTW_VERSION) => {}
+                Some(OTD_VERSION) => {}
                 Some(version) => {
                     return Err(fail(format!(
-                        "unsupported OTW version `{version}` (this reader supports {OTW_VERSION})"
+                        "unsupported OTD version `{version}` (this reader supports {OTD_VERSION})"
                     )));
                 }
-                None => return Err(fail("`otw` line has no version".to_string())),
+                None => return Err(fail("`otd` line has no version".to_string())),
             }
             no_more(&mut tokens, "the version").map_err(fail)?;
             versioned = true;
@@ -360,7 +360,7 @@ fn parse_header(data: &[u8], at_eof: bool) -> Result<Option<ParsedHeader>, LineE
     if !versioned {
         return Err((
             line_no.max(1),
-            "not an OTW file: the first line must be `otw <version>`".to_string(),
+            "not an OTD file: the first line must be `otd <version>`".to_string(),
         ));
     }
     Ok(Some((header, data.len(), line_no)))
@@ -611,13 +611,13 @@ impl<R: Read> Blocks<R> {
 /// Parse `path`: the header sequentially, then the body block by block in
 /// parallel. `merge` receives each block's sink in file order. Returns the
 /// header and the number of `w` lines.
-pub fn parse_otw<S: Sink>(
+pub fn parse_otd<S: Sink>(
     path: &Path,
-    mut merge: impl FnMut(S) -> Result<(), OtwError>,
-) -> Result<(Header, u64), OtwError> {
-    let io_err = |err: io::Error| OtwError::Io(format!("{}: {err}", path.display()));
+    mut merge: impl FnMut(S) -> Result<(), OtdError>,
+) -> Result<(Header, u64), OtdError> {
+    let io_err = |err: io::Error| OtdError::Io(format!("{}: {err}", path.display()));
     let malformed = |line: u64, message: String| {
-        OtwError::Malformed(format!("{}:{line}: {message}", path.display()))
+        OtdError::Malformed(format!("{}:{line}: {message}", path.display()))
     };
     let mut blocks = Blocks {
         reader: open_input(path).map_err(io_err)?,
@@ -680,11 +680,11 @@ pub fn parse_otw<S: Sink>(
     }
 
     match end {
-        None => Err(OtwError::Malformed(format!(
+        None => Err(OtdError::Malformed(format!(
             "{}: no `end` line: the file is truncated",
             path.display()
         ))),
-        Some(declared) if declared != (nets, pins, windows) => Err(OtwError::Malformed(format!(
+        Some(declared) if declared != (nets, pins, windows) => Err(OtdError::Malformed(format!(
             "{}: `end {} {} {}` does not match the file, which holds {nets} nets, {pins} pins and {windows} windows",
             path.display(),
             declared.0,
@@ -698,9 +698,9 @@ pub fn parse_otw<S: Sink>(
 type NetRow = (String, String, Vec<usize>, Vec<(String, String)>);
 type PinRow = (String, String, String, Vec<usize>, Vec<(String, String)>);
 
-/// Per-object view of an OTW file.
+/// Per-object view of an OTD file.
 #[pyclass(get_all, frozen)]
-pub struct OtwSummary {
+pub struct OtdSummary {
     design: String,
     time_unit: Option<f64>,
     cap_unit: Option<f64>,
@@ -801,14 +801,14 @@ impl Sink for Collector {
     }
 }
 
-pub fn summarize(path: &Path) -> Result<OtwSummary, OtwError> {
+pub fn summarize(path: &Path) -> Result<OtdSummary, OtdError> {
     let mut nets: Vec<NetRow> = Vec::new();
     let mut pins: Vec<PinRow> = Vec::new();
     // Name hash -> index of the first object with it; a hit is confirmed by
     // comparing the names, so a hash collision is never reported as a duplicate.
     let mut seen_nets: HashMap<u64, usize> = HashMap::new();
     let mut seen_instances: HashMap<u64, usize> = HashMap::new();
-    let (header, windows) = parse_otw(path, |block: Collector| {
+    let (header, windows) = parse_otd(path, |block: Collector| {
         let net_base = nets.len();
         let pin_base = pins.len();
         nets.extend(block.nets);
@@ -817,7 +817,7 @@ pub fn summarize(path: &Path) -> Result<OtwSummary, OtwError> {
             let index = net_base + offset;
             if let Some(&first) = seen_nets.get(&hash) {
                 if nets[first].0 == nets[index].0 {
-                    return Err(OtwError::Malformed(format!(
+                    return Err(OtdError::Malformed(format!(
                         "{}: net `{}` is declared more than once",
                         path.display(),
                         nets[index].0
@@ -831,7 +831,7 @@ pub fn summarize(path: &Path) -> Result<OtwSummary, OtwError> {
             let index = pin_base + offset;
             if let Some(&first) = seen_instances.get(&hash) {
                 if pins[first].0 == pins[index].0 {
-                    return Err(OtwError::Malformed(format!(
+                    return Err(OtdError::Malformed(format!(
                         "{}: instance `{}` has more than one `i` group",
                         path.display(),
                         pins[index].0
@@ -843,7 +843,7 @@ pub fn summarize(path: &Path) -> Result<OtwSummary, OtwError> {
         }
         Ok(())
     })?;
-    Ok(OtwSummary {
+    Ok(OtdSummary {
         design: header.design,
         time_unit: header.time_unit,
         cap_unit: header.cap_unit,
@@ -972,8 +972,8 @@ impl Sink for CsvBlock {
     }
 }
 
-fn write_windows_csv<W: Write>(path: &Path, mut out: W) -> Result<u64, OtwError> {
-    let io_err = |err: io::Error| OtwError::Io(err.to_string());
+fn write_windows_csv<W: Write>(path: &Path, mut out: W) -> Result<u64, OtdError> {
+    let io_err = |err: io::Error| OtdError::Io(err.to_string());
     let mut head = String::from("kind,instance,name,role,object_attrs,clock,edge,window_role");
     for column in WINDOW_COLUMNS.iter().chain(&RANGE_ATTRS) {
         head.push(',');
@@ -982,7 +982,7 @@ fn write_windows_csv<W: Write>(path: &Path, mut out: W) -> Result<u64, OtwError>
     head.push_str(",window_attrs\n");
     out.write_all(head.as_bytes()).map_err(io_err)?;
     let mut rows = 0u64;
-    parse_otw(path, |mut block: CsvBlock| {
+    parse_otd(path, |mut block: CsvBlock| {
         block.flush_pending();
         rows += block.rows;
         out.write_all(block.text.as_bytes()).map_err(io_err)
@@ -991,31 +991,31 @@ fn write_windows_csv<W: Write>(path: &Path, mut out: W) -> Result<u64, OtwError>
     Ok(rows)
 }
 
-/// Read an OTW file (`.otw` or `.otw.gz`) into its per-object summary.
+/// Read an OTD file (`.otd` or `.otd.gz`) into its per-object summary.
 #[pyfunction]
-fn read_otw(py: Python<'_>, path: PathBuf) -> PyResult<OtwSummary> {
-    py.detach(|| summarize(&path)).map_err(OtwError::into_py)
+fn read_otd(py: Python<'_>, path: PathBuf) -> PyResult<OtdSummary> {
+    py.detach(|| summarize(&path)).map_err(OtdError::into_py)
 }
 
 /// Dump every object and window as CSV; returns the row count.
 #[pyfunction]
 #[pyo3(signature = (path, output = None))]
-fn write_otw_windows_csv(py: Python<'_>, path: PathBuf, output: Option<PathBuf>) -> PyResult<u64> {
+fn write_otd_windows_csv(py: Python<'_>, path: PathBuf, output: Option<PathBuf>) -> PyResult<u64> {
     py.detach(|| match &output {
         Some(target) => {
             let file = File::create(target)
-                .map_err(|err| OtwError::Io(format!("{}: {err}", target.display())))?;
+                .map_err(|err| OtdError::Io(format!("{}: {err}", target.display())))?;
             write_windows_csv(&path, BufWriter::new(file))
         }
         None => write_windows_csv(&path, BufWriter::new(io::stdout().lock())),
     })
-    .map_err(OtwError::into_py)
+    .map_err(OtdError::into_py)
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<OtwSummary>()?;
-    m.add_function(wrap_pyfunction!(read_otw, m)?)?;
-    m.add_function(wrap_pyfunction!(write_otw_windows_csv, m)?)?;
+    m.add_class::<OtdSummary>()?;
+    m.add_function(wrap_pyfunction!(read_otd, m)?)?;
+    m.add_function(wrap_pyfunction!(write_otd_windows_csv, m)?)?;
     Ok(())
 }
 
@@ -1024,12 +1024,12 @@ mod tests {
     use super::*;
 
     fn write_temp(name: &str, text: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("otw-{}-{name}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("otd-{}-{name}", std::process::id()));
         std::fs::write(&path, text).unwrap();
         path
     }
 
-    fn summary_of(name: &str, text: &str) -> Result<OtwSummary, OtwError> {
+    fn summary_of(name: &str, text: &str) -> Result<OtdSummary, OtdError> {
         let path = write_temp(name, text);
         let result = summarize(&path);
         std::fs::remove_file(&path).unwrap();
@@ -1038,7 +1038,7 @@ mod tests {
 
     fn malformed(name: &str, text: &str) -> String {
         match summary_of(name, text) {
-            Err(OtwError::Malformed(message)) => message,
+            Err(OtdError::Malformed(message)) => message,
             _ => panic!("expected a malformed-file error for {name}"),
         }
     }
@@ -1049,7 +1049,7 @@ mod tests {
 
     const SAMPLE: &str = "\
 # produced by a test
-otw 1
+otd 1
 design top
 time_unit 1e-9
 cap_unit 1e-12
@@ -1076,7 +1076,7 @@ end 3 3 5
 
     #[test]
     fn summary_reads_header_nets_pins_domains_and_attributes() {
-        let summary = summary_of("summary.otw", SAMPLE).unwrap();
+        let summary = summary_of("summary.otd", SAMPLE).unwrap();
 
         assert_eq!(summary.design, "top");
         assert_eq!(summary.time_unit, Some(1e-9));
@@ -1129,7 +1129,7 @@ end 3 3 5
 
     #[test]
     fn csv_dump_has_a_row_per_window_and_per_windowless_object() {
-        let path = write_temp("dump.otw", SAMPLE);
+        let path = write_temp("dump.otd", SAMPLE);
         let mut out = Vec::new();
         let rows = write_windows_csv(&path, &mut out).unwrap();
         std::fs::remove_file(&path).unwrap();
@@ -1157,7 +1157,7 @@ end 3 3 5
     fn blocks_cut_at_group_boundaries_give_the_same_answer() {
         // Enough groups to span many parallel blocks, with a mid-file error
         // check below that depends on line numbers adding up across blocks.
-        let mut body = String::from("otw 1\nclock k 1 0 0.5\n");
+        let mut body = String::from("otd 1\nclock k 1 0 0.5\n");
         let groups = 400_000u64;
         for index in 0..groups {
             body.push_str(&format!(
@@ -1169,7 +1169,7 @@ end 3 3 5
         }
         let good = format!("{body}end {groups} {} {}\n", groups * 2, groups * 2);
         assert!(good.len() > 4 * BLOCK_BYTES);
-        let summary = summary_of("many.otw", &good).unwrap();
+        let summary = summary_of("many.otd", &good).unwrap();
         assert_eq!(summary.nets.len() as u64, groups);
         assert_eq!(summary.pins.len() as u64, groups * 2);
         assert_eq!(summary.nets[399_999].0, "net_399999");
@@ -1180,29 +1180,29 @@ end 3 3 5
 
         let bad_line = 2 + 6 * 300_000 + 1;
         let bad = good.replacen("n net_300000 d", "n net_300000 q", 1);
-        assert!(malformed("many_bad.otw", &bad).contains(&format!(":{bad_line}: `n` role")));
+        assert!(malformed("many_bad.otd", &bad).contains(&format!(":{bad_line}: `n` role")));
     }
 
     #[test]
     fn rejects_what_it_cannot_read_and_names_the_line() {
-        let clock = "otw 1\nclock k 1 0 0.5\n";
+        let clock = "otd 1\nclock k 1 0 0.5\n";
         let cases: [(&str, String, &str); 25] = [
-            ("a", text("(TIMING_WINDOWS\n"), "not an OTW file"),
-            ("b", text("otw 2\n"), "unsupported OTW version"),
-            ("c", text("otw 1\nn a x\nend 1 0 0\n"), ":2: `n` role"),
+            ("a", text("(TIMING_WINDOWS\n"), "not an OTD file"),
+            ("b", text("otd 2\n"), "unsupported OTD version"),
+            ("c", text("otd 1\nn a x\nend 1 0 0\n"), ":2: `n` role"),
             (
                 "d",
-                text("otw 1\nn a d\nn a c\nend 2 0 0\n"),
+                text("otd 1\nn a d\nn a c\nend 2 0 0\n"),
                 "more than once",
             ),
             (
                 "e",
-                text("otw 1\nw 0 r c 1 2 3 4 5 6 7 8\n"),
+                text("otd 1\nw 0 r c 1 2 3 4 5 6 7 8\n"),
                 ":2: `w` line before any",
             ),
             (
                 "f",
-                text("otw 1\nn a c\nw 0 r c 1 2 3 4 5 6 7 8\nend 1 0 1\n"),
+                text("otd 1\nn a c\nw 0 r c 1 2 3 4 5 6 7 8\nend 1 0 1\n"),
                 "declared clocks",
             ),
             (
@@ -1217,102 +1217,102 @@ end 3 3 5
             ),
             (
                 "i",
-                text("otw 1\nn a c\ndesign late\nend 1 0 0\n"),
+                text("otd 1\nn a c\ndesign late\nend 1 0 0\n"),
                 ":3: unknown record",
             ),
-            ("j", text("otw 1\nn a c stray\nend 1 0 0\n"), "key=value"),
+            ("j", text("otd 1\nn a c stray\nend 1 0 0\n"), "key=value"),
             (
                 "k",
-                text("otw 1\nn a c clocks=0\nend 1 0 0\n"),
+                text("otd 1\nn a c clocks=0\nend 1 0 0\n"),
                 "declared clocks",
             ),
             (
                 "l",
-                text("otw 1\nn a c freq=-1\nend 1 0 0\n"),
+                text("otd 1\nn a c freq=-1\nend 1 0 0\n"),
                 "non-negative",
             ),
             (
                 "m",
-                text("otw 1\nn a d\nw - r d 1 2 3 4 5 6 7 8\nend 1 0 1\n"),
+                text("otd 1\nn a d\nw - r d 1 2 3 4 5 6 7 8\nend 1 0 1\n"),
                 "takes edge `-`",
             ),
             (
                 "n",
-                text("otw 1\nn a d\nw - - d 1 2 3 4 5 6 7 8 rise_slack=soon\nend 1 0 1\n"),
+                text("otd 1\nn a d\nw - - d 1 2 3 4 5 6 7 8 rise_slack=soon\nend 1 0 1\n"),
                 "rise_slack must be",
             ),
             (
                 "o",
-                text("otw 1\nslew_thresholds 90 10\n"),
+                text("otd 1\nslew_thresholds 90 10\n"),
                 "0 <= low < high",
             ),
-            ("p", text("otw 1\nres_unit 0\n"), "res_unit must be"),
+            ("p", text("otd 1\nres_unit 0\n"), "res_unit must be"),
             (
                 "q",
-                text("otw 1\nn a z value=x\nend 1 0 0\n"),
+                text("otd 1\nn a z value=x\nend 1 0 0\n"),
                 "value must be 0 or 1",
             ),
             (
                 "r",
-                text("otw 1\ni -\np a d drive_rise=fast\nend 0 1 0\n"),
+                text("otd 1\ni -\np a d drive_rise=fast\nend 0 1 0\n"),
                 "drive_rise",
             ),
             (
                 "s",
-                text("otw 1\nn a d\nw - - d 1e-3 2 3 4 5 6 7 8\nend 1 0 1\n"),
+                text("otd 1\nn a d\nw - - d 1e-3 2 3 4 5 6 7 8\nend 1 0 1\n"),
                 "decimal without exponent",
             ),
-            ("t", text("otw 1\nn a d\n"), "no `end` line"),
+            ("t", text("otd 1\nn a d\n"), "no `end` line"),
             (
                 "u",
-                text("otw 1\nn a d\nend 2 0 0\n"),
+                text("otd 1\nn a d\nend 2 0 0\n"),
                 "does not match the file",
             ),
             (
                 "v",
-                text("otw 1\nn a d\nend 1 0 0\nn b d\n"),
+                text("otd 1\nn a d\nend 1 0 0\nn b d\n"),
                 ":4: content after the `end` line",
             ),
             (
                 "w",
-                text("otw 1\nn a d\np A d\nend 1 1 0\n"),
+                text("otd 1\nn a d\np A d\nend 1 1 0\n"),
                 ":3: `p` line outside an `i` group",
             ),
             (
                 "x",
-                text("otw 1\ni u\np A d\np A c\nend 0 2 0\n"),
+                text("otd 1\ni u\np A d\np A c\nend 0 2 0\n"),
                 "pin `u A` is declared more than once",
             ),
             (
                 "ab",
-                text("otw 1\nclock k 1 0 0.5\nclock k 2 0 1\n"),
+                text("otd 1\nclock k 1 0 0.5\nclock k 2 0 1\n"),
                 ":3: clock `k` is declared more than once",
             ),
         ];
         for (name, content, expected) in cases {
-            let message = malformed(&format!("{name}.otw"), &content);
+            let message = malformed(&format!("{name}.otd"), &content);
             assert!(message.contains(expected), "{name}: {message}");
         }
         assert!(
             malformed(
-                "y.otw",
-                "otw 1\ni u\np A d\ni v\np A d\ni u\np B d\nend 0 3 0\n"
+                "y.otd",
+                "otd 1\ni u\np A d\ni v\np A d\ni u\np B d\nend 0 3 0\n"
             )
             .contains("instance `u` has more than one `i` group")
         );
         assert!(
-            malformed("z.otw", "otw 1\ni u\nw - - d 1 2 3 4 5 6 7 8\nend 0 0 1\n")
+            malformed("z.otd", "otd 1\ni u\nw - - d 1 2 3 4 5 6 7 8\nend 0 0 1\n")
                 .contains("`w` line with no `n` or `p` object above it")
         );
-        assert!(malformed("aa.otw", "otw 1\nn caf\u{e9} d\nend 1 0 0\n").contains("non-ASCII"));
+        assert!(malformed("aa.otd", "otd 1\nn caf\u{e9} d\nend 1 0 0\n").contains("non-ASCII"));
         assert!(
             summary_of(
-                "ok.otw",
-                "otw 1\nn a z value=0\ni -\np o d load=0:0.2\nend 1 1 0\n"
+                "ok.otd",
+                "otd 1\nn a z value=0\ni -\np o d load=0:0.2\nend 1 1 0\n"
             )
             .is_ok()
         );
-        assert!(summary_of("empty.otw", "otw 1\nend 0 0 0\n").is_ok());
-        assert!(summary_of("crlf.otw", "otw 1\r\nn a d\r\nend 1 0 0\r\n").is_ok());
+        assert!(summary_of("empty.otd", "otd 1\nend 0 0 0\n").is_ok());
+        assert!(summary_of("crlf.otd", "otd 1\r\nn a d\r\nend 1 0 0\r\n").is_ok());
     }
 }
