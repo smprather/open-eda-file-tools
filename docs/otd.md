@@ -204,6 +204,12 @@ n <net> <role> [attrs]
 
 Declares a net. A net MUST NOT be declared more than once in a file.
 
+A writer MUST emit net windows only for a net with one known driver. The
+arrival and slew values describe switching at that driver pin or top-level
+port. Use pin windows for arrival and slew at sinks. Nets with an unknown
+driver or multiple drivers may still carry a role and attributes. For
+example, a multi-driver clock mesh can be declared `c` with zero windows.
+
 ### 5.2 Instances and pins
 
 ```text
@@ -276,6 +282,9 @@ w <clock> <edge> <role> <rise_early> <rise_late> <fall_early> <fall_late>
 
 A `value` of `-` means the quantity does not exist: the transition does not
 occur. Arrival times are relative to the time origin of the clock waveforms.
+Windows describe driven transitions between logic levels. Writers MUST omit
+transitions into or out of high impedance. The `z` role denotes a constant
+logic value.
 
 - A window with role `c` MUST NOT appear on an object whose role is not `c`.
 - An object MAY have several windows, including several for the same clock and
