@@ -5,7 +5,7 @@
 | Format version | `1` |
 | Status | **Draft.** Implemented by `open-eda-file-tools`; may change before it is frozen. |
 | File extensions | `.otd`, `.otd.gz` |
-| Reference implementation | reader `src/otd.rs`, reader/writer `def_tools/otd.py` |
+| Reference implementation | Reader `src/otd.rs`, reader/writer `def_tools/otd.py`. Implementation of the required field guide and cell-arc observations is pending. |
 
 ## 1. Introduction
 
@@ -58,6 +58,8 @@ An OTD file describes **one design at one analysis corner**. It holds:
 - for each object, zero or more **windows**. A window describes the switching
   of the object caused by one edge of one clock (or by no clock): when the
   rising and falling transitions can arrive, and how fast they are.
+- for each window, zero or more **cell-arc observations**, which identify the
+  contributing input pin and describe its delay to the output pin.
 
 Where a source of data holds best/typical/worst values, each corner is a
 separate OTD file.
@@ -81,9 +83,36 @@ separate OTD file.
 
 ### 3.2 Order
 
-A file is, in order: the version line, the header lines, the groups, the `end`
-line. Only ignorable lines may precede the version line or follow the `end`
-line. The first `n`, `i` or `end` line ends the header.
+Writers MUST begin the file's uncompressed text with the following field
+guide. Readers handle it as ordinary comments. Extra comments may follow it.
+
+```text
+# OTD 1 field guide. Brackets enclose optional fields.
+# otd version
+# design name
+# time_unit seconds_per_unit
+# cap_unit farads_per_unit
+# res_unit ohms_per_unit
+# slew_thresholds low_pct high_pct
+# clock name period rise_edge fall_edge [key=value ...]
+# n net role [key=value ...]
+# i instance (- for top-level ports)
+# p pin role [key=value ...]
+# w launch_clock launch_edge role rise_early rise_late fall_early fall_late rise_slew_min rise_slew_max fall_slew_min fall_slew_max [key=value ...]
+# a output_edge input_pin input_edge delay [tags=list] [output_arrival=time] [key=value ...]
+# end net_count pin_count window_count
+# Roles: c clock, d data, u unconstrained, z constant. Edges: r rise, f fall.
+# On w, - marks an absent launch clock, launch edge, or transition value.
+# Clock indices start at 0. Arrivals, slews, and delays use time_unit.
+# Common object attrs: clocks (indices), freq (Hz), load, value, drive_rise, drive_fall.
+# Window attrs include rise_res, fall_res, rise_slack, and fall_slack.
+# A range uses min:max or one value for both bounds.
+# Arc tags min_delay and max_delay describe the extrema for the output edge.
+```
+
+After comments and blank lines are skipped, the file starts with the
+version line, then the header lines, the groups, and the `end` line. The
+first `n`, `i` or `end` line ends the header.
 
 ### 3.3 Groups
 
@@ -92,6 +121,8 @@ The body is a sequence of **groups**:
 - a **net group**: one `n` line followed by that net's `w` lines;
 - an **instance group**: one `i` line followed by the instance's `p` lines,
   each `p` line followed by that pin's `w` lines.
+
+Any `w` line may be followed by its `a` lines before the next window or object.
 
 A group is self-contained. It refers to nothing outside itself except clock
 indices from the header. **The order of groups carries no meaning**; a reader
@@ -115,13 +146,17 @@ clock        = %s"clock" SEP name SEP real SEP real SEP real attrs
 free         = key [ SEP text ]
 
 group        = net-group / inst-group
-net-group    = net-line *( ignorable / window-line )
-inst-group   = inst-line *( ignorable / pin-line / window-line )
+net-group    = net-line *( ignorable / window-group )
+inst-group   = inst-line *( ignorable / pin-group )
+pin-group    = pin-line *( ignorable / window-group )
+window-group = window-line *( ignorable / arc-line )
 net-line     = %s"n" SEP name SEP role attrs EOL
 inst-line    = %s"i" SEP name EOL             ; name "-" = the design itself
 pin-line     = %s"p" SEP name SEP role attrs EOL
 window-line  = %s"w" SEP cause SEP role 8( SEP value ) attrs EOL
-cause        = ( index SEP ( %s"r" / %s"f" ) ) / ( "-" SEP "-" )
+arc-line     = %s"a" SEP transition SEP name SEP transition SEP decimal attrs EOL
+cause        = ( index SEP transition ) / ( "-" SEP "-" )
+transition   = %s"r" / %s"f"
 
 end-line     = %s"end" SEP count SEP count SEP count EOL
                                               ; nets, pins, windows
@@ -148,17 +183,18 @@ ignorable    = *( SP / HTAB ) [ "#" *( NCHAR / SP / HTAB ) ] EOL
 ```
 
 Keywords and roles are lower case and case-sensitive. In an instance group a
-`w` line belongs to the nearest `p` line above it; a `w` line directly after
-the `i` line is an error.
+`w` line belongs to the nearest `p` line above it. An `a` line belongs to the
+nearest `w` line of the same object above it.
 
 ### 3.5 Numbers
 
 OTD has two number forms, on purpose:
 
 - **`decimal`** — fixed point, no exponent, no `inf`/`nan`. Used for every
-  number in the body that occurs in bulk: the eight window values and every
-  `range`. A reader can validate one with a byte scan and convert it without a
-  general floating-point parser; a writer can emit one from a scaled integer.
+  number in the body that occurs in bulk: the eight window values, arc delays
+  and arrivals, and every `range`. A reader can validate one with a byte scan
+  and convert it without a general floating-point parser. A writer can emit
+  one from a scaled integer.
   A writer SHOULD choose `time_unit` so that values need few digits, and
   SHOULD NOT write more fractional digits than the data is good for.
 - **`real`** — exponent allowed. Used in the header and in the `freq`
@@ -179,8 +215,8 @@ OTD has two number forms, on purpose:
 
 A writer MUST write `time_unit` if the file contains any window, `res_unit`
 if it writes any resistance and `cap_unit` if it writes any load. A header key
-other than `clock` MUST NOT appear more than once. The keys `n`, `i`, `p`, `w`
-and `end` are not available as free attribute keys.
+other than `clock` MUST NOT appear more than once. The keys `n`, `i`, `p`, `w`,
+`a` and `end` are reserved for records.
 
 Registered `clock` attributes:
 
@@ -220,6 +256,12 @@ p <pin> <role> [attrs]
 `i` opens an instance group; each following `p` line declares one pin of that
 instance. The instance name `-` denotes the design itself, so its pins are the
 top-level ports.
+
+An instance group may list any subset of its pins. Each declared driver pin,
+sink pin, or port may carry its own windows. A pin-only file can report
+driver timing on the driver pin. A mixed file may report a driver's timing
+on its pin, on its driven net, or on both. When both describe the same
+switching event, consumers should treat them as two views of that event.
 
 - An instance MUST NOT have more than one group in a file.
 - A pin MUST NOT be declared more than once in its group.
@@ -298,6 +340,57 @@ Registered window attributes, each a `range`:
 | `rise_res`, `fall_res` | Resistance of the source driving the rising / falling transition, in `res_unit`. |
 | `rise_slack`, `fall_slack` | Slack of the rising / falling transition, in `time_unit`. Omitted when no slack was computed. |
 
+### 6.1 Cell-arc observations
+
+```text
+a <output_edge> <input_pin> <input_edge> <delay> [attrs]
+```
+
+A window MAY carry zero or more `a` records. Each describes an evaluated cell
+propagation arc leading to a transition in the parent window. The arc ends at
+the net's sole driving pin for a net window, or at the declared output pin for
+a pin window. The input pin is named within the same instance. A sequential
+propagation arc, such as clock-to-Q, can be reported the same way.
+
+| Field | Value | Meaning |
+| --- | --- | --- |
+| `output_edge` | `r` or `f` | Signal transition at the output. The parent window MUST have an arrival bound for this transition. |
+| `input_pin` | `name` | Instance-local input that contributes to the output transition. |
+| `input_edge` | `r` or `f` | Signal transition at that input. |
+| `delay` | `decimal` | Increment from the input pin's arrival to the output pin's arrival for this arc, in `time_unit`. |
+
+Registered arc attributes:
+
+| Attribute | Value | Meaning |
+| --- | --- | --- |
+| `tags` | `min_delay`, `max_delay`, or both, comma-separated | The arc realizes the numerical minimum or maximum evaluated delay among the arcs contributing to this window for this output edge. Both tags may appear on one observation when the extrema coincide. |
+| `output_arrival` | `decimal` | Output arrival of this same observation, in `time_unit` and relative to the window's time origin. If supplied, it MUST lie within the available arrival bounds for its output edge. |
+
+A writer MAY report selected observations, including the minimum and maximum
+for each output edge, the arcs that set the window's arrival bounds, or other
+contributing cases. An observation can carry a delay and input pin even when
+the exact output arrival of that case is unavailable.
+
+```text
+n data d
+w - - d 0.100 0.150 - - 0.010 0.025 - -
+a r A r 0.012 tags=min_delay
+a r B f 0.040 tags=max_delay output_arrival=0.130
+```
+
+### 6.2 Sliding supply averaging (informative)
+
+For a positive arc delay `d`, step the end time `t` of the averaging interval over
+the output edge's early-to-late arrival window. At each step, average the
+driver's local `VDD - VSS` over `[t - d, t]`. The lowest average across the sampled
+steps and selected widths gives the largest measured compression for that
+sweep. Use the same time origin for the supply trace and the OTD window.
+
+The sweep evaluates possible placements of an interval. An observation with
+`output_arrival` also identifies a particular STA case. Minimum-delay observations
+supply the narrowest intervals. A wider interval can pick up a droop missed by
+the narrower sweep.
+
 ## 7. The `end` line
 
 ```text
@@ -314,7 +407,7 @@ The last record. Its three counts are the number of `n` lines, `p` lines and
 
 ## 8. Attributes and extension
 
-Any `clock`, `n`, `p` or `w` line may end with `key=value` tokens. Nothing
+Any `clock`, `n`, `p`, `w` or `a` line may end with `key=value` tokens. Nothing
 else may follow the positional fields.
 
 - A reader MUST validate the registered attributes (sections 4 to 6) and MUST
@@ -323,8 +416,8 @@ else may follow the positional fields.
 - Unregistered keys are free for tools to use. A tool-specific key SHOULD carry
   a prefix naming the tool (`acme_sigma=3`), so later versions of this
   specification can register plain keys without collision.
-- A change that an existing reader would misread — a new record type, a new
-  positional field, a new role — requires a new format version.
+- Once a version is frozen, a change that an existing reader would misread,
+  such as a new record type, positional field or role, requires a new version.
 
 ## 9. Compression and parallelism
 
@@ -382,8 +475,8 @@ when:
 5. a role is not one of `c`, `d`, `u`, `z`;
 6. a net is declared twice, an instance has two groups, or a pin is declared
    twice in its group;
-7. a `p` line is outside an instance group, or a `w` line has no `n` or `p`
-   line above it in its group;
+7. a `p` line is outside an instance group, a `w` line has no `n` or `p` line
+   above it in its group, or an `a` line has no parent window on its object;
 8. a token after the positional fields is not `key=value`;
 9. a registered attribute is malformed: `clocks` names an undeclared clock,
    `freq` is negative, `value` is not `0`/`1`, a `range` is not decimals;
@@ -391,8 +484,10 @@ when:
     clock, has fewer than eight values, or a value that is neither a `decimal`
     nor `-`;
 11. a window with role `c` is on an object not declared `c`;
-12. a header line appears after the first group;
-13. there is no `end` line, its counts do not match the file, or a record
+12. an arc observation has an invalid field or attribute, or its output
+    transition or arrival conflicts with the parent window (§6.1);
+13. a header line appears after the first group;
+14. there is no `end` line, its counts do not match the file, or a record
     follows it.
 
 A reader MUST NOT repair or guess: a file that fails any check yields no data.
@@ -416,6 +511,7 @@ What timing-window files in the field carry, and where it lives in OTD:
 | Launching clock and edge of a window; no launching clock | `w <clock> <edge>`; `w - -` |
 | Min/max rise and fall arrival window | `rise_early rise_late fall_early fall_late` |
 | Min/max rise and fall transition time | `rise_slew_min rise_slew_max fall_slew_min fall_slew_max` |
+| Input pin, cell-arc delay extrema, and observed output arrival | `a` records within a window |
 | Min/max rise and fall source resistance | `rise_res=`, `fall_res=` |
 | Min/max rise and fall slack | `rise_slack=`, `fall_slack=` |
 | Absent transition / value | `-`, or the attribute is omitted |
@@ -431,6 +527,27 @@ What timing-window files in the field carry, and where it lives in OTD:
 ## Appendix A — Complete example (informative)
 
 ```text
+# OTD 1 field guide. Brackets enclose optional fields.
+# otd version
+# design name
+# time_unit seconds_per_unit
+# cap_unit farads_per_unit
+# res_unit ohms_per_unit
+# slew_thresholds low_pct high_pct
+# clock name period rise_edge fall_edge [key=value ...]
+# n net role [key=value ...]
+# i instance (- for top-level ports)
+# p pin role [key=value ...]
+# w launch_clock launch_edge role rise_early rise_late fall_early fall_late rise_slew_min rise_slew_max fall_slew_min fall_slew_max [key=value ...]
+# a output_edge input_pin input_edge delay [tags=list] [output_arrival=time] [key=value ...]
+# end net_count pin_count window_count
+# Roles: c clock, d data, u unconstrained, z constant. Edges: r rise, f fall.
+# On w, - marks an absent launch clock, launch edge, or transition value.
+# Clock indices start at 0. Arrivals, slews, and delays use time_unit.
+# Common object attrs: clocks (indices), freq (Hz), load, value, drive_rise, drive_fall.
+# Window attrs include rise_res, fall_res, rise_slack, and fall_slack.
+# A range uses min:max or one value for both bounds.
+# Arc tags min_delay and max_delay describe the extrema for the output edge.
 # net-based and pin-based objects in one file
 otd 1
 design top
