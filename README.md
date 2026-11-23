@@ -254,4 +254,20 @@ stubs in the same commit.
 
 Releases use calendar versions (`YYYY.M.D`, or `YYYY.M.D.N` for a second
 release on the same day), and every tool is released together under that one
-version. Licensed under the [MIT License](LICENSE).
+version. This project's original software is distributed under the
+[MIT License](LICENSE).
+
+### Format interoperability and third-party rights
+
+The project supports Liberty, Synopsys Design Constraints (SDC), and Standard
+Parasitic Exchange Format (SPEF) as widely used interchange formats. Format and
+product names identify compatibility. This project is independently maintained.
+Third-party trademarks belong to their respective owners.
+
+Third-party specifications, reference implementations, cell libraries, PDKs,
+and design data are subject to their respective license and access terms. Users
+are responsible for obtaining any permissions required to access, use, or
+redistribute those materials.
+
+Synopsys provides the Liberty and SDC reference materials through TAP-in.
+SPEF is specified in IEEE 1481. [Synopsys TAP-in](https://www.synopsys.com/community/interoperability-programs/tap-in.html) · [IEEE 1481](https://standards.ieee.org/ieee/1481/3339/)
