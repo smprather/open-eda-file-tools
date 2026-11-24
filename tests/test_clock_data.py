@@ -14,6 +14,7 @@ out below, not derived from the code under test.
 
 from __future__ import annotations
 
+import csv
 import gzip
 from pathlib import Path
 
@@ -33,7 +34,7 @@ from def_tools.clock_data import (
     register_backend,
 )
 from def_tools.clock_roles import cell_clock_roles
-from def_tools.otd import OtdClock, OtdWindow, read_otd, write_otd
+from def_tools.otd import OtdClock, OtdWindow, read_otd, write_otd, write_otd_windows_csv
 
 CLOCK_TREE = ["u_b\\[1\\]", "u_buf", "u_div", "u_gbuf", "u_icg"]
 
@@ -405,6 +406,59 @@ def test_write_otd_numbers_are_fixed_point_without_exponent(tmp_path: Path) -> N
 
     assert "w 0 r d 0.00001 2.5 - - 0 0 - - rise_slack=-0.25:0.0000001" in path.read_text()
     assert read_otd(path).windows == 1
+
+
+def test_otd_round_trips_optional_net_drivers(tmp_path: Path) -> None:
+    path = tmp_path / "drivers.otd.gz"
+    drivers = {"leaf": ("u_top/u_buf", "Q[0]"), "root": ("-", "clk")}
+    write_otd(
+        path,
+        nets={"leaf": "c", "root": "c", "mesh": "c"},
+        net_drivers=drivers,
+        object_attributes={"leaf": {"freq": "1e8"}},
+    )
+
+    parsed = read_otd(path)
+    assert parsed.net_drivers == drivers
+    assert parsed.object_attributes == {"leaf": {"freq": "1e8"}}
+    assert parsed.pins == {}
+
+    output = tmp_path / "windows.csv"
+    write_otd_windows_csv(path, output)
+    with output.open(newline="") as stream:
+        rows = {row["name"]: row for row in csv.DictReader(stream)}
+    assert rows["leaf"]["object_attrs"] == "driver_instance=u_top/u_buf driver_pin=Q[0] freq=1e8"
+    assert rows["root"]["object_attrs"] == "driver_instance=- driver_pin=clk"
+    assert rows["mesh"]["object_attrs"] == ""
+
+
+@pytest.mark.parametrize(
+    ("records", "message"),
+    [
+        ("n a c driver_instance=u\nend 1 0 0", "must appear together"),
+        ("n a c driver_pin=Q\nend 1 0 0", "must appear together"),
+        ("n a c driver_instance=u driver_pin=Q driver_pin=Y\nend 1 0 0", "more than once"),
+        ("i u\np Q c driver_instance=u driver_pin=Q\nend 0 1 0", "only on net records"),
+        ("n a c driver_instance=u driver_pin=Q\x07\nend 1 0 0", "visible ASCII"),
+    ],
+)
+def test_otd_reader_rejects_invalid_driver_attributes(
+    tmp_path: Path, records: str, message: str
+) -> None:
+    path = tmp_path / "bad-driver.otd"
+    path.write_text(f"otd 1\n{records}\n", encoding="ascii")
+    with pytest.raises(ValueError, match=message):
+        read_otd(path)
+
+
+def test_otd_writer_rejects_invalid_driver_data(tmp_path: Path) -> None:
+    path = tmp_path / "bad-driver.otd"
+    with pytest.raises(ValueError, match="undeclared net"):
+        write_otd(path, nets={"a": "c"}, net_drivers={"b": ("u", "Q")})
+    with pytest.raises(ValueError, match="visible ASCII"):
+        write_otd(path, nets={"a": "c"}, net_drivers={"a": ("u", "Q\x07")})
+    with pytest.raises(ValueError, match="attribute 'driver_pin' is not allowed"):
+        write_otd(path, nets={"a": "c"}, object_attributes={"a": {"driver_pin": "Q"}})
 
 
 def test_gzip_members_may_be_concatenated(tmp_path: Path) -> None:

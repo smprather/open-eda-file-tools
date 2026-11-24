@@ -246,6 +246,14 @@ port. Use pin windows for arrival and slew at sinks. Nets with an unknown
 driver or multiple drivers may still carry a role and attributes. For
 example, a multi-driver clock mesh can be declared `c` with zero windows.
 
+A writer MAY identify the net's sole driver with the `driver_instance` and
+`driver_pin` attributes. The pair is optional even when the net has windows.
+Omitting it leaves the driver's identity unspecified.
+Both attributes MUST appear together, once each, as names (§5.3). An instance
+of `-` identifies a driving top-level port. The names identify a pin in the
+design, so they work in a net-only file. The writer is responsible for
+matching the design's connectivity.
+
 ### 5.2 Instances and pins
 
 ```text
@@ -298,6 +306,7 @@ separately MUST apply this rule.
 | `load` | `range` | External capacitive load, in `cap_unit`. |
 | `value` | `0` or `1` | Logic value of a constant (`z`) object. |
 | `drive_rise`, `drive_fall` | `range` | Strength of whatever drives a top-level input port for the rising / falling transition, as a resistance in `res_unit`. |
+| `driver_instance`, `driver_pin` | two `name` values | Optional instance and pin of the sole driver, on `n` records only (§5.1). |
 
 A `range` is `min:max`, or a single `decimal` standing for both. Where an
 analysis yields an early (hold) and a late (setup) figure, they are the `min`
@@ -479,7 +488,8 @@ when:
    above it in its group, or an `a` line has no parent window on its object;
 8. a token after the positional fields is not `key=value`;
 9. a registered attribute is malformed: `clocks` names an undeclared clock,
-   `freq` is negative, `value` is not `0`/`1`, a `range` is not decimals;
+   `freq` is negative, `value` is not `0`/`1`, a `range` is not decimals,
+   or a net driver pair violates §5.1;
 10. a `w` line names an undeclared clock, has an edge that does not fit its
     clock, has fewer than eight values, or a value that is neither a `decimal`
     nor `-`;
@@ -508,6 +518,7 @@ What timing-window files in the field carry, and where it lives in OTD:
 | Clock source, generated-clock master | `clock ... source= master=` |
 | Virtual clocks (a waveform with no source) | `clock` with no `source=` |
 | Per net **or** per pin records | `n` / `i` + `p` |
+| Driving pin of a net | `driver_instance=` and `driver_pin=` on `n` |
 | Launching clock and edge of a window; no launching clock | `w <clock> <edge>`; `w - -` |
 | Min/max rise and fall arrival window | `rise_early rise_late fall_early fall_late` |
 | Min/max rise and fall transition time | `rise_slew_min rise_slew_max fall_slew_min fall_slew_max` |
@@ -559,7 +570,7 @@ corner ss_0p72v_125c
 program my_sta 2026.11
 clock clk 5 0 2.5 source=clk
 clock clk_div2 10 0 5 master=0 source=u_div/Q
-n clk_leaf_3 c clocks=0 freq=2e8
+n clk_leaf_3 c clocks=0 driver_instance=u_core/u_icg driver_pin=GCK freq=2e8
 w 0 r c 0.582 0.598 0.313 0.344 0.045 0.064 0.063 0.064 rise_res=0.59:0.61
 n data_bus[3] d
 w 0 r d 1.20 3.75 1.18 3.80 0.05 0.11 0.05 0.12 rise_slack=0.31:0.37 fall_slack=0.29:0.36
@@ -629,6 +640,7 @@ write_otd(
     clocks=[OtdClock("clk", 5.0, 0.0, 2.5, (("source", "clk"),))],
     nets={"clk_leaf_3": "c", "data_bus[3]": "d"},
     pins={("u_core/u_icg", "CK"): "c", ("-", "clk"): "c"},
+    net_drivers={"clk_leaf_3": ("u_core/u_icg", "GCK")},
     domains={"clk_leaf_3": [0]},
     object_attributes={"clk_leaf_3": {"freq": "2e8"}},
     windows={
@@ -642,10 +654,12 @@ write_otd(
 otd = read_otd("design.otd.gz")   # header + per-object data; windows are counted, not loaded
 otd.nets                          # {"clk_leaf_3": "c", "data_bus[3]": "d"}
 otd.pins                          # {("u_core/u_icg", "CK"): "c", ("-", "clk"): "c"}
+otd.net_drivers                   # {"clk_leaf_3": ("u_core/u_icg", "GCK")}
 otd.domains                       # {"clk_leaf_3": (0,), "data_bus[3]": (0,)}  (second derived from its window)
 otd.domain_names("clk_leaf_3")    # ("clk",)
 otd.object_attributes             # {"clk_leaf_3": {"freq": "2e8"}}
 ```
 
 `def-tools clock-data --source design.otd.gz --report windows` streams every
-window as CSV, including the resistance and slack ranges.
+window as CSV, including the resistance and slack ranges. The
+`object_attrs` column carries the driver pair when supplied.

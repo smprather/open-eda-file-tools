@@ -305,6 +305,11 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   another group or that makes group order significant — that needs a new
   format version. `docs/otd.md` is the normative spec; change it with the
   reader.
+- **Challenge OTD schema additions.** Weigh what a consumer can do with a
+  field against data duplicated from the design, the risk of stale values,
+  and the cost of writing and reading the field. Define what omission means.
+  A net's optional `driver_instance` and `driver_pin` pair names the driver
+  in the design, including in a net-only OTD file.
 - **OTD body numbers are fixed-point decimals** (no exponent); `real` with an
   exponent is allowed only in the header and `freq`. The reader validates
   decimals by byte scan and never converts window values.

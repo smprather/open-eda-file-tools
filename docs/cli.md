@@ -114,7 +114,7 @@ def-tools clock-data --source [BACKEND:]PATH [--report objects|windows|instances
 ```
 
 - `objects` (default): CSV `kind,instance,name,role` for every net, pin and instance the source describes.
-- `windows`: every OTD timing window as CSV (`kind,instance,name,role,object_attrs,clock,edge,window_role,rise_early,rise_late,fall_early,fall_late,rise_slew_min,rise_slew_max,fall_slew_min,fall_slew_max,rise_res,rise_slack,fall_res,fall_slack,window_attrs`).
+- `windows`: every OTD timing window as CSV (`kind,instance,name,role,object_attrs,clock,edge,window_role,rise_early,rise_late,fall_early,fall_late,rise_slew_min,rise_slew_max,fall_slew_min,fall_slew_max,rise_res,rise_slack,fall_res,fall_slack,window_attrs`). The optional net driver pair appears in `object_attrs`.
 - `instances`: the resolved clock-tree instance names, one per line (needs `--def`; net/pin sources need `--lib`). Same format as `sdc-tools clock-cells`, so the two can be diffed.
 
 ### `def-tools net-shapes`, `cache create`, `clock-instances`, `configure-io`

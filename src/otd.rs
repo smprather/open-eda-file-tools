@@ -202,7 +202,9 @@ pub fn clock_indices(value: &str, declared: usize) -> Result<Vec<usize>, String>
     Ok(indices)
 }
 
-fn check_object_attrs(attrs: &Attrs<'_>, declared: usize) -> Result<(), String> {
+fn check_object_attrs(attrs: &Attrs<'_>, declared: usize, is_net: bool) -> Result<(), String> {
+    let mut driver_instance = false;
+    let mut driver_pin = false;
     for (key, value) in attrs {
         match *key {
             "clocks" => {
@@ -221,8 +223,28 @@ fn check_object_attrs(attrs: &Attrs<'_>, declared: usize) -> Result<(), String> 
                 }
             }
             "load" | "drive_rise" | "drive_fall" => check_range(key, value)?,
+            "driver_instance" | "driver_pin" => {
+                if !is_net {
+                    return Err(format!("`{key}` is allowed only on net records"));
+                }
+                if !value.bytes().all(|byte| byte.is_ascii_graphic()) {
+                    return Err(format!("`{key}` must be a visible ASCII name"));
+                }
+                let seen = if *key == "driver_instance" {
+                    &mut driver_instance
+                } else {
+                    &mut driver_pin
+                };
+                if *seen {
+                    return Err(format!("`{key}` appears more than once"));
+                }
+                *seen = true;
+            }
             _ => {}
         }
+    }
+    if driver_instance != driver_pin {
+        return Err("`driver_instance` and `driver_pin` must appear together".to_string());
     }
     Ok(())
 }
@@ -498,7 +520,7 @@ fn parse_block<S: Sink>(data: &[u8], declared_clocks: usize) -> BlockOut<S> {
                         .ok_or_else(|| "`p` line has no pin name".to_string())?;
                     let role = role_token(tokens.next(), "`p`")?;
                     let attrs = attributes(&mut tokens, "the role")?;
-                    check_object_attrs(&attrs, declared_clocks)?;
+                    check_object_attrs(&attrs, declared_clocks, false)?;
                     if group_pins.contains(&pin) {
                         return Err(format!(
                             "pin `{owner_instance} {pin}` is declared more than once"
@@ -516,7 +538,7 @@ fn parse_block<S: Sink>(data: &[u8], declared_clocks: usize) -> BlockOut<S> {
                         .ok_or_else(|| "`n` line has no net name".to_string())?;
                     let role = role_token(tokens.next(), "`n`")?;
                     let attrs = attributes(&mut tokens, "the role")?;
-                    check_object_attrs(&attrs, declared_clocks)?;
+                    check_object_attrs(&attrs, declared_clocks, true)?;
                     instance = None;
                     owner = Some(role.as_bytes()[0]);
                     out.nets += 1;

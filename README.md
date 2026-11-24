@@ -167,6 +167,7 @@ Clock membership comes from connectivity, never from cell-name patterns. When
 an STA run has already classified nets or pins as clock or data, skip the trace
 and pass that instead: `--clock-data design.otd.gz` reads
 [OTD](docs/otd.md), an open timing-data format defined by this project.
+An OTD net record can optionally name its driving instance and pin.
 Vendor timing-window files are not read here; a reader for one plugs in as a
 named backend (`--twf design.twf.gz` uses the backend called `twf`).
 

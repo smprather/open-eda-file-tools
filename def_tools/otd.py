@@ -10,7 +10,7 @@ from __future__ import annotations
 import gzip
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from liberty_tools._native import read_otd as _read_otd
@@ -30,6 +30,7 @@ WINDOW_FIELDS = (
 )
 PinKey = tuple[str, str]
 ObjectKey = str | PinKey
+_DRIVER_ATTRIBUTES = ("driver_instance", "driver_pin")
 
 
 @dataclass(frozen=True)
@@ -76,9 +77,9 @@ class OtdFile:
 
     ``domains`` maps a net name or pin key to the indices of the clocks that
     reach it: its ``clocks=`` attribute, else the clocks of its windows.
-    ``object_attributes`` holds the other ``key=value`` pairs of an object
-    (``freq`` in hertz, and anything a writer added). Objects with neither are
-    absent from those two maps.
+    ``net_drivers`` maps a net name to its optional driving pin key.
+    ``object_attributes`` holds the other ``key=value`` pairs of an object,
+    such as ``freq`` in hertz.
     """
 
     design: str
@@ -93,6 +94,7 @@ class OtdFile:
     slew_thresholds: tuple[float, float] | None
     domains: dict[ObjectKey, tuple[int, ...]]
     object_attributes: dict[ObjectKey, dict[str, str]]
+    net_drivers: dict[str, PinKey] = field(default_factory=dict)
 
     def domain_names(self, key: ObjectKey) -> tuple[str, ...]:
         """Names of the clocks reaching ``key`` (empty when unknown)."""
@@ -110,12 +112,18 @@ def read_otd(path: Path | str) -> OtdFile:
     object_attributes: dict[ObjectKey, dict[str, str]] = {}
     nets: dict[str, str] = {}
     pins: dict[PinKey, str] = {}
+    net_drivers: dict[str, PinKey] = {}
 
     def note(key: ObjectKey, clocks: list[int], attrs: list[tuple[str, str]]) -> None:
         if clocks:
             domains[key] = tuple(clocks)
         if attrs:
-            object_attributes[key] = dict(attrs)
+            extra = dict(attrs)
+            driver_instance, driver_pin = _DRIVER_ATTRIBUTES
+            if isinstance(key, str) and driver_instance in extra:
+                net_drivers[key] = (extra.pop(driver_instance), extra.pop(driver_pin))
+            if extra:
+                object_attributes[key] = extra
 
     for name, role, clocks, attrs in summary.nets:
         nets[name] = role
@@ -139,6 +147,7 @@ def read_otd(path: Path | str) -> OtdFile:
         slew_thresholds=summary.slew_thresholds,
         domains=domains,
         object_attributes=object_attributes,
+        net_drivers=net_drivers,
     )
 
 
@@ -185,6 +194,7 @@ def write_otd(
     attributes: Sequence[tuple[str, str]] = (),
     nets: Mapping[str, str] | None = None,
     pins: Mapping[PinKey, str] | None = None,
+    net_drivers: Mapping[str, PinKey] | None = None,
     windows: Mapping[ObjectKey, Sequence[OtdWindow]] | None = None,
     domains: Mapping[ObjectKey, Sequence[int]] | None = None,
     object_attributes: Mapping[ObjectKey, Mapping[str, str]] | None = None,
@@ -193,12 +203,13 @@ def write_otd(
     """Write an OTD file; a ``.gz`` suffix gzips it.
 
     ``nets`` maps net name to role, ``pins`` maps ``(instance, pin)`` to role
-    (instance ``"-"`` is a top-level port). ``windows`` optionally maps a net
-    name or pin key to its windows, ``domains`` to the indices of the clocks
-    reaching it (written as ``clocks=``), and ``object_attributes`` to further
-    ``key=value`` pairs such as ``freq`` (hertz). An object with a clock window
-    must have role ``c``; anything the reader would reject raises
-    ``ValueError`` here.
+    (instance ``"-"`` is a top-level port). ``net_drivers`` optionally maps a
+    declared net to its driving ``(instance, pin)`` pair. ``windows`` maps a
+    net name or pin key to its windows, ``domains`` to the indices of the
+    clocks reaching it (written as ``clocks=``), and ``object_attributes`` to
+    further ``key=value`` pairs such as ``freq`` (hertz). An object with a
+    clock window must have role ``c``; anything the reader would reject
+    raises ``ValueError`` here.
 
     Window values and ranges are written as fixed-point decimals with at most
     ``precision`` fractional digits (OTD body numbers carry no exponent), so
@@ -211,6 +222,7 @@ def write_otd(
     """
     nets = nets or {}
     pins = pins or {}
+    net_drivers = net_drivers or {}
     windows = windows or {}
     domains = domains or {}
     object_attributes = object_attributes or {}
@@ -221,6 +233,9 @@ def write_otd(
     ]
     if unknown:
         raise ValueError(f"windows or attributes given for undeclared object {unknown[0]!r}")
+    for net in net_drivers:
+        if net not in nets:
+            raise ValueError(f"driver given for undeclared net {net!r}")
 
     lines = [f"otd {OTD_VERSION}"]
     if design:
@@ -257,10 +272,16 @@ def write_otd(
             if any(not 0 <= index < len(clocks) for index in indices):
                 raise ValueError(f"{key!r}: clock domain index is undeclared")
             suffix += " clocks=" + ",".join(str(index) for index in sorted(set(indices)))
+        if isinstance(key, str) and key in net_drivers:
+            instance, pin = net_drivers[key]
+            for attr, name in zip(_DRIVER_ATTRIBUTES, (instance, pin)):
+                if not name or any(not "!" <= char <= "~" for char in name):
+                    raise ValueError(f"{key!r}: {attr} must be a visible ASCII name")
+                suffix += f" {attr}={name}"
         extra = object_attributes.get(key, {})
         if "freq" in extra and not float(extra["freq"]) >= 0:
             raise ValueError(f"{key!r}: freq must be a non-negative number of hertz")
-        return suffix + _attributes(extra.items(), ("clocks",), repr(key))
+        return suffix + _attributes(extra.items(), ("clocks", *_DRIVER_ATTRIBUTES), repr(key))
 
     def emit_windows(key: ObjectKey, role: str) -> None:
         for window in windows.get(key, ()):
