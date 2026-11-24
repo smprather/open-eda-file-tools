@@ -10,7 +10,7 @@ import liberty_tools as lt
 
 def test_combo_copies_preserve_nested_groups_and_source_order(tmp_path, monkeypatch):
     script = Path(__file__).resolve().parents[1] / "scripts" / "build_combo_lib.py"
-    path_a = tmp_path / "a.lib.gz"
+    path_a = tmp_path / "a.lib"
     path_b = tmp_path / "b.lib.gz"
     output = tmp_path / "combo.lib.gz"
     values = '          "0, 1",\n' * 1023 + '          "0, 1"\n'
@@ -33,9 +33,7 @@ def test_combo_copies_preserve_nested_groups_and_source_order(tmp_path, monkeypa
     path_a.write_bytes(gzip.compress(
         (f'/* leading comment */\n  library (a) {{\n{cell_a}\n}}\n').encode()
     ))
-    path_b.write_bytes(gzip.compress(
-        (f'library (b) {{\n}}\n{cell_b}}}\n').encode()
-    ))
+    path_b.write_text(f'library (b) {{\n}}\n{cell_b}}}\n', encoding="utf-8")
 
     monkeypatch.setenv("GZ_LEVEL", "1")
     subprocess.run(

@@ -5,7 +5,9 @@ use std::process::{Child, Command, Stdio};
 
 use crate::Error;
 
-const PRELUDE: &str = include_str!("evaluate.tcl");
+// Tcl reads this single trusted command before the command itself consumes the
+// remaining stdin bytes as the SDC script.
+const PRELUDE: &str = concat!("namespace eval :: {\n", include_str!("evaluate.tcl"), "}\n");
 
 pub(super) struct Word {
     pub(super) text: String,
@@ -17,10 +19,9 @@ pub(super) struct Evaluation {
     pub(super) error: Option<String>,
 }
 
-fn launch(program: &OsStr, path: &Path) -> io::Result<Child> {
+fn launch(program: &OsStr) -> io::Result<Child> {
     Command::new(program)
         .arg("-")
-        .env("SDC_FILE", path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -31,9 +32,9 @@ fn io_error(error: io::Error, context: impl std::fmt::Display) -> Error {
     io::Error::new(error.kind(), format!("{context}: {error}")).into()
 }
 
-fn launch_tclsh(path: &Path) -> Result<Child, Error> {
+fn launch_tclsh() -> Result<Child, Error> {
     if let Some(program) = std::env::var_os("TCLSH").filter(|path| !path.is_empty()) {
-        return launch(&program, path).map_err(|error| {
+        return launch(&program).map_err(|error| {
             io_error(
                 error,
                 format_args!("cannot run {}", program.to_string_lossy()),
@@ -41,7 +42,7 @@ fn launch_tclsh(path: &Path) -> Result<Child, Error> {
         });
     }
     for name in ["tclsh8.6", "tclsh"] {
-        match launch(OsStr::new(name), path) {
+        match launch(OsStr::new(name)) {
             Ok(child) => return Ok(child),
             Err(error)
                 if matches!(
@@ -57,15 +58,25 @@ fn launch_tclsh(path: &Path) -> Result<Child, Error> {
 }
 
 pub(super) fn evaluate(path: &Path) -> Result<Evaluation, Error> {
-    // Tcl's open interprets a path starting with | as a subprocess pipeline.
-    // Passing an absolute path prevents this, including for relative inputs.
-    let absolute = std::path::absolute(path).map_err(|error| io_error(error, path.display()))?;
-    let mut child = launch_tclsh(&absolute)?;
-    let written = child
-        .stdin
-        .take()
-        .expect("Tcl stdin is piped")
-        .write_all(PRELUDE.as_bytes());
+    let mut input = crate::input::open(path).map_err(|error| io_error(error, path.display()))?;
+    let mut child = launch_tclsh()?;
+    let mut stdin = child.stdin.take().expect("Tcl stdin is piped");
+    let written = match stdin
+        .write_all(PRELUDE.as_bytes())
+        .and_then(|()| io::copy(&mut input, &mut stdin))
+    {
+        Err(error) if error.kind() != io::ErrorKind::BrokenPipe => {
+            // Tcl evaluates only after EOF. Stop it before closing a partial script.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io_error(
+                error,
+                format_args!("{}: feeding SDC to tclsh", path.display()),
+            ));
+        }
+        result => result,
+    };
+    drop(stdin);
     let output = child
         .wait_with_output()
         .map_err(|error| io_error(error, format_args!("{}: tclsh failed", path.display())))?;
@@ -89,8 +100,12 @@ pub(super) fn evaluate(path: &Path) -> Result<Evaluation, Error> {
             path.display()
         )));
     }
-    written
-        .map_err(|error| io_error(error, format_args!("{}: writing to tclsh", path.display())))?;
+    written.map_err(|error| {
+        io_error(
+            error,
+            format_args!("{}: feeding SDC to tclsh", path.display()),
+        )
+    })?;
     decode(&output.stdout).ok_or_else(|| {
         Error::Message(format!(
             "{}: unexpected tclsh output: {:?}",

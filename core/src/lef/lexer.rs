@@ -5,9 +5,7 @@
 //! of MB per design the per-byte calls were the dominant cost of every DEF
 //! query.
 
-use flate2::read::MultiGzDecoder;
 use memchr::{memchr, memchr3};
-use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -26,15 +24,7 @@ impl Token {
 }
 
 pub fn open_input(path: &Path) -> io::Result<Box<dyn Read + Send>> {
-    let file = File::open(path)?;
-    if path
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
-    {
-        Ok(Box::new(MultiGzDecoder::new(file)))
-    } else {
-        Ok(Box::new(file))
-    }
+    Ok(crate::input::open(path)?)
 }
 
 /// Bytes that end a word: ASCII whitespace, `(`, `)`, `;`, `+` and `#`.

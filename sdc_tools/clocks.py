@@ -29,7 +29,7 @@ class Clock:
 
 
 def clocks(path: Path | str) -> list[Clock]:
-    """Return the clocks an SDC creates, in file order."""
+    """Return the clocks a plain or gzip-compressed SDC creates, in file order."""
     return [
         Clock(
             name=name,

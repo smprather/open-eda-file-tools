@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from importlib.metadata import entry_points
 from pathlib import Path
 
+from liberty_tools._text_input import open_text
+
 from .clock_roles import CellClockRole, native_macro_roles
 
 ROLES = ("c", "d", "u", "z")
@@ -139,7 +141,8 @@ Backend = Callable[[Path], ClockData]
 
 def read_clock_cells(path: Path) -> set[str]:
     """Read clock-tree instance names: a JSON list or one name per line."""
-    text = path.read_text(encoding="utf-8")
+    with open_text(path) as (source, _):
+        text = source.read()
     stripped = text.lstrip()
     if stripped.startswith("["):
         return {str(value) for value in json.loads(stripped)}

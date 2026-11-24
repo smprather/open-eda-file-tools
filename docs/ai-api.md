@@ -6,6 +6,9 @@ This document is the single-page reference for AI coding agents consuming
 entry points (`liberty-tools`, `liberty-format`, `liberty-view`, `lef-tools`,
 `def-tools`, `sdc-tools`, `pex-tools`).
 
+Text-format readers detect gzip from the file contents. Commands that infer
+the input format or backend still use the filename to select the parser.
+
 ---
 
 ## 1. Quick Decision Table

@@ -46,7 +46,7 @@ def _render(clocks_found: list[Clock], fmt: str) -> str:
     "sdc_path",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     required=True,
-    help="SDC file to evaluate.",
+    help="SDC file to evaluate, plain or gzip-compressed.",
 )
 @click.option(
     "--format",
@@ -76,7 +76,7 @@ def clocks_command(sdc_path: Path, fmt: str, output: Path | None) -> None:
     "sdc_path",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     required=True,
-    help="SDC file that creates the clock roots.",
+    help="SDC file that creates the clock roots, plain or gzip-compressed.",
 )
 @click.option(
     "--def",

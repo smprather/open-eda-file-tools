@@ -49,7 +49,7 @@ pub struct Evaluation {
     pub error: Option<String>,
 }
 
-/// Evaluate an SDC with symbolic queries and return its raw Tcl records.
+/// Evaluate a plain or gzip-compressed SDC with symbolic queries and return its raw Tcl records.
 ///
 /// Interpreter startup and protocol failures are returned as `Err`. Script
 /// failures are returned with the partial records in [`Evaluation`].
@@ -65,7 +65,7 @@ pub fn evaluate(path: impl AsRef<Path>) -> Result<Evaluation, Error> {
     })
 }
 
-/// Return the clocks an SDC creates, in execution order.
+/// Return the clocks a plain or gzip-compressed SDC creates, in execution order.
 ///
 /// Generated clocks can resolve masters defined earlier in the script. Any
 /// interpreter, script, or clock-option error includes failure context.

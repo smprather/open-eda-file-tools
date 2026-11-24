@@ -1,7 +1,9 @@
 # SDC Tools (`sdc_tools` / `sdc-tools`)
 
-`sdc_tools` evaluates Synopsys Design Constraints (`.sdc`) files in a sandboxed
-real Tcl interpreter (system `tclsh` >= 8.6; `TCLSH=/path/to/tclsh` overrides)
+`sdc_tools` evaluates plain or gzip-compressed Synopsys Design Constraints
+(`.sdc` or `.sdc.gz`) in a sandboxed real Tcl interpreter. It uses system
+`tclsh` 8.6 or newer, with an optional `TCLSH=/path/to/tclsh` override.
+The reader detects compression by its gzip signature. The interpreter runs
 with stubbed SDC commands. Variables, `[command]` substitution, `foreach`,
 `lmap`, `if`, and flow-generated Tcl work as authored, while unsupported
 constraints are recorded and return `{}` instead of aborting.

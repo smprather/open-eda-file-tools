@@ -10,8 +10,12 @@ command-line front ends:
 | Cell LEF (`.lef`, `.lef.gz`) | `lef_tools` | `lef-tools` | [`docs/lef.md`](lef.md) |
 | DEF (`.def`, `.def.gz`) | `def_tools` | `def-tools` | [`docs/def.md`](def.md) |
 | OTD (`.otd`, `.otd.gz`) — open timing data, clock/data roles | `def_tools.otd`, `def_tools.clock_data` | `def-tools` | [`docs/otd.md`](otd.md) |
-| SDC (`.sdc`) | `sdc_tools` | `sdc-tools` | [`docs/sdc.md`](sdc.md) |
+| SDC (`.sdc`, `.sdc.gz`) | `sdc_tools` | `sdc-tools` | [`docs/sdc.md`](sdc.md) |
 | SPEF / DSPF (`.spef`, `.dspf`, `.gz`) | `pex_tools` | `pex-tools` | [`docs/pex.md`](pex.md) |
+
+Text readers recognize gzip by its signature and read concatenated gzip
+members as one stream. Extension-based commands still use the filename to
+select a format or backend.
 
 ## Adding a Tool
 

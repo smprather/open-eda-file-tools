@@ -1,9 +1,8 @@
-use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -896,13 +895,7 @@ pub fn open_input(path: &str) -> io::Result<Box<dyn Read>> {
 }
 
 fn open_input_path(path: &Path) -> io::Result<Box<dyn Read>> {
-    let file = File::open(path)?;
-    let reader = BufReader::with_capacity(128 * 1024, file);
-    if path.as_os_str().as_encoded_bytes().ends_with(b".gz") {
-        Ok(Box::new(GzDecoder::new(reader)))
-    } else {
-        Ok(Box::new(reader))
-    }
+    Ok(crate::input::open(path)?)
 }
 
 // ---- byte-offset cell indexing (lazy-parse backend) ------------------------

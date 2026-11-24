@@ -126,7 +126,7 @@ def format_memory(path: Path, phase: str) -> dict:
             digest = hashlib.sha256(output.read_bytes()).hexdigest()
     else:
         raw = path.read_bytes()
-        data = (gzip.decompress(raw) if path.suffix == ".gz" else raw).decode()
+        data = (gzip.decompress(raw) if _native._has_gzip_magic(raw[:2]) else raw).decode()
         del raw
         baseline = peak_rss()
         start = time.perf_counter()
@@ -394,11 +394,12 @@ def main() -> None:
             paths = []
         for path in paths:
             raw = path.read_bytes()
-            data = gzip.decompress(raw) if path.suffix == ".gz" else raw
+            compressed = _native._has_gzip_magic(raw[:2])
+            data = gzip.decompress(raw) if compressed else raw
             if args.workload == "combo":
                 cases.append(combo_case(tmp, path, data, args.iterations))
                 continue
-            if args.workload in ("parse", "select") and path.suffix != ".gz":
+            if args.workload in ("parse", "select") and not compressed:
                 zipped = tmp / f"{path.name}.gz"
                 zipped.write_bytes(gzip.compress(data, mtime=0))
                 inputs = (path, zipped)

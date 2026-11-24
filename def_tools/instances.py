@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import glob
-import gzip
 import os
 import re
 import resource
@@ -20,6 +19,7 @@ from liberty_tools._native import (
     write_instance_parquet,
     write_instance_table,
 )
+from liberty_tools._text_input import open_text
 
 from .clock_data import (
     ClockDataError,
@@ -201,10 +201,9 @@ def effective_batch_size(max_bytes: int, requested: int) -> int:
 
 def read_header(path: Path) -> tuple[int, int]:
     """Return ``(dbu_per_micron, components)`` from a plain or gzipped DEF."""
-    opener = gzip.open if path.suffix.lower() == ".gz" else open
     dbu: int | None = None
     components: int | None = None
-    with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+    with open_text(path, errors="replace") as (handle, _):
         for line in handle:
             tokens = line.split()
             if not tokens:

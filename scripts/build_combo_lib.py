@@ -10,8 +10,11 @@ parser tolerates (last value wins; unknown template refs are harmless).
 Optionally replicate the whole set ``--copies N`` times to inflate the file to a
 size target; copies 2..N get a ``_cK`` suffix on every cell name to stay unique.
 
+Run with the interpreter used for the native release build. Inputs may be
+plain or gzip-compressed.
+
 Usage:
-    python scripts/build_combo_lib.py OUT.lib.gz LIBNAME [--copies N] IN1.gz IN2.gz ...
+    .venv/bin/python scripts/build_combo_lib.py OUT.lib.gz LIBNAME [--copies N] IN1 IN2 ...
 Env: GZ_LEVEL (gzip level, default 6).
 """
 
@@ -21,6 +24,9 @@ import gzip
 import os
 import re
 import sys
+from pathlib import Path
+
+from liberty_tools._text_input import open_text
 
 _CELL_RE = re.compile(r"^(\s*cell \()([^)]+)(\).*)$")
 
@@ -70,7 +76,7 @@ def main() -> None:
         for k in range(1, copies + 1):
             suffix = "" if k == 1 else f"_c{k}"
             for j, path in enumerate(inputs, 1):
-                with gzip.open(path, "rt", encoding="utf-8") as fh:
+                with open_text(Path(path)) as (fh, _):
                     stream_body(fh, out, suffix)
                 print(f"copy {k}/{copies}  [{j}/{len(inputs)}] {path.split('/')[-1]}", flush=True)
         out.write("}\n")

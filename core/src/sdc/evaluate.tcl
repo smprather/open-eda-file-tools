@@ -1,6 +1,5 @@
-# This script is the only Tcl code run by the parent interpreter. The input
-# path is absolute, so Tcl open treats it as a file even if its name starts
-# with a pipe. The SDC itself runs exclusively in a safe child interpreter.
+# The parent interpreter runs only this prelude. The SDC arrives as text on
+# stdin and runs exclusively in a safe child interpreter.
 if {[package vcompare [info patchlevel] 8.6] < 0} {
     puts stderr "sdc-tools requires Tcl >= 8.6; found [info patchlevel]"
     exit 3
@@ -30,13 +29,8 @@ $slave eval {
 }
 
 set failed [catch {
-    set file [open $env(SDC_FILE) r]
-    try {
-        fconfigure $file -encoding utf-8
-        set script [read $file]
-    } finally {
-        close $file
-    }
+    fconfigure stdin -encoding utf-8
+    set script [read stdin]
     $slave eval $script
 } result]
 

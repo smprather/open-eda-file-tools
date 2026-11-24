@@ -8,10 +8,8 @@
 //! such as `*C x y` and `*D cell`. Inline `$` comments can carry layer or
 //! coordinate metadata and are retained as extensions.
 
-use flate2::read::GzDecoder;
 use rayon::prelude::*;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, Read};
 use std::path::Path;
 
 use crate::Error;
@@ -232,17 +230,9 @@ fn path_io_error(path: &Path, err: io::Error) -> io::Error {
 
 fn read_bytes(path: &Path) -> io::Result<Vec<u8>> {
     let mut data = Vec::new();
-    let gz = path
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"));
-    if gz {
-        let file = File::open(path).map_err(|err| path_io_error(path, err))?;
-        GzDecoder::new(BufReader::new(file))
-            .read_to_end(&mut data)
-            .map_err(|err| path_io_error(path, err))?;
-    } else {
-        data = std::fs::read(path).map_err(|err| path_io_error(path, err))?;
-    }
+    crate::input::open(path)
+        .and_then(|mut reader| reader.read_to_end(&mut data))
+        .map_err(|err| path_io_error(path, err))?;
     Ok(data)
 }
 
@@ -626,21 +616,9 @@ fn parse_all(path: &Path, keep_entries: bool) -> Result<(PexFile, Vec<PexSummary
     Ok((PexFile { header, nets }, summaries))
 }
 
-fn open_reader(path: &Path) -> io::Result<Box<dyn BufRead>> {
-    let file = File::open(path).map_err(|err| path_io_error(path, err))?;
-    let gz = path
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"));
-    if gz {
-        Ok(Box::new(BufReader::new(GzDecoder::new(file))))
-    } else {
-        Ok(Box::new(BufReader::new(file)))
-    }
-}
-
 /// Low-memory pass: one net block is buffered at a time, never the whole file.
 fn summaries_streaming(path: &Path) -> Result<Vec<PexSummary>, Error> {
-    let mut reader = open_reader(path)?;
+    let mut reader = crate::input::open(path).map_err(|err| path_io_error(path, err))?;
     let mut header_buf = Vec::new();
     let mut pending: Option<Vec<u8>> = None;
     loop {
@@ -709,7 +687,7 @@ pub enum SummaryMode {
 
 /// Read the header and resolve port names without parsing net blocks.
 ///
-/// Accepts plain text or a gzip-compressed file with a `.gz` suffix.
+/// Detects plain or gzip-compressed input by its contents.
 pub fn header(path: &Path) -> Result<PexHeader, Error> {
     let data = read_bytes(path)?;
     let (header, _, _) = parse_header(&data);
@@ -728,7 +706,7 @@ pub fn parse(path: &Path, keep_entries: bool) -> Result<PexFile, Error> {
 
 /// Read per-net electrical RC totals in file order without retaining entries.
 ///
-/// Accepts plain text or a gzip-compressed file with a `.gz` suffix.
+/// Detects plain or gzip-compressed input by its contents.
 pub fn summaries(path: &Path, mode: SummaryMode) -> Result<Vec<PexSummary>, Error> {
     match mode {
         SummaryMode::Parallel => {

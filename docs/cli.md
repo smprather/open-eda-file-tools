@@ -26,15 +26,16 @@ Usage: liberty-tools format [OPTIONS] FILE
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `-o, --output PATH` | stdout | Write formatted output to `PATH`. |
-| `-i, --in-place` | off | Rewrite `FILE` in place (not supported for `.gz`). |
+| `-i, --in-place` | off | Rewrite a plain-text `FILE` in place. |
 | `--check` | off | Exit 0 if already formatted, 1 if it would reformat. |
 | `--indent INTEGER` | `2` | Spaces per `{ }` nesting level. |
 
 
 Both entry points stream the input into temporary files, reindent by line,
 and verify the two token streams incrementally before writing any output.
-Gzip input is decompressed for verification. An output path receives plain
-UTF-8 text even if it ends in `.gz`.
+The formatter detects gzip by its signature and decompresses the input for
+verification. An output path receives plain UTF-8 text even if it ends in
+`.gz`.
 
 ---
 

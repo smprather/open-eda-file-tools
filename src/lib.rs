@@ -1791,6 +1791,12 @@ fn tokenize(path: &str) -> PyResult<Vec<String>> {
 fn tokenize_str(text: &str) -> PyResult<Vec<String>> {
     lex_all(Box::new(text.as_bytes())).map_err(parse_error_to_py)
 }
+
+#[pyfunction]
+fn _has_gzip_magic(prefix: &[u8]) -> bool {
+    open_eda_file_tools_core::input::has_gzip_magic(prefix)
+}
+
 #[pyfunction]
 fn _compare_token_strings(
     py: Python<'_>,
@@ -1807,9 +1813,9 @@ fn _compare_token_files(
     after: std::path::PathBuf,
 ) -> PyResult<(bool, usize, usize)> {
     py.detach(|| {
-        let before = std::fs::File::open(before)?;
-        let after = std::fs::File::open(after)?;
-        compare_token_streams(Box::new(before), Box::new(after))
+        let before = open_eda_file_tools_core::input::open(&before)?;
+        let after = open_eda_file_tools_core::input::open(&after)?;
+        compare_token_streams(before, after)
     })
     .map_err(parse_error_to_py)
 }
@@ -1838,6 +1844,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_sequential_flags, m)?)?;
     m.add_function(wrap_pyfunction!(tokenize, m)?)?;
     m.add_function(wrap_pyfunction!(tokenize_str, m)?)?;
+    m.add_function(wrap_pyfunction!(_has_gzip_magic, m)?)?;
     m.add_function(wrap_pyfunction!(_compare_token_strings, m)?)?;
     m.add_function(wrap_pyfunction!(_compare_token_files, m)?)?;
     m.add_function(wrap_pyfunction!(axis_role_matches, m)?)?;

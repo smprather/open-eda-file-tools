@@ -13,6 +13,7 @@ from typing import Any, final
 _StrPath = str | PathLike[str]
 
 def _sequential_flags(path: str) -> list[tuple[str, bool]]: ...
+def _has_gzip_magic(prefix: bytes) -> bool: ...
 
 @final
 class Document:

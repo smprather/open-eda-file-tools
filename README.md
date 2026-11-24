@@ -13,11 +13,13 @@ tool for each. One package, one version, one install.
 | Liberty `.lib` | `liberty_tools` | `liberty-tools format`, `liberty-format`, `liberty-view` | [docs/liberty.md](docs/liberty.md) |
 | Cell LEF `.lef` | `lef_tools` | `lef-tools` | [docs/lef.md](docs/lef.md) |
 | DEF `.def` | `def_tools` | `def-tools` | [docs/def.md](docs/def.md) |
-| SDC `.sdc` | `sdc_tools` | `sdc-tools` | [docs/sdc.md](docs/sdc.md) |
+| SDC `.sdc`, `.sdc.gz` | `sdc_tools` | `sdc-tools` | [docs/sdc.md](docs/sdc.md) |
 | OTD `.otd` (open timing data) | `def_tools.otd` | `def-tools` | [docs/otd.md](docs/otd.md) |
 | SPEF / DSPF `.spef`, `.dspf` | `pex_tools` | `pex-tools` | [docs/pex.md](docs/pex.md) |
 
-Liberty, LEF, DEF and SPEF/DSPF inputs are read plain or gzipped.
+The text-format readers accept plain or gzip-compressed input and detect
+compression from the file contents. Use conventional extensions where a
+command selects the input format from the filename.
 
 Rust applications can use `open-eda-file-tools-core` from the `core/`
 workspace member. It includes targeted LEF, Liberty, and DEF readers

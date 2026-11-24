@@ -48,6 +48,13 @@ otd-design/                 Design workspace for the next OTD version (non-norma
 docs/                       AI-agent and per-tool Markdown documentation (`docs/ai-api.md`, `docs/cli.md`, `docs/*.md`)
 ```
 
+**Shared input compression.** Use `core/src/input.rs` for Rust text-format
+readers and `liberty_tools._text_input.open_text` for Python text-format
+readers. Both use the same gzip signature check. Code that already has the
+input bytes can call `has_gzip_magic` in Rust or `_native._has_gzip_magic` in
+Python. Compression detection is independent of parser selection and output
+naming.
+
 ## Documentation Synchronization Mandate (REQUIRED)
 
 These tools are primarily consumed by AI coding agents. **Documentation MUST be
