@@ -430,20 +430,22 @@ otd = read_otd(path) -> OtdFile     # ValueError "file:line: ..." when malformed
 otd.design -> str; otd.clocks -> tuple[OtdClock, ...]   # OtdClock(name, period, rise_edge, fall_edge, attributes=())
 otd.time_unit / otd.cap_unit / otd.res_unit -> float | None   # seconds / farads / ohms per unit
 otd.slew_thresholds -> tuple[float, float] | None             # percent of swing
-otd.attributes -> tuple[tuple[str, str], ...]                 # other header lines (corner, program, ...)
+otd.attributes -> tuple[tuple[str, str], ...]                 # header text (corner, program, writer_options, export_scope, ...)
 otd.windows -> int                                            # count of w lines
 otd.nets -> dict[str, str]; otd.pins -> dict[tuple[str, str], str]   # object -> role
 otd.net_drivers -> dict[str, tuple[str, str]]                 # net -> (driver instance, pin), when supplied
 otd.domains -> dict[str | tuple[str, str], tuple[int, ...]]   # clock indices: clocks= attr, else window clocks
 otd.domain_names(key) -> tuple[str, ...]
-otd.object_attributes -> dict[key, dict[str, str]]            # freq (Hz), load (cap_unit range), value (0|1 for z),
+otd.object_attributes -> dict[key, dict[str, str]]            # load (cap_unit range), value (0|1 for z),
                                                               # drive_rise / drive_fall (res_unit range), free keys
 # OtdWindow(clock: int | None, edge: "r" | "f" | "-", role, values: 8-tuple of float | None,
 #           rise_res=None, rise_slack=None, fall_res=None, fall_slack=None,   # (min, max) ranges
 #           attributes=())    # values = rise_early, rise_late, fall_early, fall_late, then 4 slews
+#   Use None for an unspecified arrival bound or slew.
 write_otd(path, *, design="", time_unit=None, cap_unit=None, res_unit=None, slew_thresholds=None,
           clocks=(), attributes=(), nets=None, pins=None, net_drivers=None, windows=None,
           domains=None, object_attributes=None, precision=6) -> None   # ".gz" suffix gzips
+# Optional provenance example: attributes=(("writer_options", "precision=6"),)
 # Text grammar (docs/otd.md): `n <net> <role>`; `i <instance>` then `p <pin> <role>` (instance `-` = ports);
 #   `w <clock|-> <r|f|-> <role> <8 decimals or ->`; trailing key=value attrs; mandatory `end <nets> <pins> <windows>`.
 #   A net may carry both driver_instance= and driver_pin=; instance "-" means a driving top-level port.

@@ -52,8 +52,8 @@ class OtdWindow:
     """One timing window of an object, caused by one edge of one clock.
 
     ``clock`` is ``None`` (with ``edge`` ``"-"``) for an arrival no clock
-    launches. ``values`` follows ``WINDOW_FIELDS``; ``None`` means that
-    transition does not occur. Times are in the file's ``time_unit``.
+    launches. ``values`` follows ``WINDOW_FIELDS``. Use ``None`` for any
+    unspecified arrival bound or slew. Times are in the file's ``time_unit``.
     The four optional ranges are ``(min, max)``: the resistance of the source
     driving each transition (in ``res_unit``) and the slack of each transition
     (in ``time_unit``). ``attributes`` carries any further ``key=value`` pairs
@@ -79,7 +79,7 @@ class OtdFile:
     reach it: its ``clocks=`` attribute, else the clocks of its windows.
     ``net_drivers`` maps a net name to its optional driving pin key.
     ``object_attributes`` holds the other ``key=value`` pairs of an object,
-    such as ``freq`` in hertz.
+    such as ``load`` in ``cap_unit``.
     """
 
     design: str
@@ -207,9 +207,9 @@ def write_otd(
     declared net to its driving ``(instance, pin)`` pair. ``windows`` maps a
     net name or pin key to its windows, ``domains`` to the indices of the
     clocks reaching it (written as ``clocks=``), and ``object_attributes`` to
-    further ``key=value`` pairs such as ``freq`` (hertz). An object with a
-    clock window must have role ``c``; anything the reader would reject
-    raises ``ValueError`` here.
+    further ``key=value`` pairs such as ``load``. An object with a clock
+    window must have role ``c``; anything the reader would reject raises
+    ``ValueError`` here.
 
     Window values and ranges are written as fixed-point decimals with at most
     ``precision`` fractional digits (OTD body numbers carry no exponent), so
@@ -279,8 +279,6 @@ def write_otd(
                     raise ValueError(f"{key!r}: {attr} must be a visible ASCII name")
                 suffix += f" {attr}={name}"
         extra = object_attributes.get(key, {})
-        if "freq" in extra and not float(extra["freq"]) >= 0:
-            raise ValueError(f"{key!r}: freq must be a non-negative number of hertz")
         return suffix + _attributes(extra.items(), ("clocks", *_DRIVER_ATTRIBUTES), repr(key))
 
     def emit_windows(key: ObjectKey, role: str) -> None:

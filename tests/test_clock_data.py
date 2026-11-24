@@ -342,7 +342,7 @@ def test_write_otd_round_trips_through_gzip(tmp_path: Path) -> None:
     assert parsed.domains == {"clk": (0,)}  # derived from its window
 
 
-def test_otd_carries_domains_frequency_slack_and_free_attributes(tmp_path: Path) -> None:
+def test_otd_carries_domains_slack_and_free_attributes(tmp_path: Path) -> None:
     path = tmp_path / "rich.otd"
     clocks = [
         OtdClock("clk", 10.0, 0.0, 5.0, (("source", "clk"),)),
@@ -361,7 +361,7 @@ def test_otd_carries_domains_frequency_slack_and_free_attributes(tmp_path: Path)
         nets={"gated": "c", "async_in": "u"},
         pins={("u_icg", "CK"): "c"},
         domains={"gated": [1, 0], ("u_icg", "CK"): [0]},
-        object_attributes={"gated": {"freq": "5e7", "load": "0.0032"}},
+        object_attributes={"gated": {"acme_group": "core", "load": "0.0032"}},
         windows={
             "gated": [
                 OtdWindow(
@@ -376,7 +376,7 @@ def test_otd_carries_domains_frequency_slack_and_free_attributes(tmp_path: Path)
     parsed = read_otd(path)
     data = read_clock_data(path)
 
-    assert "n gated c clocks=0,1 freq=5e7 load=0.0032" in text
+    assert "n gated c clocks=0,1 acme_group=core load=0.0032" in text
     assert (
         "w 0 r c 0.1 0.2 0.1 0.2 0.01 0.02 0.01 0.02 "
         "rise_res=0.59:0.61 rise_slack=0.31:0.37 k=2"
@@ -388,7 +388,7 @@ def test_otd_carries_domains_frequency_slack_and_free_attributes(tmp_path: Path)
     assert parsed.clocks == tuple(clocks)
     assert parsed.domains == {"gated": (0, 1), ("u_icg", "CK"): (0,)}
     assert parsed.domain_names("gated") == ("clk", "div2")
-    assert parsed.object_attributes == {"gated": {"freq": "5e7", "load": "0.0032"}}
+    assert parsed.object_attributes == {"gated": {"acme_group": "core", "load": "0.0032"}}
     assert data.domains == {"gated": ("clk", "div2"), ("u_icg", "CK"): ("clk",)}
 
 
@@ -415,19 +415,19 @@ def test_otd_round_trips_optional_net_drivers(tmp_path: Path) -> None:
         path,
         nets={"leaf": "c", "root": "c", "mesh": "c"},
         net_drivers=drivers,
-        object_attributes={"leaf": {"freq": "1e8"}},
+        object_attributes={"leaf": {"acme_group": "core"}},
     )
 
     parsed = read_otd(path)
     assert parsed.net_drivers == drivers
-    assert parsed.object_attributes == {"leaf": {"freq": "1e8"}}
+    assert parsed.object_attributes == {"leaf": {"acme_group": "core"}}
     assert parsed.pins == {}
 
     output = tmp_path / "windows.csv"
     write_otd_windows_csv(path, output)
     with output.open(newline="") as stream:
         rows = {row["name"]: row for row in csv.DictReader(stream)}
-    assert rows["leaf"]["object_attrs"] == "driver_instance=u_top/u_buf driver_pin=Q[0] freq=1e8"
+    assert rows["leaf"]["object_attrs"] == "driver_instance=u_top/u_buf driver_pin=Q[0] acme_group=core"
     assert rows["root"]["object_attrs"] == "driver_instance=- driver_pin=clk"
     assert rows["mesh"]["object_attrs"] == ""
 

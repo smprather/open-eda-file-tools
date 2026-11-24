@@ -127,7 +127,7 @@ fn role_token<'a>(token: Option<&'a str>, what: &str) -> Result<&'a str, String>
     }
 }
 
-/// A header or attribute number: any finite real, exponent allowed.
+/// A header number: any finite real, exponent allowed.
 fn real(token: Option<&str>, what: &str) -> Result<f64, String> {
     let text = token.ok_or_else(|| format!("missing {what}"))?;
     text.parse::<f64>()
@@ -209,13 +209,6 @@ fn check_object_attrs(attrs: &Attrs<'_>, declared: usize, is_net: bool) -> Resul
         match *key {
             "clocks" => {
                 clock_indices(value, declared)?;
-            }
-            "freq" => {
-                if real(Some(value), "freq")? < 0.0 {
-                    return Err(format!(
-                        "freq must be a non-negative number of hertz: `{value}`"
-                    ));
-                }
             }
             "value" => {
                 if !matches!(*value, "0" | "1") {
@@ -1080,7 +1073,7 @@ slew_thresholds 10 90
 source unit test
 clock clk 10 0 5 source=clk
 clock div2 20 0 10 master=0
-n clk c clocks=0,1 freq=1e8
+n clk c clocks=0,1 acme_group=core
 w 0 r c 0.10 0.14 - - 0.02 0.03 - - rise_res=0.59:0.61 rise_slack=0.37 x_k=2
 w 1 f d 0.50 0.90 0.55 0.95 0.04 0.06 0.04 0.07
 n data d
@@ -1126,7 +1119,7 @@ end 3 3 5
                     text("clk"),
                     text("c"),
                     vec![0, 1],
-                    vec![(text("freq"), text("1e8"))]
+                    vec![(text("acme_group"), text("core"))]
                 ),
                 // No `clocks=`: the domains are the clocks of its windows.
                 (text("data"), text("d"), vec![1], vec![]),
@@ -1161,7 +1154,7 @@ end 3 3 5
         assert_eq!(rows, 8);
         assert_eq!(
             lines[1],
-            "net,,clk,c,\"clocks=0,1 freq=1e8\",0,r,c,0.10,0.14,,,0.02,0.03,,,0.59:0.61,0.37,,,x_k=2"
+            "net,,clk,c,\"clocks=0,1 acme_group=core\",0,r,c,0.10,0.14,,,0.02,0.03,,,0.59:0.61,0.37,,,x_k=2"
         );
         assert_eq!(lines[4], "net,,data,d,,,,u,1,2,1,2,0.1,0.2,0.1,0.2,,,,,");
         assert_eq!(
@@ -1250,8 +1243,8 @@ end 3 3 5
             ),
             (
                 "l",
-                text("otd 1\nn a c freq=-1\nend 1 0 0\n"),
-                "non-negative",
+                text("otd 1\nn a c load=1e-6\nend 1 0 0\n"),
+                "load must be a decimal",
             ),
             (
                 "m",

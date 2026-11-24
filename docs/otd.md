@@ -1,49 +1,57 @@
-# OTD — Open Timing Data, version 1 (draft specification)
+# Open Timing Data (OTD) 1
 
 | | |
 | --- | --- |
-| Format version | `1` |
-| Status | **Draft.** Implemented by `open-eda-file-tools`; may change before it is frozen. |
+| Status | **Community review draft.** The format may change before version 1 is frozen. |
+| Format version | `1` (`otd 1` on disk) |
 | File extensions | `.otd`, `.otd.gz` |
-| Reference implementation | Reader `src/otd.rs`, reader/writer `def_tools/otd.py`. Implementation of the required field guide and cell-arc observations is pending. |
+
+The specification defines the interchange format for independently developed
+EDA tools. Start with the [overview and review guide](otd-overview.md) for an
+annotated example and topics for community review.
+
+[Data model](#2-data-model) · [Grammar](#34-grammar) · [Header](#4-header) ·
+[Objects](#5-objects) · [Windows and arcs](#6-windows) ·
+[Reader errors](#10-errors) · [Complete example](#appendix-a--complete-example-informative)
 
 ## 1. Introduction
 
-OTD is an open text format for **timing windows and clock/data roles**, per net
-or per pin of a design. It carries what static timing analysis hands to
-power-integrity, noise and physical tools: for each net or pin, whether it is
-clock or data, which clocks reach it, when and how fast it switches, and how
-much slack it has (arrival, slew, resistance and slack ranges on every
-window).
+OTD is an open text format for exchanging **timing windows and clock/data
+roles**, per net or per pin of a design. Static timing analysis can supply
+this information to power-integrity, noise and physical-design tools. A file
+can identify which clocks reach an object, when and how fast it switches, and
+its slack, source resistance or contributing cell-arc delays when available.
 
-There is no open format for this data; every tool has a private "timing window
-file". OTD is designed from scratch. It is **not** a dialect of, nor
-syntax-compatible with, any vendor format. It carries the same *information*
-(section 11), so a converter loses nothing.
+OTD defines the representation of those results. Timing analysis algorithms,
+the input constraints and netlist, and complete timing path reports are
+outside its scope.
 
 ### 1.1 Design goals
 
 1. **One declaration per object.** A net or pin is named once and states its
    own role. A consumer never has to reconcile several records for one name.
 2. **Net-based and pin-based data are both first-class** and may share a file.
-3. **Fast to read.** One record per line; the first byte of a line is its
-   record type; no quoting, nesting or back-references. Records form
-   independent groups, so a reader parses a file on all cores (section 9).
-4. **Fast to write.** A writer needs no global knowledge: no name table, no
-   offsets, no up-front counts. Groups can be formatted concurrently and
-   appended in any order.
+3. **Fast to read.** Writers begin each record line with its type. The
+   grammar has no quoted fields, and a reader can process independent body
+   groups in parallel (section 9).
+4. **Fast to write.** A writer declares clocks in the header. The body needs
+   no global name table, offsets or up-front counts. Groups can be formatted
+   concurrently and appended in any order.
 5. **ASCII, and readable.** A person can read a file, `grep` it, and diff two
    of them.
 6. **Compact.** Clocks are referenced by index, an instance name is written
    once for all its pins, optional quantities are omitted rather than padded.
-7. **Extensible without a version bump.** Any record may carry `key=value`
-   attributes; a reader keeps the ones it does not know.
+7. **Extensible without a version bump.** The `clock`, `n`, `p`, `w` and `a`
+   records may carry `key=value` attributes. A reader keeps unknown attributes.
 
 ### 1.2 Conformance language
 
-The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be read as in
-RFC 2119. A *writer* is anything that produces an OTD file; a *reader* is
-anything that consumes one.
+The uppercase keywords MUST, MUST NOT, SHOULD, SHOULD NOT and MAY express
+requirements or permissions as defined in BCP 14. A *writer* produces an OTD
+file and a *reader* consumes one. Conformance is defined by the requirements
+in this document. Sections and appendices marked informative explain the
+format or show examples. [RFC 2119](https://www.rfc-editor.org/info/rfc2119)
+and [RFC 8174](https://www.rfc-editor.org/info/rfc8174).
 
 ## 2. Data model
 
@@ -104,7 +112,7 @@ guide. Readers handle it as ordinary comments. Extra comments may follow it.
 # Roles: c clock, d data, u unconstrained, z constant. Edges: r rise, f fall.
 # On w, - marks an absent launch clock, launch edge, or transition value.
 # Clock indices start at 0. Arrivals, slews, and delays use time_unit.
-# Common object attrs: clocks (indices), freq (Hz), load, value, drive_rise, drive_fall.
+# Common object attrs: clocks (indices), load, value, drive_rise, drive_fall.
 # Window attrs include rise_res, fall_res, rise_slack, and fall_slack.
 # A range uses min:max or one value for both bounds.
 # Arc tags min_delay and max_delay describe the extrema for the output edge.
@@ -124,13 +132,17 @@ The body is a sequence of **groups**:
 
 Any `w` line may be followed by its `a` lines before the next window or object.
 
-A group is self-contained. It refers to nothing outside itself except clock
-indices from the header. **The order of groups carries no meaning**; a reader
-MUST NOT depend on it and a writer MAY emit groups in any order.
+A group can be decoded using the header and its own records. Driver names
+identify objects in the design and can be used even if those objects have no
+separate pin records. A writer MAY emit groups in any order. A reader MUST
+accept any group order.
 
 ### 3.4 Grammar
 
-ABNF (RFC 5234). `SEP` is the token separator, `EOL` the line ending.
+The grammar uses ABNF, including `%s` for case-sensitive literals. `SEP` is
+the token separator and `EOL` is the line ending.
+[RFC 5234](https://www.rfc-editor.org/info/rfc5234) and
+[RFC 7405](https://www.rfc-editor.org/info/rfc7405).
 
 ```abnf
 otd-file     = *ignorable version *(ignorable / header-line)
@@ -197,8 +209,7 @@ OTD has two number forms, on purpose:
   one from a scaled integer.
   A writer SHOULD choose `time_unit` so that values need few digits, and
   SHOULD NOT write more fractional digits than the data is good for.
-- **`real`** — exponent allowed. Used in the header and in the `freq`
-  attribute, where there are few numbers and wide ranges.
+- **`real`** — exponent allowed. Used for numeric header fields.
 
 ## 4. Header
 
@@ -211,6 +222,7 @@ OTD has two number forms, on purpose:
 | `res_unit <real>` | Ohms per unit of resistance (`rise_res`, `fall_res`, `drive_rise`, `drive_fall`). MUST be positive. |
 | `slew_thresholds <low> <high>` | The percentages of the signal swing a slew is measured between. MUST satisfy `0 <= low < high <= 100`. |
 | `clock <name> <period> <rise_edge> <fall_edge> [attrs]` | A clock waveform, in `time_unit`. Clock names MUST be unique. |
+| `export_scope <key=value> ...` | Optional description of the export's object selection and data coverage (§4.2). |
 | `<key> <text>` | Any other key is a **free attribute**, kept verbatim. |
 
 A writer MUST write `time_unit` if the file contains any window, `res_unit`
@@ -228,7 +240,63 @@ Registered `clock` attributes:
 Conventional free attribute keys (a reader keeps them; none is required):
 `corner` (name of the analysis view or operating condition), `process`,
 `voltage`, `temperature`, `default_input_slew`, `divider`, `bus_delimiter`,
-`date`, `program`.
+`date`, `program`, [`writer_options`](#41-writer-options).
+
+### 4.1 Writer options
+
+`writer_options` is an optional free attribute for effective export settings
+that help explain the timing data. For example, a writer that rounds window
+and arc values to four fractional digits could emit:
+
+```text
+writer_options digits=4
+```
+
+Record the effective value of each setting you include, even when it came
+from a default. Use the existing header fields for settings they already
+describe, such as `corner` for the selected analysis view. Keep file paths
+and raw command invocations in run logs. Compression and timestamp options
+can be left out.
+
+The value is one line of producer-defined text in the file's ASCII character
+set. Readers preserve it as a free attribute. The defined header fields and
+timing records govern how readers interpret the timing data.
+
+### 4.2 Export scope
+
+`export_scope` is an optional header attribute that describes the coverage
+and deliberate omissions of the exported file. Its keys have the same
+meaning across producers. Use `writer_options` for effective settings
+specific to the producer (§4.1).
+
+```text
+export_scope views=nets,pins selection=windowed window_sites=net_driver,pin_sink slew=omitted arcs=extrema
+```
+
+Use the free header syntax in §3.4. The value MUST contain one or more
+`key=value` tokens separated by `SEP`. Each key MUST occur at most once. A
+list is comma-separated and MUST contain at least one value with no
+duplicates. Key order and list order carry no meaning.
+
+| Key | Values and meaning |
+| --- | --- |
+| `views` | A list drawn from `nets`, `pins`. Only the listed views are enabled. `nets` covers `n` groups. `pins` covers `i` groups and their `p` records, including top-level ports. An enabled view may have zero records. |
+| `selection` | `windowed` means every emitted net and pin has at least one emitted `w` record. The writer omits objects without emitted windows and instance groups left with no pins. |
+| `window_sites` | A list drawn from `net_driver`, `pin_driver`, `pin_sink`, or the single value `none`. Windows occur only at the listed sites. `net_driver` means a net window at the net's sole driver. `pin_driver` and `pin_sink` mean windows on pins or top-level ports acting as drivers and sinks, respectively. `none` means zero `w` records. When `views` is supplied, each listed site other than `none` MUST belong to an enabled view. |
+| `slew` | `omitted` means all four positional slew fields of every window are `-`. |
+| `arcs` | `none` means zero `a` records. `extrema` selects only numerical delay extrema. For each output edge of a window with `a` records, include `min_delay` and `max_delay` tags, which may occur on the same observation (§6.1). A window or edge can have zero observations. |
+
+Each key is optional. An absent key or unrecognized value leaves that
+policy unspecified. A reader can use a listed view or site to determine
+eligibility. The body records determine which objects and measurements are
+present. An absent object is unreported, and a `-` remains unspecified for
+its individual window field.
+
+A reader MAY preserve `export_scope` as opaque header text. A reader using
+the metadata MUST ignore unrecognized keys. If the reader detects malformed
+syntax or a conflict between claims or with the body, it MUST disregard the
+line when deciding scope. A tool that changes the export MUST update or
+remove scope claims it can no longer make.
 
 ## 5. Objects
 
@@ -277,11 +345,11 @@ switching event, consumers should treat them as two views of that event.
 
 ### 5.3 Names
 
-A name is a token of visible ASCII with no blanks. Names are written as they
-appear in the design's DEF. DEF backslash escapes are optional: a consumer
-MUST compare names with every backslash removed, so `n data[3] d` matches the
-DEF net `data\[3\]`. Because the instance and the pin are separate tokens, no
-hierarchy divider is needed to split a pin name.
+A name is a token of visible ASCII with no blanks. Use the design's instance,
+pin and net names. DEF backslash escapes are optional. A consumer MUST
+compare names with every backslash removed, so `n data[3] d` matches the DEF
+net `data\[3\]`. The instance and the pin are separate tokens, so splitting a
+pin name requires no hierarchy divider.
 
 ### 5.4 Roles
 
@@ -302,7 +370,6 @@ separately MUST apply this rule.
 | Attribute | Value | Meaning |
 | --- | --- | --- |
 | `clocks` | `index` list, comma-separated | **Clock domains**: the clocks that reach this object. Each index MUST name a declared clock. When absent, the object's domains are the clocks of its windows. |
-| `freq` | `real`, `>= 0` | Switching (toggle) frequency, in hertz. |
 | `load` | `range` | External capacitive load, in `cap_unit`. |
 | `value` | `0` or `1` | Logic value of a constant (`z`) object. |
 | `drive_rise`, `drive_fall` | `range` | Strength of whatever drives a top-level input port for the rising / falling transition, as a resistance in `res_unit`. |
@@ -331,8 +398,13 @@ w <clock> <edge> <role> <rise_early> <rise_late> <fall_early> <fall_late>
 | `rise_slew_min`, `rise_slew_max` | `value` | Fastest and slowest rising transition time. |
 | `fall_slew_min`, `fall_slew_max` | `value` | Fastest and slowest falling transition time. |
 
-A `value` of `-` means the quantity does not exist: the transition does not
-occur. Arrival times are relative to the time origin of the clock waveforms.
+In the eight arrival and slew fields, `-` means that the writer supplies no
+value for that field. For example, `rise_early=-` with `rise_late=0.150`
+reports a late rising bound only. Two `-` arrival bounds for one polarity
+leave its arrival time unspecified. Writers may use `-` for an unavailable
+or deliberately omitted measurement, or an absent transition.
+
+Arrival times are relative to the time origin of the clock waveforms.
 Windows describe driven transitions between logic levels. Writers MUST omit
 transitions into or out of high impedance. The `z` role denotes a constant
 logic value.
@@ -389,11 +461,12 @@ a r B f 0.040 tags=max_delay output_arrival=0.130
 
 ### 6.2 Sliding supply averaging (informative)
 
-For a positive arc delay `d`, step the end time `t` of the averaging interval over
-the output edge's early-to-late arrival window. At each step, average the
-driver's local `VDD - VSS` over `[t - d, t]`. The lowest average across the sampled
-steps and selected widths gives the largest measured compression for that
-sweep. Use the same time origin for the supply trace and the OTD window.
+When both arrival bounds are available for an output edge and its arc delay
+`d` is positive, step the end time `t` of the averaging interval over the
+early-to-late arrival window. At each step, average the driver's local
+`VDD - VSS` over `[t - d, t]`. The lowest average across the sampled steps
+and selected widths gives the largest measured compression for that sweep.
+Use the same time origin for the supply trace and the OTD window.
 
 The sweep evaluates possible placements of an interval. An observation with
 `output_arrival` also identifies a particular STA case. Minimum-delay observations
@@ -432,44 +505,27 @@ else may follow the positional fields.
 
 ### 9.1 Compression
 
-A `.otd.gz` file is the OTD text compressed with gzip (RFC 1952). It MAY
+A `.otd.gz` file is the OTD text compressed with gzip. It MAY
 consist of **several gzip members concatenated**; a reader MUST read all of
 them as one stream. A writer can therefore compress runs of groups
 independently, on separate threads, and append the members in any order (the
 header first, the `end` line last).
+[RFC 1952](https://www.rfc-editor.org/info/rfc1952).
 
-### 9.2 Why the format is fast
+### 9.2 Streaming and parallelism (informative)
 
-These are properties of the format, not of one implementation:
+Several format choices support streaming and parallel processing.
 
 | Property | Consequence |
 | --- | --- |
-| The first byte of a line is its record type | A reader that wants only roles dispatches on one byte and never converts a number on a `w` line. |
-| Groups are independent and unordered | A reader cuts the input at any line that starts with `n`, `i` or `e` and parses the pieces concurrently. A writer formats groups concurrently. |
-| No name table, offsets or forward references | A writer streams; a reader needs no second pass. |
+| Writers start each record with its type | A reader can classify a record before decoding its fields. |
+| Groups are independent and unordered | Readers and writers can process complete groups concurrently. |
+| No name table, offsets or references between body groups | A writer can stream groups and a reader can process them independently once it has the header. |
 | Counts are in a trailer, not the header | A streaming writer knows them only at the end, and that is where they go. Truncation is still detected. |
 | An instance name is written once for all its pins | Pin-based files are smaller, and a consumer does one instance lookup per group. |
 | Body numbers are fixed-point decimals | Validation is a byte scan; conversion needs no general float parser; a writer needs no shortest-representation float printer. |
 | 7-bit ASCII | No multi-byte decoding or validation. |
 | One declaration per object | No reconciliation pass over repeated records. |
-
-### 9.3 Measured
-
-Reference reader (`src/otd.rs`), AMD Ryzen 9 5900X (12 cores / 24 threads),
-on a synthetic 227 MB file: 1,000,000 nets, 1,000,000 pins in 250,000
-instance groups, 2,000,000 windows.
-
-| Operation | 24 threads | 1 thread |
-| --- | --- | --- |
-| Roles and domains of every object, plain file | 0.27 s (840 MB/s) | 0.84 s |
-| Same, gzip (56 MB, single member) | 0.38 s | — |
-| Every window to CSV | 0.22 s | 0.92 s |
-
-These time the native reader. Building Python dictionaries for the two million
-objects (`def_tools.otd.read_otd`) takes a further 1.6 s. An earlier,
-sequential reader of the pre-grouping grammar took 1.33 s on the equivalent
-file. Writers have not been benchmarked; `def_tools.otd.write_otd` is a
-convenience writer, not a fast one.
 
 ## 10. Errors
 
@@ -488,7 +544,7 @@ when:
    above it in its group, or an `a` line has no parent window on its object;
 8. a token after the positional fields is not `key=value`;
 9. a registered attribute is malformed: `clocks` names an undeclared clock,
-   `freq` is negative, `value` is not `0`/`1`, a `range` is not decimals,
+   `value` is not `0`/`1`, a `range` is not decimals,
    or a net driver pair violates §5.1;
 10. a `w` line names an undeclared clock, has an edge that does not fit its
     clock, has fewer than eight values, or a value that is neither a `decimal`
@@ -502,13 +558,15 @@ when:
 
 A reader MUST NOT repair or guess: a file that fails any check yields no data.
 
-## 11. Coverage
+## 11. Field lookup (informative)
 
-What timing-window files in the field carry, and where it lives in OTD:
+Timing data and its corresponding OTD fields.
 
 | Information | OTD |
 | --- | --- |
 | Design name, producing program, date | `design`, `program`, `date` |
+| Effective export settings | Optional `writer_options` header attribute (§4.1) |
+| Object selection, window placement, slew and arc coverage | Optional `export_scope` header attribute (§4.2) |
 | Time / capacitance / resistance scale | `time_unit`, `cap_unit`, `res_unit` |
 | Slew measurement thresholds | `slew_thresholds` |
 | Process, voltage, temperature, operating condition / view | `process`, `voltage`, `temperature`, `corner` (one corner per file) |
@@ -525,14 +583,13 @@ What timing-window files in the field carry, and where it lives in OTD:
 | Input pin, cell-arc delay extrema, and observed output arrival | `a` records within a window |
 | Min/max rise and fall source resistance | `rise_res=`, `fall_res=` |
 | Min/max rise and fall slack | `rise_slack=`, `fall_slack=` |
-| Absent transition / value | `-`, or the attribute is omitted |
+| Unavailable window field | `-` in that field. Optional attributes may be omitted. |
 | Clock vs data flag per record | window `<role>` |
 | Clock vs data per object (and constant / unconstrained) | object `<role>`, with the precedence rule |
 | Constant nets and their logic value | role `z` with `value=0` / `value=1` |
 | Input-port driver strength, per edge | `drive_rise=`, `drive_fall=` on a pin of instance `-` |
 | External load on a port or net | `load=` |
 | Clock domain per object | `clocks=`, or derived from the windows |
-| Switching frequency | `freq=` |
 | Anything tool-specific (statistical sigma, derates, ...) | prefixed `key=value` attributes and free header keys |
 
 ## Appendix A — Complete example (informative)
@@ -555,7 +612,7 @@ What timing-window files in the field carry, and where it lives in OTD:
 # Roles: c clock, d data, u unconstrained, z constant. Edges: r rise, f fall.
 # On w, - marks an absent launch clock, launch edge, or transition value.
 # Clock indices start at 0. Arrivals, slews, and delays use time_unit.
-# Common object attrs: clocks (indices), freq (Hz), load, value, drive_rise, drive_fall.
+# Common object attrs: clocks (indices), load, value, drive_rise, drive_fall.
 # Window attrs include rise_res, fall_res, rise_slack, and fall_slack.
 # A range uses min:max or one value for both bounds.
 # Arc tags min_delay and max_delay describe the extrema for the output edge.
@@ -568,9 +625,11 @@ res_unit 1e3
 slew_thresholds 10 90
 corner ss_0p72v_125c
 program my_sta 2026.11
+writer_options digits=4
+export_scope views=nets,pins window_sites=net_driver,pin_sink arcs=none
 clock clk 5 0 2.5 source=clk
 clock clk_div2 10 0 5 master=0 source=u_div/Q
-n clk_leaf_3 c clocks=0 driver_instance=u_core/u_icg driver_pin=GCK freq=2e8
+n clk_leaf_3 c clocks=0 driver_instance=u_core/u_icg driver_pin=GCK
 w 0 r c 0.582 0.598 0.313 0.344 0.045 0.064 0.063 0.064 rise_res=0.59:0.61
 n data_bus[3] d
 w 0 r d 1.20 3.75 1.18 3.80 0.05 0.11 0.05 0.12 rise_slack=0.31:0.37 fall_slack=0.29:0.36
@@ -589,77 +648,7 @@ end 3 5 4
 
 ## Appendix B — A binary form (informative; not part of OTD 1)
 
-A binary encoding was considered and is **not** specified in version 1.
-
-- *What it would buy.* The text reader already runs at about 0.8 GB/s, so
-  record framing is not the bottleneck. What text cannot avoid is
-  decimal-to-binary conversion for consumers of every window value, and, for
-  compressed files, single-stream gzip inflation.
-- *What it would cost.* A second format to specify, test and keep equivalent,
-  with none of goal 5 (readable, `grep`-able, diff-able).
-- *Recommendation.* If a binary form is added, it should not be a new
-  container. It should be a **columnar profile**: an Apache Parquet file with
-  one row per window (an object without windows contributes one row), the
-  header in the file's key-value metadata, and these columns —
-  `kind`, `instance`, `name`, `role`, `clocks`, `freq`, `load_min`,
-  `load_max`, `value`, `clock`, `edge`, `window_role`, the eight window values,
-  and the four ranges as `_min` / `_max` pairs. Dictionary encoding makes the
-  repeated object columns nearly free, row groups give parallel and partial
-  reads, and every analysis environment reads it without an OTD library.
-  `def-tools clock-data --report windows` already emits this table as CSV.
-
-Text remains the interchange form; a columnar profile would be a derived,
-lossless cache of it.
-
-## Appendix C — Use in `open-eda-file-tools` (informative)
-
-`def-tools instances --clock-data design.otd.gz --lib cells.lib` fills
-`is_clock` from the `c` objects:
-
-- A clock **net** marks the instances that *drive* it, including a divider
-  flip-flop whose output carries a generated clock.
-- A clock **pin** marks its instance through an output or a clock-through
-  input. Endpoint cells qualify through outputs only. The clock input of an
-  integrated clock gate qualifies.
-- An instance with several nets/pins is a clock cell when any one marks it.
-
-Pin-based files are recommended when available: they need no connectivity
-inference and they distinguish a gate's clock pin from its enable. Windows,
-domains and the other attributes are read and exposed but do not affect
-`is_clock`. See [def.md](def.md) for the options, exit codes and the plug-in
-backend seam.
-
-```python
-from def_tools.otd import OtdClock, OtdWindow, read_otd, write_otd
-
-write_otd(
-    "design.otd.gz",
-    design="top", time_unit=1e-9, cap_unit=1e-12, res_unit=1e3,
-    slew_thresholds=(10, 90),
-    attributes=[("corner", "ss_0p72v_125c")],
-    clocks=[OtdClock("clk", 5.0, 0.0, 2.5, (("source", "clk"),))],
-    nets={"clk_leaf_3": "c", "data_bus[3]": "d"},
-    pins={("u_core/u_icg", "CK"): "c", ("-", "clk"): "c"},
-    net_drivers={"clk_leaf_3": ("u_core/u_icg", "GCK")},
-    domains={"clk_leaf_3": [0]},
-    object_attributes={"clk_leaf_3": {"freq": "2e8"}},
-    windows={
-        "data_bus[3]": [
-            OtdWindow(0, "r", "d", (1.20, 3.75, 1.18, 3.80, 0.05, 0.11, 0.05, 0.12),
-                      rise_slack=(0.31, 0.37), fall_slack=(0.29, 0.36)),
-            OtdWindow(None, "-", "u", (0.40, 0.90, None, None, 0.05, 0.08, None, None)),
-        ],
-    },
-)
-otd = read_otd("design.otd.gz")   # header + per-object data; windows are counted, not loaded
-otd.nets                          # {"clk_leaf_3": "c", "data_bus[3]": "d"}
-otd.pins                          # {("u_core/u_icg", "CK"): "c", ("-", "clk"): "c"}
-otd.net_drivers                   # {"clk_leaf_3": ("u_core/u_icg", "GCK")}
-otd.domains                       # {"clk_leaf_3": (0,), "data_bus[3]": (0,)}  (second derived from its window)
-otd.domain_names("clk_leaf_3")    # ("clk",)
-otd.object_attributes             # {"clk_leaf_3": {"freq": "2e8"}}
-```
-
-`def-tools clock-data --source design.otd.gz --report windows` streams every
-window as CSV, including the resistance and slack ranges. The
-`object_attrs` column carries the driver pair when supplied.
+OTD 1 specifies an ASCII interchange file. An implementation can derive
+its own binary cache or columnar view for analysis. A future interoperable
+binary representation would need to define how it preserves the header,
+objects, windows, arc observations and extension attributes.

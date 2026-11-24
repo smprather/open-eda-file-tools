@@ -30,7 +30,7 @@ externally supplied data is explicit.
 | Arrival–slew correlation | STA | Early arrivals tend to come with fast slews. Independent min/max values lose the pairing. Could be a slew per histogram bin. |
 | Statistical arrival | STA | Mean and sigma from a statistical or variation-aware run. The parametric cousin of the histogram. |
 | Multicycle and phase | STA | Which cycle of the hyperperiod a window belongs to; a multicycle path does not launch every cycle. Comes from clock waveforms and timing exceptions. |
-| Switching probability per window | Activity | How often the object toggles on this clock edge. v1 has one `freq` per object. |
+| Switching probability per window | Activity | Needs an activity estimate for this clock edge. |
 | Rise/fall probability split | Activity | Windows already carry the edge; only the probability is new, and that is activity. |
 | Glitch count | Activity | Transitions per cycle before the net settles. STA sees multiple arrival times but cannot say how many transitions occur. |
 

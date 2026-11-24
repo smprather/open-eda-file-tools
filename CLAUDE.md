@@ -318,7 +318,7 @@ tests/gen/design_gen.py   synthetic LEF/DEF/SDC design generator
   A net's optional `driver_instance` and `driver_pin` pair names the driver
   in the design, including in a net-only OTD file.
 - **OTD body numbers are fixed-point decimals** (no exponent); `real` with an
-  exponent is allowed only in the header and `freq`. The reader validates
+  exponent is used for numeric header fields. The reader validates
   decimals by byte scan and never converts window values.
 - **The OTD `end <nets> <pins> <windows>` trailer is mandatory** and checked:
   no `end` means truncated, wrong counts or trailing records are errors.
