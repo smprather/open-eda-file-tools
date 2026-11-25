@@ -346,10 +346,10 @@ switching event, consumers should treat them as two views of that event.
 ### 5.3 Names
 
 A name is a token of visible ASCII with no blanks. Use the design's instance,
-pin and net names. DEF backslash escapes are optional. A consumer MUST
-compare names with every backslash removed, so `n data[3] d` matches the DEF
-net `data\[3\]`. The instance and the pin are separate tokens, so splitting a
-pin name requires no hierarchy divider.
+pin and net names. Backslash escapes are optional. A consumer MUST compare
+names with every backslash removed, so `n data[3] d` matches the design net
+`data\[3\]`. The instance and the pin are separate tokens, so splitting a pin
+name requires no hierarchy divider.
 
 ### 5.4 Roles
 
