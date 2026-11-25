@@ -235,23 +235,22 @@ def test_latch_accessors(seq_doc):
     assert seq_doc.cell("DFF").latch() is None
 
 
-# ---- real ASAP7 lib (skip if absent) --------------------------------------
+# ---- synthetic development library --------------------------------------
 @pytest.mark.skipif(not Path("dev.lib").exists(), reason="dev.lib not present")
 def test_dev_lib_accessors():
     idx = lt.LibraryIndex.open("dev.lib")
 
-    y = idx.cell("BUFx2_ASAP7_6t_R").pin("Y")
+    y = idx.cell("DevBuffer").pin("Y")
     function_expr = y.function_expr()
     assert function_expr is not None
     assert str(function_expr) == "A"
     assert function_expr.variables == ["A"]
 
-    dff = idx.cell("DFFHQNx1_ASAP7_6t_R")
+    dff = idx.cell("DevFlipFlop")
     ff = dff.ff()
     assert ff is not None
     assert ff.clocked_on_expr() == B("CLK")
-    # power_down_function uses bracketed PG-pin names; ensure `[ ]`-free names
-    # round-trip and minimize.
+    # Round-trip power-down expressions that reference supply pins.
     pdf = dff.pin("QN").power_down_function_expr()
     assert pdf == B("(!VDD) + (VSS)")
 

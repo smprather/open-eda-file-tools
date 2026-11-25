@@ -1,6 +1,7 @@
 # Test collateral
 
-This repository stores **no** design or reference files. Test inputs are
+The bundled `dev.lib` contains synthetic timing and power tables for the
+viewer. Larger design test inputs are
 generated on demand by `tests/gen/design_gen.py`. This document records
 what the generator is modelled on, so its fidelity can be re-checked
 without the original files.

@@ -55,7 +55,7 @@ def test_failed_viewer_open_can_retry(monkeypatch):
     assert server.get_data().doc.num_cells() == 2
 
 
-@pytest.mark.parametrize("name", ["BUFx2_ASAP7_6t_R", "DFFHQNx1_ASAP7_6t_R"])
+@pytest.mark.parametrize("name", ["DevBuffer", "DevFlipFlop"])
 def test_cell_tree_parses_once_without_fetching_table_payload(monkeypatch, name):
     data = LibertyData.load(str(DEV))
     cell = data.doc.cell
