@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use super::{
     expect_text, for_each_batch, load_lef_macros, parse_components_scaled, write_instance_csv_rows,
     write_instance_table_rows,
 };
-use crate::Error;
+use crate::{Error, input};
 
 type Bounds = [i64; 4];
 
@@ -45,13 +46,20 @@ struct Source {
     die: Option<Bounds>,
 }
 
+#[derive(PartialEq, Eq, Hash)]
+enum SourcePath {
+    Custom(OsString),
+    File(PathBuf),
+}
+
 /// Read a hierarchy with explicit `(LEF macro name, child DEF path)` mappings.
 ///
 /// Each referenced file is parsed once. Mapped blocks use their DEF `DIEAREA`
 /// bounding rectangle for their footprint. Its lower-left corner anchors the
 /// unrotated child. Other macros use LEF sizes. Coordinates are represented in
-/// the least common multiple of all input DBU scales. Plain and gzip input are
-/// supported. Only placed components take part in expansion.
+/// the least common multiple of all input DBU scales. Files use their canonical
+/// path as identity and custom streams use the original path spelling.
+/// Only placed components take part in expansion.
 pub fn read_def_hierarchy(
     top: &Path,
     lefs: &[PathBuf],
@@ -165,15 +173,25 @@ pub fn read_def_hierarchy(
 fn open_source(
     path: &Path,
     sources: &mut Vec<Source>,
-    paths: &mut HashMap<PathBuf, usize>,
+    paths: &mut HashMap<SourcePath, usize>,
 ) -> io::Result<usize> {
     let context = |err: io::Error| io::Error::new(err.kind(), format!("{}: {err}", path.display()));
-    let canonical = path.canonicalize().map_err(context)?;
-    if let Some(index) = paths.get(&canonical) {
+    let custom = SourcePath::Custom(path.as_os_str().to_os_string());
+    if let Some(index) = paths.get(&custom) {
         return Ok(*index);
     }
+    let (key, reader) = match input::open_custom(path).map_err(context)? {
+        Some(reader) => (custom, reader),
+        None => {
+            let key = SourcePath::File(path.canonicalize().map_err(context)?);
+            if let Some(index) = paths.get(&key) {
+                return Ok(*index);
+            }
+            (key, input::open_file(path).map_err(context)?)
+        }
+    };
     let mut die = None;
-    let (scanner, declared) = DefScanner::open(path, Some(&mut die)).map_err(context)?;
+    let (scanner, declared) = DefScanner::from_reader(reader, Some(&mut die)).map_err(context)?;
     if scanner.dbu_per_micron <= 0 {
         return Err(context(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -181,7 +199,7 @@ fn open_source(
         )));
     }
     let index = sources.len();
-    paths.insert(canonical, index);
+    paths.insert(key, index);
     sources.push(Source {
         path: path.to_path_buf(),
         scanner,

@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
+use super::layer::{LayerData, LayerDirection, LayerKind, LayerStack};
 use super::lexer::{Lexer, Token, open_input};
 
 // ---------------------------------------------------------------------------
@@ -151,7 +152,7 @@ pub struct SiteData {
     pub height: f64,
 }
 
-/// Cell macros and any collected sites from one or more LEF files.
+/// Cell macros and any collected sites and layers from one or more LEF files.
 #[derive(Debug, Default)]
 pub struct LibraryData {
     macros: Vec<Arc<MacroData>>,
@@ -159,6 +160,7 @@ pub struct LibraryData {
     pub(crate) duplicates: Vec<String>,
     sites: Vec<SiteData>,
     site_index: HashMap<String, usize>,
+    layer_stack: LayerStack,
 }
 
 impl LibraryData {
@@ -187,6 +189,17 @@ impl LibraryData {
     /// Look up a collected site by its case-sensitive LEF name.
     pub fn site_by_name(&self, name: &str) -> Option<&SiteData> {
         self.site_index.get(name).map(|&index| &self.sites[index])
+    }
+
+    /// Technology layers collected by the metadata reader, in first-seen order.
+    /// The first definition of each name supplies the layer's properties.
+    pub fn layers(&self) -> &[LayerData] {
+        &self.layer_stack.layers
+    }
+
+    /// Look up a collected layer by its case-sensitive LEF name.
+    pub fn layer(&self, name: &str) -> Option<&LayerData> {
+        self.layer_stack.get(name)
     }
 
     fn insert_site(&mut self, site: SiteData) {
@@ -379,6 +392,7 @@ fn parse_library_file(
 struct MetadataFile {
     macros: Vec<MacroData>,
     sites: Vec<SiteData>,
+    layers: Vec<LayerData>,
 }
 
 fn parse_metadata_file(path: &Path, mode: MacroMode) -> LefResult<MetadataFile> {
@@ -397,7 +411,11 @@ fn parse_metadata_file(path: &Path, mode: MacroMode) -> LefResult<MetadataFile> 
                     let name = group_name(&mut lexer, path, "SITE")?;
                     file.sites.push(parse_site_body(&mut lexer, path, name)?);
                 }
-                "LAYER" | "VIA" | "VIARULE" | "NONDEFAULTRULE" | "ARRAY" => {
+                "LAYER" => {
+                    let name = group_name(&mut lexer, path, "LAYER")?;
+                    file.layers.push(parse_layer_body(&mut lexer, path, name)?);
+                }
+                "VIA" | "VIARULE" | "NONDEFAULTRULE" | "ARRAY" => {
                     let name = group_name(&mut lexer, path, &token.text)?;
                     skip_named_metadata_group(&mut lexer, path, &token.text, Some(&name))?;
                 }
@@ -470,6 +488,99 @@ fn parse_site_body<R: Read>(
         width,
         height,
     })
+}
+
+fn parse_layer_body<R: Read>(
+    lexer: &mut LefLexer<R>,
+    path: &Path,
+    name: String,
+) -> LefResult<LayerData> {
+    let mut layer = LayerData::new(name);
+    let layer_name = layer.name.clone();
+    let ctx = || format!("{}: LAYER {layer_name} ", path.display());
+    loop {
+        let token = lexer.required(|| format!("{}missing END {layer_name}", ctx()))?;
+        let key = token.text.to_ascii_uppercase();
+        let missing = || format!("{}unterminated {key} statement", ctx());
+        match key.as_str() {
+            "END" => {
+                let end = lexer.required(|| format!("{}expected END {layer_name}", ctx()))?;
+                if end.text != layer_name {
+                    return value_error(format!(
+                        "{}expected END {layer_name}, got END {}",
+                        ctx(),
+                        end.text
+                    ));
+                }
+                return Ok(layer);
+            }
+            "TYPE" | "DIRECTION" => {
+                let value = lexer.required(missing)?;
+                if value.is_keyword(";") {
+                    return value_error(format!("{}missing {key} value", ctx()));
+                }
+                if key == "TYPE" {
+                    layer.kind = LayerKind::from_lef(value.text);
+                } else {
+                    layer.direction = LayerDirection::from_lef(&value.text);
+                }
+                lexer.consume_statement(missing)?;
+            }
+            "PITCH" | "OFFSET" => {
+                let x = parse_number(lexer, &ctx, &key)?;
+                let next = lexer.required(missing)?;
+                let y = if next.is_keyword(";") {
+                    x
+                } else {
+                    lexer.push(next);
+                    let y = parse_number(lexer, &ctx, &key)?;
+                    lexer.consume_statement(missing)?;
+                    y
+                };
+                if key == "PITCH" {
+                    (layer.pitch_x_um, layer.pitch_y_um) = (Some(x), Some(y));
+                } else {
+                    (layer.offset_x_um, layer.offset_y_um) = (Some(x), Some(y));
+                }
+            }
+            "WIDTH" | "MINWIDTH" | "THICKNESS" => {
+                let value = Some(parse_number(lexer, &ctx, &key)?);
+                match key.as_str() {
+                    "WIDTH" => layer.width_um = value,
+                    "MINWIDTH" => layer.min_width_um = value,
+                    _ => layer.thickness_um = value,
+                }
+                lexer.consume_statement(missing)?;
+            }
+            "SPACING" => {
+                let value = parse_number(lexer, &ctx, "SPACING")?;
+                if lexer.required(missing)?.is_keyword(";") {
+                    layer.spacing_um.get_or_insert(value);
+                } else {
+                    lexer.skip_statement(missing)?;
+                }
+            }
+            "RESISTANCE" => {
+                let suffix = lexer.required(missing)?;
+                if suffix.is_keyword("RPERSQ") {
+                    let value = lexer.required(missing)?;
+                    if value.is_keyword("PWL") {
+                        lexer.skip_statement(missing)?;
+                        continue;
+                    }
+                    lexer.push(value);
+                    layer.sheet_resistance = Some(parse_number(lexer, &ctx, "RESISTANCE RPERSQ")?);
+                } else {
+                    lexer.push(suffix);
+                    layer.cut_resistance = Some(parse_number(lexer, &ctx, "RESISTANCE")?);
+                }
+                lexer.consume_statement(missing)?;
+            }
+            "BEGINEXT" => lexer.skip_extension(missing)?,
+            ";" => (),
+            _ => lexer.skip_statement(missing)?,
+        }
+    }
 }
 
 /// Skip LEF technology sections. Recognize nested groups at statement
@@ -875,7 +986,20 @@ fn parse_number<R: Read, F: Fn() -> String>(
     ctx: &F,
     what: &str,
 ) -> LefResult<f64> {
-    let token = lexer.required(|| format!("{}expected {what}", ctx()))?;
+    let mut token = lexer.required(|| format!("{}expected {what}", ctx()))?;
+    // The shared lexer treats '+' as a DEF delimiter. In a LEF number it
+    // can also be an exponent sign adjacent to the mantissa's E.
+    if token.text.ends_with(['E', 'e'])
+        && let Some(exponent) = lexer.next()?
+    {
+        if exponent.offset == token.offset + token.text.len() as u64
+            && exponent.text.starts_with('+')
+        {
+            token.text.push_str(&exponent.text);
+        } else {
+            lexer.push(exponent);
+        }
+    }
     match token.text.parse::<f64>() {
         Ok(value) if value.is_finite() => Ok(value),
         _ => value_error(format!("{}invalid {what}: '{}'", ctx(), token.text)),
@@ -1047,14 +1171,16 @@ pub fn parse_cell_lef(paths: &[PathBuf]) -> Result<LibraryData, crate::Error> {
 }
 
 /// Read macro sizes, origins, classes and site names, plus top-level site
-/// dimensions, from plain or gzipped LEF files. All dimensions are in microns.
+/// dimensions and technology layers. All dimensions are in microns.
 ///
 /// With `include_pins`, collect pin names, directions and uses. Pin ports are
 /// empty. With `include_pins` set to `false`, skip the pin bodies.
 ///
 /// Files parse in parallel under the process-wide thread limit. The merge and
 /// error order follow `paths`; the last macro or site definition wins and
-/// keeps its first-seen position. An empty path list yields an empty library.
+/// keeps its first-seen position. The first declaration of each layer wins,
+/// and the layer stack follows declaration order. An empty path list yields
+/// an empty library.
 pub fn parse_cell_lef_metadata(
     paths: &[PathBuf],
     include_pins: bool,
@@ -1069,6 +1195,9 @@ pub fn parse_cell_lef_metadata(
         }
         for site in file.sites {
             library.insert_site(site);
+        }
+        for layer in file.layers {
+            library.layer_stack.insert(layer)?;
         }
     }
     Ok(library)

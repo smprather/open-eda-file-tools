@@ -608,10 +608,12 @@ if let Some(cell) = library.macro_by_name("BUF") {
 }
 let rows = def::scan_instance_bboxes_with_library(def_path, &library)?;
 
-// Read SIZE, ORIGIN, CLASS and SITE with pin directions and uses.
+// Read macro and site metadata, and the technology layer stack.
 // Pass false to skip pin bodies. Both modes skip pin-port geometry.
 let metadata = lef::parse_cell_lef_metadata(&lef_paths, true)?;
 let site = metadata.site_by_name("CoreSite");
+let stack: &[lef::LayerData] = metadata.layers();
+let metal = metadata.layer("met1");
 
 // Stream instance boxes and read just the regular nets in a HashSet<String>.
 // LEF sizes take precedence over the four-site DEF ROW marker.
@@ -670,6 +672,36 @@ let hist = pex::histogram(pex_path, 20, pex::SummaryMode::Stream)?;
 
 // CPU limit for every parallel reader (same as def_tools.set_threads):
 threads::set_threads(Some(4))?;   // Result<(), Error>; > 4096 is Error::Message
+```
+
+Pass the technology LEF before the cell LEFs to preserve bottom-to-top order.
+The first declaration of each case-sensitive layer name supplies its metadata.
+`stack_index` starts at zero across all layers. `routing_order` and `cut_order`
+count only their respective layer kinds. Layer dimensions are in microns. A
+single `PITCH` or `OFFSET` value applies to both axes. `spacing_um` contains the
+first unqualified `SPACING` value when present.
+
+Rust applications can register a custom opener before starting any readers.
+`input::set_stream_opener` accepts a boxed `input::StreamOpener`, a `Send + Sync`
+callback that receives `&Path` and returns `io::Result<Option<Box<dyn Read + Send>>>`.
+Return a fresh decoded stream for an application-owned format or a virtual path,
+`Ok(None)` to use the built-in plain/gzip reader, or an I/O error to stop the open.
+LEF, DEF, Liberty, SPEF/DSPF, and SDC use this callback for source inputs. It can
+run concurrently. A second registration returns `io::ErrorKind::AlreadyExists`.
+
+```rust
+use open_eda_file_tools_core::input;
+use std::io::{Cursor, Read};
+use std::path::Path;
+
+input::set_stream_opener(Box::new(|path| {
+    if path == Path::new("virtual/chip.def") {
+        let bytes = b"UNITS DISTANCE MICRONS 1000 ;\nEND DESIGN\n";
+        let reader: Box<dyn Read + Send> = Box::new(Cursor::new(bytes.as_slice()));
+        return Ok(Some(reader));
+    }
+    Ok(None)
+}))?;
 ```
 
 **Visibility tiers.** Only the items shown above (and the types they return or

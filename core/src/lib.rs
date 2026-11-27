@@ -12,7 +12,6 @@
 
 pub(crate) mod connectivity;
 pub mod def;
-#[doc(hidden)]
 pub mod input;
 pub mod lef;
 pub mod liberty;

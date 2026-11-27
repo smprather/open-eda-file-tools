@@ -9,7 +9,9 @@ use open_eda_file_tools_core::def::{
     ClockObjectResolution, MacroPinRole, SkippedRoutes, clock_object_instances, dbu_per_micron,
     scan_instance_bboxes, scan_instance_bboxes_with_library, scan_net_shapes,
 };
-use open_eda_file_tools_core::lef::{MacroSize, macro_sizes, parse_cell_lef};
+use open_eda_file_tools_core::lef::{
+    LayerDirection, LayerKind, MacroSize, macro_sizes, parse_cell_lef, parse_cell_lef_metadata,
+};
 use open_eda_file_tools_core::liberty::{
     CellAttributes, LibraryIndex, ParseLoadError, cell_attributes,
 };
@@ -195,6 +197,160 @@ fn test_macro_sizes_microns() {
         sizes.get("INV").map(|size| (size.width_um, size.height_um)),
         Some((1.2, 2.4))
     );
+}
+
+#[test]
+fn test_lef_layer_stack_keeps_first_declarations_and_per_kind_order() {
+    let tmp = temp_dir("lef_layers");
+    let tech = write(
+        &tmp,
+        "tech.lef",
+        r#"
+LAYER poly
+  TYPE MASTERSLICE ;
+END poly
+LAYER met1
+  TYPE ROUTING ;
+  DIRECTION HORIZONTAL ;
+  PITCH .2 ;
+  OFFSET .1 .15 ;
+  WIDTH .09 ;
+  MINWIDTH .07 ;
+  SPACING .27 ENDOFLINE .1 WITHIN .2 ;
+  SPACING .11 ;
+  RESISTANCE RPERSQ 1.3e-1 ;
+  THICKNESS .25 ;
+END met1
+LAYER via1
+  TYPE CUT ;
+  SPACING .13 ;
+  RESISTANCE 4.5 ;
+END via1
+NONDEFAULTRULE double_width
+  LAYER met1
+    WIDTH .18 ;
+  END met1
+END double_width
+END LIBRARY
+"#,
+    );
+    let cells = write(
+        &tmp,
+        "with-cells.lef",
+        r#"
+LAYER met1 TYPE ROUTING ; WIDTH 9 ; END met1
+LAYER implant TYPE IMPLANT ; END implant
+LAYER vendor TYPE VendorType ; END vendor
+LAYER met2 TYPE ROUTING ; DIRECTION DIAG135 ; PITCH .3 .4 ; OFFSET .02 ; END met2
+LAYER via2 TYPE CUT ; SPACING .18 ADJACENTCUTS 2 WITHIN .3 ; END via2
+LAYER overlap TYPE OVERLAP ; END overlap
+MACRO BUF SIZE 1 BY 2 ; END BUF
+END LIBRARY
+"#,
+    );
+
+    let library = parse_cell_lef_metadata(&[tech, cells], false).unwrap();
+    let stack: Vec<_> = library
+        .layers()
+        .iter()
+        .map(|layer| {
+            (
+                layer.name.as_str(),
+                layer.stack_index,
+                layer.routing_order,
+                layer.cut_order,
+            )
+        })
+        .collect();
+    assert_eq!(
+        stack,
+        [
+            ("poly", 0, None, None),
+            ("met1", 1, Some(0), None),
+            ("via1", 2, None, Some(0)),
+            ("implant", 3, None, None),
+            ("vendor", 4, None, None),
+            ("met2", 5, Some(1), None),
+            ("via2", 6, None, Some(1)),
+            ("overlap", 7, None, None),
+        ]
+    );
+    assert_eq!(library.layer("poly").unwrap().kind, LayerKind::Masterslice);
+    assert_eq!(library.layer("implant").unwrap().kind, LayerKind::Implant);
+    assert_eq!(library.layer("overlap").unwrap().kind, LayerKind::Overlap);
+    assert_eq!(
+        library.layer("vendor").unwrap().kind,
+        LayerKind::Other("VendorType".into())
+    );
+    let met1 = library.layer("met1").unwrap();
+    assert_eq!(met1.kind, LayerKind::Routing);
+    assert_eq!(met1.direction, Some(LayerDirection::Horizontal));
+    assert_eq!((met1.width_um, met1.min_width_um), (Some(0.09), Some(0.07)));
+    assert_eq!((met1.pitch_x_um, met1.pitch_y_um), (Some(0.2), Some(0.2)));
+    assert_eq!(
+        (met1.offset_x_um, met1.offset_y_um),
+        (Some(0.1), Some(0.15))
+    );
+    assert_eq!(
+        (met1.spacing_um, met1.thickness_um),
+        (Some(0.11), Some(0.25))
+    );
+    assert_eq!(
+        (met1.sheet_resistance, met1.cut_resistance),
+        (Some(0.13), None)
+    );
+    let via1 = library.layer("via1").unwrap();
+    assert_eq!(via1.kind, LayerKind::Cut);
+    assert_eq!(
+        (via1.spacing_um, via1.sheet_resistance, via1.cut_resistance),
+        (Some(0.13), None, Some(4.5))
+    );
+    let met2 = library.layer("met2").unwrap();
+    assert_eq!(met2.direction, Some(LayerDirection::Diag135));
+    assert_eq!((met2.pitch_x_um, met2.pitch_y_um), (Some(0.3), Some(0.4)));
+    assert_eq!(
+        (met2.offset_x_um, met2.offset_y_um),
+        (Some(0.02), Some(0.02))
+    );
+    assert_eq!(library.layer("via2").unwrap().spacing_um, None);
+    assert!(library.layer("MET1").is_none());
+    assert!(library.macro_by_name("BUF").is_some());
+    std::fs::remove_dir_all(tmp).unwrap();
+}
+
+#[test]
+fn test_lef_layer_scalar_accepts_positive_exponents() {
+    let tmp = temp_dir("lef_layer_exponent");
+    let lef = write(
+        &tmp,
+        "tech.lef",
+        "LAYER met1 TYPE ROUTING ; PITCH 1e+0 2e+0 ; RESISTANCE RPERSQ .13E+0 ; END met1",
+    );
+    let result = parse_cell_lef_metadata(&[lef], false);
+    std::fs::remove_dir_all(tmp).unwrap();
+    let library = result.unwrap();
+    let layer = library.layer("met1").unwrap();
+    assert_eq!((layer.pitch_x_um, layer.pitch_y_um), (Some(1.0), Some(2.0)));
+    assert_eq!(layer.sheet_resistance, Some(0.13));
+}
+
+#[test]
+fn test_lef_layer_skips_piecewise_resistance_and_keeps_following_metadata() {
+    let tmp = temp_dir("lef_layer_pwl");
+    let lef = write(
+        &tmp,
+        "tech.lef",
+        "LAYER met1 TYPE ROUTING ; RESISTANCE RPERSQ PWL ( ( 0.1 0.2 ) ( 1 0.3 ) ) ;\n\
+         THICKNESS .25 ; END met1\n\
+         MACRO BUF SIZE 1 BY 2 ; END BUF",
+    );
+    let result = parse_cell_lef_metadata(&[lef], false);
+    std::fs::remove_dir_all(tmp).unwrap();
+    let library = result.unwrap();
+    let layer = library.layer("met1").unwrap();
+    assert_eq!(layer.sheet_resistance, None);
+    assert_eq!(layer.thickness_um, Some(0.25));
+    assert!(library.macro_by_name("BUF").is_some());
 }
 
 #[test]

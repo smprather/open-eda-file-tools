@@ -3087,15 +3087,14 @@ pub struct DefScanner {
 
 impl DefScanner {
     pub fn from_path(path: &Path) -> io::Result<Self> {
-        Self::open(path, None).map(|(scanner, _)| scanner)
+        Self::from_reader(open_input(path)?, None).map(|(scanner, _)| scanner)
     }
 
-    fn open(
-        path: &Path,
+    fn from_reader(
+        input: Box<dyn Read + Send>,
         die_bounds: Option<&mut Option<[i64; 4]>>,
     ) -> io::Result<(Self, Option<usize>)> {
         let hierarchy = die_bounds.is_some();
-        let input = open_input(path)?;
         let mut lexer = Lexer::new(input);
         let (dbu_per_micron, found_components) = read_def_header(&mut lexer, die_bounds)?;
         if found_components {
