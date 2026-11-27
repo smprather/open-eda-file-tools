@@ -1,12 +1,12 @@
 # Test collateral
 
 The bundled `dev.lib` contains synthetic timing and power tables for the
-viewer. Larger design test inputs are
-generated on demand by `tests/gen/design_gen.py`. This document records
+viewer. Larger design test inputs are generated on demand by
+`tests/gen/design_gen.py`. This document records
 what the generator is modelled on, so its fidelity can be re-checked
 without the original files.
 
-## Why nothing is stored
+## Reference files
 
 | File | Size | Why it is not in the repo |
 |---|---|---|

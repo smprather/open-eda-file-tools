@@ -76,6 +76,30 @@ def test_cell_tree_parses_once_without_fetching_table_payload(monkeypatch, name)
     assert tree["children"]
 
 
+@pytest.mark.parametrize(
+    ("cell", "pin", "group", "tables", "shape", "dimensions"),
+    [
+        (
+            "DevBuffer",
+            "Y",
+            "timing",
+            ("cell_rise", "cell_fall", "rise_transition", "fall_transition"),
+            (2, 2),
+            2,
+        ),
+        ("DevFlipFlop", "QN", "timing", ("cell_rise", "cell_fall"), (2, 2), 2),
+        ("DevBuffer", "Y", "power", ("rise_power", "fall_power"), (2, 0), 1),
+    ],
+)
+def test_dev_fixture_tables_have_plot_axes(cell, pin, group, tables, shape, dimensions):
+    data = LibertyData.load(str(DEV))
+    for table in tables:
+        payload = data.table(cell, pin, group, 0, table)
+        assert payload["ndim"] == dimensions
+        assert (len(payload["index_1"]), len(payload["index_2"])) == shape
+        assert payload["scalar"] is None
+
+
 def test_bus_power_tree_collapses_only_compatible_siblings(tmp_path):
     source = """library (t) {
       voltage_unit : "1V"; current_unit : "1mA"; time_unit : "1ps";
